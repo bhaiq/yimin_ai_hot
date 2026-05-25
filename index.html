@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>移民热点 · Immigration Hot</title>
+    <meta
+      name="description"
+      content="移民政策、排期、项目和签证动态的中文热点信息流。"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="主导航">
+        <a class="brand" href="#home" aria-label="移民热点首页">
+          <span class="brand-mark">移</span>
+          <span>
+            <strong>移民热点</strong>
+            <small>Immigration Hot</small>
+          </span>
+        </a>
+
+        <nav class="nav-group" data-nav>
+          <button class="nav-item active" data-view="home" type="button">
+            <span class="nav-icon">⌁</span>
+            <span>精选热点</span>
+          </button>
+          <button class="nav-item" data-view="all" type="button">
+            <span class="nav-icon">▦</span>
+            <span>全部动态</span>
+          </button>
+          <button class="nav-item" data-view="daily" type="button">
+            <span class="nav-icon">◷</span>
+            <span>移民日报</span>
+          </button>
+          <button class="nav-item" data-view="radar" type="button">
+            <span class="nav-icon">◎</span>
+            <span>政策雷达</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-section">
+          <p class="section-label">工具</p>
+          <nav class="nav-group compact" data-nav>
+            <button class="nav-item" data-view="sources" type="button">
+              <span class="nav-icon">＋</span>
+              <span>信源提报</span>
+            </button>
+            <button class="nav-item" data-view="about" type="button">
+              <span class="nav-icon">?</span>
+              <span>关于本站</span>
+            </button>
+            <button class="nav-item" data-view="changelog" type="button">
+              <span class="nav-icon">↻</span>
+              <span>更新日志</span>
+            </button>
+            <button class="nav-item" data-view="feedback" type="button">
+              <span class="nav-icon">✎</span>
+              <span>反馈建议</span>
+            </button>
+          </nav>
+        </div>
+
+        <div class="source-card">
+          <span class="pulse" aria-hidden="true"></span>
+          <div>
+            <strong>今日监测</strong>
+            <small id="monitorStatus">演示数据 · 启动服务后自动抓取</small>
+          </div>
+        </div>
+      </aside>
+
+      <header class="mobile-header">
+        <a class="brand compact-brand" href="#home">
+          <span class="brand-mark">移</span>
+          <strong>移民热点</strong>
+        </a>
+        <button class="icon-button" id="menuToggle" type="button" aria-label="展开导航">
+          ☰
+        </button>
+      </header>
+
+      <main class="main-content">
+        <section class="toolbar" aria-label="筛选工具">
+          <div class="search-wrap">
+            <span aria-hidden="true">⌕</span>
+            <input
+              id="searchInput"
+              type="search"
+              placeholder="搜索国家、项目、签证、机构..."
+              autocomplete="off"
+            />
+          </div>
+          <div class="filter-strip" id="filterStrip" aria-label="热点分类"></div>
+          <button class="refresh-button" id="refreshNews" type="button">刷新</button>
+        </section>
+
+        <section class="view active" id="view-home" aria-labelledby="homeTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">精选热点</p>
+              <h1 id="homeTitle">今天值得移民顾问先看的动态</h1>
+            </div>
+            <time id="todayDate" datetime=""></time>
+          </div>
+
+          <div class="lead-grid">
+            <div class="lead-story" id="leadStory">正在加载...</div>
+
+            <aside class="brief-panel" aria-label="今日摘要">
+              <h2>今日速览</h2>
+              <div class="brief-stat">
+                <strong id="statHigh">0</strong>
+                <span>条高优先级</span>
+              </div>
+              <div class="brief-stat">
+                <strong id="statCountries">0</strong>
+                <span>个国家/地区</span>
+              </div>
+              <div class="brief-stat">
+                <strong id="statCategories">0</strong>
+                <span>类客户影响</span>
+              </div>
+            </aside>
+          </div>
+
+          <div class="content-layout">
+            <section>
+              <div class="subhead">
+                <h2>实时热点</h2>
+                <span id="homeCount">0 条</span>
+              </div>
+              <div class="feed-list" id="featuredFeed"></div>
+            </section>
+
+            <aside class="side-panel">
+              <h2>项目快照</h2>
+              <div class="snapshot-list" id="snapshotList"></div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="view" id="view-all" aria-labelledby="allTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">全部动态</p>
+              <h1 id="allTitle">移民热点时间线</h1>
+            </div>
+            <span class="muted" id="allCount">0 条</span>
+          </div>
+          <div class="feed-list compact-feed" id="allFeed"></div>
+        </section>
+
+        <section class="view" id="view-daily" aria-labelledby="dailyTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">移民日报</p>
+              <h1 id="dailyTitle">今日政策简报</h1>
+            </div>
+            <button class="ghost-button" id="copyDaily" type="button">复制日报</button>
+          </div>
+          <article class="daily-report" id="dailyReport"></article>
+        </section>
+
+        <section class="view" id="view-radar" aria-labelledby="radarTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">政策雷达</p>
+              <h1 id="radarTitle">项目经理关注面板</h1>
+            </div>
+          </div>
+          <div class="radar-grid" id="radarGrid"></div>
+        </section>
+
+        <section class="view utility-view" id="view-sources" aria-labelledby="sourcesTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">信源提报</p>
+              <h1 id="sourcesTitle">补充你正在跟踪的信息源</h1>
+            </div>
+          </div>
+          <form class="form-panel" id="sourceForm">
+            <label>
+              <span>信源名称</span>
+              <input name="name" placeholder="例如 USCIS Newsroom" required />
+            </label>
+            <label>
+              <span>链接</span>
+              <input name="url" type="url" placeholder="https://..." required />
+            </label>
+            <label>
+              <span>国家/主题</span>
+              <input name="topic" placeholder="美国 EB-5 / 加拿大 EE / 澳大利亚签证" />
+            </label>
+            <button class="primary-button" type="submit">保存到本地草稿</button>
+            <p class="form-note" id="sourceNote">草稿仅保存在当前浏览器。</p>
+          </form>
+          <div class="source-health" id="sourceHealth"></div>
+        </section>
+
+        <section class="view utility-view" id="view-about" aria-labelledby="aboutTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">关于</p>
+              <h1 id="aboutTitle">为移民团队设计的热点工作台</h1>
+            </div>
+          </div>
+          <div class="prose-panel">
+            <p>
+              第二版把第一版“项目日报、历史日报、信息快照”的能力产品化：左侧导航、深色信息流、热度排序、日报摘要和政策雷达都向参考站的信息密度靠拢。
+            </p>
+            <p>
+              当前版本已经支持本地实时 RSS 抓取服务；如果直接打开静态 HTML，会自动回退到演示数据。后续可以继续接回第一版的数据库和 AI 摘要服务。
+            </p>
+          </div>
+        </section>
+
+        <section class="view utility-view" id="view-changelog" aria-labelledby="changeTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">更新日志</p>
+              <h1 id="changeTitle">V2 原型记录</h1>
+            </div>
+          </div>
+          <div class="timeline">
+            <article>
+              <time>2026.05.23</time>
+              <h2>实时 RSS 抓取</h2>
+              <p>新增本地 Node 服务、实时信源 API、前端自动刷新和信源健康状态。</p>
+            </article>
+            <article>
+              <time>2026.05.23</time>
+              <h2>第二版信息流原型</h2>
+              <p>新增热点流、全部动态、日报、政策雷达、信源提报和反馈入口。</p>
+            </article>
+            <article>
+              <time>第一版沉淀</time>
+              <h2>日报与快照框架</h2>
+              <p>保留项目化、多信源和 AI 摘要的产品方向，作为后续接入后端的基础。</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="view utility-view" id="view-feedback" aria-labelledby="feedbackTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">反馈</p>
+              <h1 id="feedbackTitle">记录团队意见</h1>
+            </div>
+          </div>
+          <form class="form-panel" id="feedbackForm">
+            <label>
+              <span>反馈类型</span>
+              <select name="type">
+                <option>内容准确性</option>
+                <option>信息源补充</option>
+                <option>页面体验</option>
+                <option>业务流程</option>
+              </select>
+            </label>
+            <label>
+              <span>说明</span>
+              <textarea name="message" rows="5" placeholder="写下需要调整的地方"></textarea>
+            </label>
+            <button class="primary-button" type="submit">保存反馈</button>
+            <p class="form-note" id="feedbackNote">反馈仅保存在当前浏览器。</p>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

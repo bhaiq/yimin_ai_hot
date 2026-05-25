@@ -1,0 +1,75 @@
+[
+  {
+    "name": "USCIS 官方新闻",
+    "url": "https://www.uscis.gov/news/rss-feed/59144",
+    "country": "美国",
+    "category": "官方机构",
+    "priority": 92
+  },
+  {
+    "name": "EB5 Investors Magazine",
+    "url": "https://www.eb5investors.com/feed/",
+    "country": "美国",
+    "category": "EB-5",
+    "priority": 88
+  },
+  {
+    "name": "IIUSA 行业协会",
+    "url": "https://iiusa.org/blog/feed/",
+    "country": "美国",
+    "category": "EB-5",
+    "priority": 84
+  },
+  {
+    "name": "Canada IRCC News",
+    "url": "https://api.io.canada.ca/io-server/gc/news/en/v2?dept=departmentofcitizenshipandimmigration&type=newsreleases&sort=publishedDate&orderBy=desc&publishedDate%3E=2020-08-09&pick=100&format=atom&atomtitle=Canada%20News%20Centre%20-%20Immigration%2C%20Refugees%20and%20Citizenship%20Canada",
+    "country": "加拿大",
+    "category": "官方机构",
+    "priority": 90
+  },
+  {
+    "name": "UK Visas and Immigration",
+    "url": "https://www.gov.uk/government/organisations/uk-visas-and-immigration.atom",
+    "country": "英国",
+    "category": "官方机构",
+    "priority": 82
+  },
+  {
+    "name": "USCIS Twitter",
+    "url": "https://twitter.com/uscis",
+    "country": "美国",
+    "category": "官方机构",
+    "priority": 88,
+    "type": "twitter"
+  },
+  {
+    "name": "Canada Border Services Agency",
+    "url": "https://www.cbsa-asfc.gc.ca/menu-eng.html",
+    "country": "加拿大",
+    "category": "官方机构",
+    "priority": 78,
+    "type": "html",
+    "fields": {
+      "container": "li",
+      "title": "a",
+      "link": "a @href",
+      "summary": "p",
+      "time": "span.date"
+    }
+  },
+  {
+    "name": "Visa Bulletin API",
+    "url": "https://travel.state.gov/content/travel/en/legal/visa-law0/visa-bulletins/jcr:content/par-components/visaBulletin.json",
+    "country": "美国",
+    "category": "排期",
+    "priority": 90,
+    "type": "json",
+    "fields": {
+      "list": "data",
+      "title": "title",
+      "link": "url",
+      "summary": "description",
+      "time": "pubDate"
+    }
+  }
+]
