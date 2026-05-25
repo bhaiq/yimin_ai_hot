@@ -752,12 +752,14 @@ function updateAuthUI() {
     authSection.style.display = "";
     loginBtn.classList.add("hidden");
     userArea.classList.remove("hidden");
+    refreshNews.hidden = false;
     document.querySelector("#userName").textContent = state.user.username;
     document.querySelector("#userAvatar").textContent = state.user.username.charAt(0).toUpperCase();
   } else {
     authSection.style.display = "none";
     loginBtn.classList.remove("hidden");
     userArea.classList.add("hidden");
+    refreshNews.hidden = true;
   }
 }
 
