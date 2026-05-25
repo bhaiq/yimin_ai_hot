@@ -2,14 +2,14 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 
 const rootDir = resolve(".");
 await loadEnv();
 
 const port = Number(process.env.PORT || 4173);
-const host = process.env.HOST || "127.0.0.1";
+const host = process.env.HOST || "0.0.0.0";
 const cacheTtlMs = Number(process.env.CACHE_TTL_MS || 10 * 60 * 1000);
 const requestTimeoutMs = Number(process.env.FEED_TIMEOUT_MS || 9000);
 const maxItemsPerSource = Number(process.env.MAX_ITEMS_PER_SOURCE || 16);
@@ -27,6 +27,11 @@ const deepseekConfig = {
   baseUrl: process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com/v1",
   model: process.env.DEEPSEEK_MODEL || "deepseek-chat",
 };
+const authConfig = {
+  user: process.env.AUTH_USER || "admin",
+  pass: process.env.AUTH_PASS || "admin123",
+};
+const sessions = new Map();
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -199,88 +204,88 @@ async function initDb() {
       );
 
       await mysqlExec(`
-        CREATE TABLE IF NOT EXISTS sources (
-          id BIGINT AUTO_INCREMENT PRIMARY KEY,
-          name VARCHAR(160) NOT NULL,
-          url VARCHAR(1200) NOT NULL,
-          country VARCHAR(80) NOT NULL,
-          category VARCHAR(120) NOT NULL,
-          priority INT NOT NULL DEFAULT 70,
-          enabled TINYINT(1) NOT NULL DEFAULT 1,
-          last_fetched_at DATETIME NULL,
-          last_fetch_error TEXT NULL,
-          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CREATE TABLE IF NOT EXISTS yimin_sources (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          name VARCHAR(160) NOT NULL COMMENT '来源名称',
+          url VARCHAR(1200) NOT NULL COMMENT 'RSS 订阅地址',
+          country VARCHAR(80) NOT NULL COMMENT '所属国家/地区',
+          category VARCHAR(120) NOT NULL COMMENT '分类（如政策、签证、生活等）',
+          priority INT NOT NULL DEFAULT 70 COMMENT '优先级 0-100，越高越重要',
+          enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用（1=启用 0=禁用）',
+          last_fetched_at DATETIME NULL COMMENT '最后一次抓取时间',
+          last_fetch_error TEXT NULL COMMENT '最后一次抓取错误信息',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
           UNIQUE KEY uk_sources_url (url(768)),
           INDEX idx_sources_enabled (enabled),
           INDEX idx_sources_country (country)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='RSS 信息来源配置表';
 
-        CREATE TABLE IF NOT EXISTS articles (
-          id BIGINT AUTO_INCREMENT PRIMARY KEY,
-          source_id BIGINT NOT NULL,
-          dedupe_hash CHAR(40) NOT NULL,
-          title VARCHAR(600) NOT NULL,
-          summary TEXT NULL,
-          url VARCHAR(1400) NULL,
-          country VARCHAR(80) NOT NULL,
-          category VARCHAR(120) NOT NULL,
-          tags_json JSON NULL,
-          image VARCHAR(1000) NULL,
-          heat INT NOT NULL DEFAULT 60,
-          impact VARCHAR(40) NOT NULL DEFAULT '中影响',
-          published_at DATETIME NULL,
-          fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          raw_json JSON NULL,
-          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CREATE TABLE IF NOT EXISTS yimin_articles (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          source_id BIGINT NOT NULL COMMENT '来源 ID，关联 sources 表',
+          dedupe_hash CHAR(40) NOT NULL COMMENT '去重哈希（SHA1），防止重复入库',
+          title VARCHAR(600) NOT NULL COMMENT '文章标题',
+          summary TEXT NULL COMMENT '文章摘要',
+          url VARCHAR(1400) NULL COMMENT '文章原文链接',
+          country VARCHAR(80) NOT NULL COMMENT '所属国家/地区',
+          category VARCHAR(120) NOT NULL COMMENT '分类（如政策、签证、生活等）',
+          tags_json JSON NULL COMMENT '标签列表，JSON 数组格式',
+          image VARCHAR(1000) NULL COMMENT '文章配图 URL',
+          heat INT NOT NULL DEFAULT 60 COMMENT '热度评分 0-100',
+          impact VARCHAR(40) NOT NULL DEFAULT '中影响' COMMENT '影响力等级（高影响/中影响/低影响）',
+          published_at DATETIME NULL COMMENT '文章发布时间',
+          fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '抓取入库时间',
+          raw_json JSON NULL COMMENT '原始 RSS 条目 JSON 数据',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
           UNIQUE KEY uk_articles_hash (dedupe_hash),
           INDEX idx_articles_published (published_at),
           INDEX idx_articles_heat (heat),
           INDEX idx_articles_country (country),
-          CONSTRAINT fk_articles_source FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+          CONSTRAINT fk_articles_source FOREIGN KEY (source_id) REFERENCES yimin_sources(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='新闻文章表';
 
-        CREATE TABLE IF NOT EXISTS fetch_runs (
-          id BIGINT AUTO_INCREMENT PRIMARY KEY,
-          started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          finished_at DATETIME NULL,
-          status ENUM('running','completed','failed') NOT NULL DEFAULT 'running',
-          source_count INT NOT NULL DEFAULT 0,
-          item_count INT NOT NULL DEFAULT 0,
-          error TEXT NULL
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        CREATE TABLE IF NOT EXISTS yimin_fetch_runs (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '抓取开始时间',
+          finished_at DATETIME NULL COMMENT '抓取完成时间',
+          status ENUM('running','completed','failed') NOT NULL DEFAULT 'running' COMMENT '运行状态（running=进行中 completed=完成 failed=失败）',
+          source_count INT NOT NULL DEFAULT 0 COMMENT '本轮抓取的来源数量',
+          item_count INT NOT NULL DEFAULT 0 COMMENT '本轮抓取的文章数量',
+          error TEXT NULL COMMENT '错误信息'
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='RSS 抓取运行记录表';
 
-        CREATE TABLE IF NOT EXISTS daily_reports (
-          id BIGINT AUTO_INCREMENT PRIMARY KEY,
-          report_date DATE NOT NULL,
-          title VARCHAR(200) NOT NULL,
-          content_markdown LONGTEXT NOT NULL,
-          content_html LONGTEXT NOT NULL,
-          source_item_count INT NOT NULL DEFAULT 0,
-          model VARCHAR(120) NULL,
-          generated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-          UNIQUE KEY uk_daily_reports_date (report_date)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        CREATE TABLE IF NOT EXISTS yimin_daily_reports (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          report_date DATE NOT NULL COMMENT '报告日期',
+          title VARCHAR(200) NOT NULL COMMENT '报告标题',
+          content_markdown LONGTEXT NOT NULL COMMENT '报告 Markdown 原文',
+          content_html LONGTEXT NOT NULL COMMENT '报告 HTML 内容',
+          source_item_count INT NOT NULL DEFAULT 0 COMMENT '本日报引用的文章数量',
+          model VARCHAR(120) NULL COMMENT '生成报告所用的 AI 模型名称',
+          generated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '报告生成时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_yimin_daily_reports_date (report_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI 每日移民报告表';
 
-        CREATE TABLE IF NOT EXISTS source_submissions (
-          id BIGINT AUTO_INCREMENT PRIMARY KEY,
-          name VARCHAR(160) NOT NULL,
-          url VARCHAR(1200) NOT NULL,
-          topic VARCHAR(200) NULL,
-          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          status ENUM('pending','accepted','rejected') NOT NULL DEFAULT 'pending',
-          INDEX idx_source_submissions_status (status)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        CREATE TABLE IF NOT EXISTS yimin_source_submissions (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          name VARCHAR(160) NOT NULL COMMENT '提交的来源名称',
+          url VARCHAR(1200) NOT NULL COMMENT '提交的 RSS 地址',
+          topic VARCHAR(200) NULL COMMENT '相关主题描述',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '提交时间',
+          status ENUM('pending','accepted','rejected') NOT NULL DEFAULT 'pending' COMMENT '审核状态（pending=待审核 accepted=已采纳 rejected=已拒绝）',
+          INDEX idx_yimin_source_submissions_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户提交的信息来源表';
 
-        CREATE TABLE IF NOT EXISTS feedback (
-          id BIGINT AUTO_INCREMENT PRIMARY KEY,
-          type VARCHAR(120) NOT NULL,
-          message TEXT NULL,
-          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        CREATE TABLE IF NOT EXISTS yimin_feedback (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          type VARCHAR(120) NOT NULL COMMENT '反馈类型（如建议、Bug、投诉等）',
+          message TEXT NULL COMMENT '反馈内容',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '反馈时间'
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户反馈表';
       `);
 
       await seedConfiguredSources();
@@ -299,7 +304,7 @@ async function seedConfiguredSources() {
 
 async function upsertSource(source, { enabled = true } = {}) {
   await mysqlExec(`
-    INSERT INTO sources (name, url, country, category, priority, enabled)
+    INSERT INTO yimin_sources (name, url, country, category, priority, enabled)
     VALUES (
       ${sqlString(source.name)},
       ${sqlString(source.url)},
@@ -319,7 +324,7 @@ async function upsertSource(source, { enabled = true } = {}) {
 
   const row = await mysqlJson(`
     SELECT JSON_OBJECT('id', id)
-    FROM sources
+    FROM yimin_sources
     WHERE url = ${sqlString(source.url)}
     LIMIT 1;
   `);
@@ -329,7 +334,7 @@ async function upsertSource(source, { enabled = true } = {}) {
 
 async function updateSourceFetchStatus(sourceId, error = null) {
   await mysqlExec(`
-    UPDATE sources
+    UPDATE yimin_sources
     SET last_fetched_at = CURRENT_TIMESTAMP,
         last_fetch_error = ${sqlString(error)}
     WHERE id = ${sqlNumber(sourceId)};
@@ -338,7 +343,7 @@ async function updateSourceFetchStatus(sourceId, error = null) {
 
 async function createFetchRun(sourceCount) {
   const row = await mysqlJson(`
-    INSERT INTO fetch_runs (source_count)
+    INSERT INTO yimin_fetch_runs (source_count)
     VALUES (${sqlNumber(sourceCount)});
     SELECT JSON_OBJECT('id', LAST_INSERT_ID());
   `);
@@ -347,7 +352,7 @@ async function createFetchRun(sourceCount) {
 
 async function finishFetchRun(runId, { status, itemCount, error = null }) {
   await mysqlExec(`
-    UPDATE fetch_runs
+    UPDATE yimin_fetch_runs
     SET status = ${sqlString(status)},
         item_count = ${sqlNumber(itemCount)},
         error = ${sqlString(error)},
@@ -361,7 +366,7 @@ async function upsertArticle(item, sourceId) {
   const tagsJson = JSON.stringify(item.tags || []);
 
   await mysqlExec(`
-    INSERT INTO articles (
+    INSERT INTO yimin_articles (
       source_id, dedupe_hash, title, summary, url, country, category,
       tags_json, image, heat, impact, published_at, raw_json
     )
@@ -420,8 +425,8 @@ async function listArticlesFromDb(limit = maxTotalItems) {
       ), JSON_ARRAY())
       FROM (
         SELECT a.*, s.name AS source_name
-        FROM articles a
-        JOIN sources s ON s.id = a.source_id
+        FROM yimin_articles a
+        JOIN yimin_sources s ON s.id = a.source_id
         ORDER BY a.heat DESC, COALESCE(a.published_at, a.fetched_at) DESC, a.id DESC
         LIMIT ${sqlNumber(limit, maxTotalItems)}
       ) ranked;
@@ -444,8 +449,8 @@ async function listSourceStatusesFromDb() {
       ), JSON_ARRAY())
       FROM (
         SELECT s.*,
-          (SELECT COUNT(*) FROM articles a WHERE a.source_id = s.id) AS article_count
-        FROM sources s
+          (SELECT COUNT(*) FROM yimin_articles a WHERE a.source_id = s.id) AS article_count
+        FROM yimin_sources s
         WHERE s.enabled = 1
         ORDER BY s.id
       ) source_rows;
@@ -456,7 +461,7 @@ async function listSourceStatusesFromDb() {
 async function saveSourceSubmission(data) {
   await initDb();
   await mysqlExec(`
-    INSERT INTO source_submissions (name, url, topic)
+    INSERT INTO yimin_source_submissions (name, url, topic)
     VALUES (
       ${sqlString(data.name)},
       ${sqlString(data.url)},
@@ -479,7 +484,7 @@ async function saveSourceSubmission(data) {
 async function saveFeedback(data) {
   await initDb();
   await mysqlExec(`
-    INSERT INTO feedback (type, message)
+    INSERT INTO yimin_feedback (type, message)
     VALUES (${sqlString(data.type || "页面反馈")}, ${sqlString(data.message || "")});
   `);
 }
@@ -1285,7 +1290,7 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false } = {}
         'model', model,
         'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s.000Z')
       )
-      FROM daily_reports
+      FROM yimin_daily_reports
       WHERE report_date = ${sqlString(date)}
       LIMIT 1;
     `);
@@ -1318,7 +1323,7 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false } = {}
   const html = markdownToHtml(markdown);
 
   await mysqlExec(`
-    INSERT INTO daily_reports (
+    INSERT INTO yimin_daily_reports (
       report_date, title, content_markdown, content_html, source_item_count, model, generated_at
     )
     VALUES (
@@ -1369,9 +1374,27 @@ async function serveStatic(req, res) {
 
   res.writeHead(200, {
     "content-type": contentType,
-    "cache-control": ext === ".html" ? "no-store" : "public, max-age=60",
+    "cache-control": "no-store",
   });
   res.end(body);
+}
+
+function parseCookies(req) {
+  const header = req.headers.cookie || "";
+  const cookies = {};
+  header.split(";").forEach((pair) => {
+    const [k, ...v] = pair.split("=");
+    cookies[k.trim()] = v.join("=").trim();
+  });
+  return cookies;
+}
+
+function requireAuth(req) {
+  const cookies = parseCookies(req);
+  const token = cookies.token;
+  if (!token) return null;
+  const session = sessions.get(token);
+  return session || null;
 }
 
 async function readJsonBody(req) {
@@ -1404,6 +1427,42 @@ const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
+    if (url.pathname === "/api/login" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      if (body.username !== authConfig.user || body.password !== authConfig.pass) {
+        sendJson(res, 401, { ok: false, error: "用户名或密码错误" });
+        return;
+      }
+      const token = randomBytes(32).toString("hex");
+      sessions.set(token, { username: body.username, createdAt: Date.now() });
+      res.writeHead(200, {
+        "content-type": "application/json; charset=utf-8",
+        "set-cookie": `token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${7 * 24 * 3600}`,
+      });
+      res.end(JSON.stringify({ ok: true, username: body.username }));
+      return;
+    }
+
+    if (url.pathname === "/api/logout" && req.method === "POST") {
+      const cookies = parseCookies(req);
+      if (cookies.token) sessions.delete(cookies.token);
+      res.writeHead(200, {
+        "content-type": "application/json; charset=utf-8",
+        "set-cookie": "token=; Path=/; HttpOnly; Max-Age=0",
+      });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
+    if (url.pathname === "/api/me") {
+      const session = requireAuth(req);
+      sendJson(res, 200, {
+        loggedIn: !!session,
+        username: session ? session.username : null,
+      });
+      return;
+    }
+
     if (url.pathname === "/api/health") {
       await initDb();
       sendJson(res, 200, {
@@ -1418,6 +1477,10 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/api/sources") {
       await initDb();
       if (req.method === "POST") {
+        if (!requireAuth(req)) {
+          sendJson(res, 401, { ok: false, error: "请先登录" });
+          return;
+        }
         const body = await readJsonBody(req);
         if (!body.name || !body.url) {
           sendJson(res, 400, {
@@ -1461,6 +1524,10 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/feedback" && req.method === "POST") {
+      if (!requireAuth(req)) {
+        sendJson(res, 401, { ok: false, error: "请先登录" });
+        return;
+      }
       const body = await readJsonBody(req);
       await saveFeedback(body);
       sendJson(res, 201, {

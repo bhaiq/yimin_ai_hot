@@ -182,9 +182,11 @@ const state = {
     mode: "demo",
     text: "演示数据 · 启动服务后自动抓取",
   },
+  user: null,
 };
 
-const views = ["home", "all", "daily", "radar", "sources", "about", "changelog", "feedback"];
+const authViews = ["sources", "about", "changelog", "feedback"];
+const views = ["home", "all", "daily", "radar", "login", "sources", "about", "changelog", "feedback"];
 
 const filterStrip = document.querySelector("#filterStrip");
 const featuredFeed = document.querySelector("#featuredFeed");
@@ -612,6 +614,10 @@ function setView(viewName) {
     viewName = "home";
   }
 
+  if (authViews.includes(viewName) && !state.user) {
+    viewName = "login";
+  }
+
   state.view = viewName;
   document.querySelectorAll(".view").forEach((view) => {
     view.classList.toggle("active", view.id === `view-${viewName}`);
@@ -665,7 +671,8 @@ document.querySelector("#copyDaily").addEventListener("click", async () => {
 
 document.querySelector("#sourceForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const formData = Object.fromEntries(new FormData(event.currentTarget).entries());
+  const form = event.currentTarget;
+  const formData = Object.fromEntries(new FormData(form).entries());
 
   if (window.location.protocol !== "file:") {
     try {
@@ -679,7 +686,7 @@ document.querySelector("#sourceForm").addEventListener("submit", async (event) =
         throw new Error(`HTTP ${response.status}`);
       }
 
-      event.currentTarget.reset();
+      form.reset();
       document.querySelector("#sourceNote").textContent = "已提交到数据库，默认待审核不自动抓取。";
       return;
     } catch {
@@ -690,12 +697,13 @@ document.querySelector("#sourceForm").addEventListener("submit", async (event) =
   const drafts = JSON.parse(localStorage.getItem("immigrationSources") || "[]");
   drafts.push({ ...formData, savedAt: new Date().toISOString() });
   localStorage.setItem("immigrationSources", JSON.stringify(drafts));
-  event.currentTarget.reset();
+  form.reset();
 });
 
 document.querySelector("#feedbackForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const formData = Object.fromEntries(new FormData(event.currentTarget).entries());
+  const form = event.currentTarget;
+  const formData = Object.fromEntries(new FormData(form).entries());
 
   if (window.location.protocol !== "file:") {
     try {
@@ -709,18 +717,24 @@ document.querySelector("#feedbackForm").addEventListener("submit", async (event)
         throw new Error(`HTTP ${response.status}`);
       }
 
-      event.currentTarget.reset();
+      form.reset();
       document.querySelector("#feedbackNote").textContent = "已保存到数据库。";
       return;
-    } catch {
+    } catch (err) {
+      console.error("feedback submit error:", err);
       document.querySelector("#feedbackNote").textContent = "数据库提交失败，已保存到本地草稿。";
+      const drafts = JSON.parse(localStorage.getItem("immigrationFeedback") || "[]");
+      drafts.push({ ...formData, savedAt: new Date().toISOString() });
+      localStorage.setItem("immigrationFeedback", JSON.stringify(drafts));
+      form.reset();
+      return;
     }
   }
 
   const drafts = JSON.parse(localStorage.getItem("immigrationFeedback") || "[]");
   drafts.push({ ...formData, savedAt: new Date().toISOString() });
   localStorage.setItem("immigrationFeedback", JSON.stringify(drafts));
-  event.currentTarget.reset();
+  form.reset();
 });
 
 window.addEventListener("hashchange", () => {
@@ -729,6 +743,70 @@ window.addEventListener("hashchange", () => {
     setView(view);
   }
 });
+
+function updateAuthUI() {
+  const authSection = document.querySelector("[data-auth]");
+  const loginBtn = document.querySelector("#sidebarAuth");
+  const userArea = document.querySelector("#sidebarUser");
+  if (state.user) {
+    authSection.style.display = "";
+    loginBtn.classList.add("hidden");
+    userArea.classList.remove("hidden");
+    document.querySelector("#userName").textContent = state.user.username;
+    document.querySelector("#userAvatar").textContent = state.user.username.charAt(0).toUpperCase();
+  } else {
+    authSection.style.display = "none";
+    loginBtn.classList.remove("hidden");
+    userArea.classList.add("hidden");
+  }
+}
+
+document.querySelector("#loginForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const formData = Object.fromEntries(new FormData(form).entries());
+  const note = document.querySelector("#loginNote");
+
+  try {
+    const response = await fetch("/api/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(formData),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      note.textContent = data.error || "登录失败";
+      return;
+    }
+    state.user = { username: data.username };
+    form.reset();
+    note.textContent = "";
+    updateAuthUI();
+    setView("home");
+  } catch (err) {
+    note.textContent = "网络错误：" + err.message;
+  }
+});
+
+document.querySelector("#logoutBtn").addEventListener("click", async () => {
+  try {
+    await fetch("/api/logout", { method: "POST" });
+  } catch { /* ignore */ }
+  state.user = null;
+  updateAuthUI();
+  setView("home");
+});
+
+async function checkAuth() {
+  if (window.location.protocol === "file:") return;
+  try {
+    const res = await fetch("/api/me");
+    const data = await res.json();
+    if (data.loggedIn) {
+      state.user = { username: data.username };
+    }
+  } catch { /* ignore */ }
+}
 
 const todayDate = document.querySelector("#todayDate");
 if (todayDate) {
@@ -743,5 +821,8 @@ if (todayDate) {
 
 const initialView = window.location.hash.replace("#", "") || "home";
 renderContent();
-setView(initialView);
+checkAuth().then(() => {
+  updateAuthUI();
+  setView(initialView);
+});
 loadLiveNews();

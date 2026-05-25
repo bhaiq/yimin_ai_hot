@@ -40,7 +40,7 @@
           </button>
         </nav>
 
-        <div class="sidebar-section">
+        <div class="sidebar-section" data-auth>
           <p class="section-label">工具</p>
           <nav class="nav-group compact" data-nav>
             <button class="nav-item" data-view="sources" type="button">
@@ -60,6 +60,20 @@
               <span>反馈建议</span>
             </button>
           </nav>
+        </div>
+
+        <div class="sidebar-auth" id="sidebarAuth">
+          <button class="nav-item compact" id="loginBtn" type="button" data-view="login">
+            <span class="nav-icon">⚲</span>
+            <span>登录</span>
+          </button>
+        </div>
+        <div class="sidebar-auth hidden" id="sidebarUser">
+          <div class="user-info">
+            <span class="user-avatar" id="userAvatar">A</span>
+            <span id="userName">admin</span>
+          </div>
+          <button class="ghost-button compact" id="logoutBtn" type="button">登出</button>
         </div>
 
         <div class="source-card">
@@ -266,6 +280,24 @@
             <button class="primary-button" type="submit">保存反馈</button>
             <p class="form-note" id="feedbackNote">反馈仅保存在当前浏览器。</p>
           </form>
+        </section>
+
+        <section class="view utility-view" id="view-login" aria-labelledby="loginTitle">
+          <div class="panel">
+            <h2 id="loginTitle">登录</h2>
+            <form class="form-panel" id="loginForm">
+              <label>
+                <span>用户名</span>
+                <input name="username" type="text" autocomplete="username" required placeholder="请输入用户名">
+              </label>
+              <label>
+                <span>密码</span>
+                <input name="password" type="password" autocomplete="current-password" required placeholder="请输入密码">
+              </label>
+              <button class="primary-button" type="submit">登录</button>
+              <p class="form-note" id="loginNote"></p>
+            </form>
+          </div>
         </section>
       </main>
     </div>
