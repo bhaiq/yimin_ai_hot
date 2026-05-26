@@ -31,6 +31,10 @@ const authConfig = {
   user: process.env.AUTH_USER || "admin",
   pass: process.env.AUTH_PASS || "admin123",
 };
+const firecrawlConfig = {
+  apiKey: process.env.FIRECRAWL_API_KEY || "",
+  baseUrl: "https://api.firecrawl.dev/v1",
+};
 const sessions = new Map();
 
 const mimeTypes = {
@@ -211,6 +215,7 @@ async function initDb() {
           country VARCHAR(80) NOT NULL COMMENT '所属国家/地区',
           category VARCHAR(120) NOT NULL COMMENT '分类（如政策、签证、生活等）',
           priority INT NOT NULL DEFAULT 70 COMMENT '优先级 0-100，越高越重要',
+          type VARCHAR(20) NOT NULL DEFAULT 'rss' COMMENT '来源类型（rss/twitter/html/json/website）',
           enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用（1=启用 0=禁用）',
           last_fetched_at DATETIME NULL COMMENT '最后一次抓取时间',
           last_fetch_error TEXT NULL COMMENT '最后一次抓取错误信息',
@@ -288,6 +293,18 @@ async function initDb() {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户反馈表';
       `);
 
+      const colCheck = await mysqlRun(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)} AND TABLE_NAME = 'yimin_sources' AND COLUMN_NAME = 'type';
+      `);
+      if (!colCheck.includes("type")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_sources
+          ADD COLUMN type VARCHAR(20) NOT NULL DEFAULT 'rss' COMMENT '来源类型（rss/twitter/html/json/website）'
+          AFTER priority;
+        `);
+      }
+
       await seedConfiguredSources();
     })();
   }
@@ -304,13 +321,14 @@ async function seedConfiguredSources() {
 
 async function upsertSource(source, { enabled = true } = {}) {
   await mysqlExec(`
-    INSERT INTO yimin_sources (name, url, country, category, priority, enabled)
+    INSERT INTO yimin_sources (name, url, country, category, priority, type, enabled)
     VALUES (
       ${sqlString(source.name)},
       ${sqlString(source.url)},
       ${sqlString(source.country)},
       ${sqlString(source.category || "政策")},
       ${sqlNumber(source.priority, 70)},
+      ${sqlString(source.type || "rss")},
       ${enabled ? 1 : 0}
     )
     ON DUPLICATE KEY UPDATE
@@ -318,6 +336,7 @@ async function upsertSource(source, { enabled = true } = {}) {
       country = VALUES(country),
       category = VALUES(category),
       priority = VALUES(priority),
+      type = VALUES(type),
       enabled = VALUES(enabled),
       updated_at = CURRENT_TIMESTAMP;
   `);
@@ -476,6 +495,7 @@ async function saveSourceSubmission(data) {
       country: data.topic || "待分类",
       category: "用户提报",
       priority: 50,
+      type: data.type || "rss",
     },
     { enabled: false },
   );
@@ -515,6 +535,48 @@ async function fetchWithTimeout(url, extraHeaders = {}) {
       status: response.status,
       text,
     };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchWithFirecrawl(url) {
+  if (!firecrawlConfig.apiKey) {
+    return { ok: false, status: 0, error: "FIRECRAWL_API_KEY not configured" };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+
+  try {
+    const response = await fetch(`${firecrawlConfig.baseUrl}/scrape`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${firecrawlConfig.apiKey}`,
+      },
+      body: JSON.stringify({ url, formats: ["markdown"] }),
+    });
+
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+      return { ok: false, status: response.status, error: data.error || `HTTP ${response.status}` };
+    }
+
+    const page = data.data || {};
+    const metadata = page.metadata || {};
+    const markdown = page.markdown || "";
+
+    return {
+      ok: true,
+      title: metadata.title || "",
+      summary: markdown.slice(0, 500),
+      url: metadata.sourceURL || url,
+      publishedAt: metadata.publishedTime || null,
+    };
+  } catch (err) {
+    return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };
   } finally {
     clearTimeout(timer);
   }
@@ -959,31 +1021,61 @@ async function fetchSource(source) {
       extraHeaders.accept = "application/json, */*";
     }
 
-    const response = await fetchWithTimeout(fetchUrl, extraHeaders);
-    if (!response.ok) {
-      await updateSourceFetchStatus(sourceId, `HTTP ${response.status}`);
-      return {
-        source,
-        items: [],
-        status: {
-          name: source.name,
-          country: source.country,
-          ok: false,
-          count: 0,
-          error: `HTTP ${response.status}`,
-        },
-      };
-    }
-
     let items;
-    if (sourceType === "rss" || sourceType === "twitter") {
-      items = parseFeed(response.text, source);
-    } else if (sourceType === "html") {
-      items = parseHtml(response.text, source);
-    } else if (sourceType === "json") {
-      items = parseJson(response.text, source);
+    if (sourceType === "website") {
+      const result = await fetchWithFirecrawl(fetchUrl);
+      if (!result.ok) {
+        await updateSourceFetchStatus(sourceId, result.error);
+        return {
+          source,
+          items: [],
+          status: { name: source.name, country: source.country, ok: false, count: 0, error: result.error },
+        };
+      }
+      const id = createHash("sha1").update(`${result.url}|${result.title}`).digest("hex").slice(0, 12);
+      items = [{
+        id,
+        title: result.title,
+        summary: result.summary,
+        source: source.name,
+        country: source.country,
+        category: source.category,
+        time: result.publishedAt
+          ? new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Shanghai" }).format(new Date(result.publishedAt))
+          : "刚刚",
+        publishedAt: result.publishedAt,
+        url: result.url,
+        heat: calculateHeat({}, source),
+        impact: source.priority >= 85 ? "高影响" : "中影响",
+        tags: inferTags({}, source),
+        image: imageFor({}, source),
+      }];
     } else {
-      items = [];
+      const response = await fetchWithTimeout(fetchUrl, extraHeaders);
+      if (!response.ok) {
+        await updateSourceFetchStatus(sourceId, `HTTP ${response.status}`);
+        return {
+          source,
+          items: [],
+          status: {
+            name: source.name,
+            country: source.country,
+            ok: false,
+            count: 0,
+            error: `HTTP ${response.status}`,
+          },
+        };
+      }
+
+      if (sourceType === "rss" || sourceType === "twitter") {
+        items = parseFeed(response.text, source);
+      } else if (sourceType === "html") {
+        items = parseHtml(response.text, source);
+      } else if (sourceType === "json") {
+        items = parseJson(response.text, source);
+      } else {
+        items = [];
+      }
     }
 
     for (const item of items) {
@@ -1024,7 +1116,22 @@ async function fetchSource(source) {
 
 async function refreshFeeds() {
   await initDb();
-  const sources = (await readSources()).filter((source) => source.enabled !== false);
+  let sources = (await readSources()).filter((source) => source.enabled !== false);
+
+  const dbWebsiteSources = await mysqlJson(`
+    SELECT name, url, country, category, priority, type
+    FROM yimin_sources
+    WHERE type = 'website' AND enabled = 1;
+  `);
+  if (Array.isArray(dbWebsiteSources) && dbWebsiteSources.length > 0) {
+    const existingUrls = new Set(sources.map((s) => s.url));
+    for (const ws of dbWebsiteSources) {
+      if (!existingUrls.has(ws.url)) {
+        sources.push(ws);
+      }
+    }
+  }
+
   const runId = await createFetchRun(sources.length);
 
   try {
@@ -1520,6 +1627,79 @@ const server = createServer(async (req, res) => {
         ok: true,
         report,
       });
+      return;
+    }
+
+    if (url.pathname === "/api/submissions") {
+      if (!requireAuth(req)) {
+        sendJson(res, 401, { ok: false, error: "请先登录" });
+        return;
+      }
+      await initDb();
+      if (req.method === "GET") {
+        const rows = await mysqlJson(`
+          SELECT COALESCE(JSON_ARRAYAGG(
+            JSON_OBJECT(
+              'id', id,
+              'name', name,
+              'url', url,
+              'topic', topic,
+              'status', status,
+              'created_at', DATE_FORMAT(created_at, '%Y-%m-%d %H:%i')
+            )
+          ), JSON_ARRAY())
+          FROM (
+            SELECT * FROM yimin_source_submissions
+            ORDER BY FIELD(status, 'pending', 'accepted', 'rejected'), created_at DESC
+          ) sorted;
+        `);
+        sendJson(res, 200, { ok: true, submissions: rows || [] });
+        return;
+      }
+    }
+
+    if (url.pathname.startsWith("/api/submissions/") && req.method === "PUT") {
+      if (!requireAuth(req)) {
+        sendJson(res, 401, { ok: false, error: "请先登录" });
+        return;
+      }
+      await initDb();
+      const parts = url.pathname.replace("/api/submissions/", "").split("/");
+      const subId = Number(parts[0]);
+      if (!subId) {
+        sendJson(res, 400, { ok: false, error: "Invalid id" });
+        return;
+      }
+      const body = await readJsonBody(req);
+
+      if (body.status === "accepted") {
+        const type = body.type || "rss";
+        const country = body.country || "待分类";
+        const category = body.category || "用户提报";
+        const priority = Number(body.priority) || 50;
+        await mysqlExec(`
+          UPDATE yimin_source_submissions SET status = 'accepted' WHERE id = ${sqlNumber(subId)};
+        `);
+        await mysqlExec(`
+          UPDATE yimin_sources
+          SET enabled = 1, type = ${sqlString(type)}, country = ${sqlString(country)},
+              category = ${sqlString(category)}, priority = ${sqlNumber(priority)}
+          WHERE url = (SELECT url FROM yimin_source_submissions WHERE id = ${sqlNumber(subId)});
+        `);
+        cache = null;
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      if (body.status === "rejected") {
+        await mysqlExec(`
+          UPDATE yimin_source_submissions SET status = 'rejected' WHERE id = ${sqlNumber(subId)};
+        `);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      sendJson(res, 400, { ok: false, error: "status must be accepted or rejected" });
       return;
     }
 

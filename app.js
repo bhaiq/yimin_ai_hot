@@ -185,8 +185,8 @@ const state = {
   user: null,
 };
 
-const authViews = ["sources", "about", "changelog", "feedback"];
-const views = ["home", "all", "daily", "radar", "login", "sources", "about", "changelog", "feedback"];
+const authViews = ["sources", "review", "about", "changelog", "feedback"];
+const views = ["home", "all", "daily", "radar", "login", "sources", "review", "about", "changelog", "feedback"];
 
 const filterStrip = document.querySelector("#filterStrip");
 const featuredFeed = document.querySelector("#featuredFeed");
@@ -627,7 +627,106 @@ function setView(viewName) {
   });
   document.body.classList.remove("menu-open");
   window.location.hash = viewName;
+
+  if (viewName === "review") {
+    loadSubmissions();
+  }
 }
+
+async function loadSubmissions() {
+  const container = document.querySelector("#reviewList");
+  container.innerHTML = '<p class="form-note">加载中...</p>';
+  try {
+    const response = await fetch("/api/submissions");
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error);
+    renderReview(data.submissions || []);
+  } catch {
+    container.innerHTML = '<p class="form-note">加载失败，请检查是否已登录。</p>';
+  }
+}
+
+function renderReview(submissions) {
+  const container = document.querySelector("#reviewList");
+  if (submissions.length === 0) {
+    container.innerHTML = '<p class="form-note">暂无信源提报。</p>';
+    return;
+  }
+
+  const statusLabel = { pending: "待审核", accepted: "已通过", rejected: "已拒绝" };
+  const statusClass = { pending: "badge-pending", accepted: "badge-accepted", rejected: "badge-rejected" };
+
+  container.innerHTML = submissions.map((sub) => `
+    <div class="review-card ${sub.status}" data-id="${sub.id}">
+      <div class="review-header">
+        <strong>${sub.name}</strong>
+        <span class="review-badge ${statusClass[sub.status]}">${statusLabel[sub.status]}</span>
+      </div>
+      <div class="review-meta">
+        <span>${sub.url}</span>
+        ${sub.topic ? `<span>主题: ${sub.topic}</span>` : ""}
+        <span>提交于 ${sub.created_at || "未知"}</span>
+      </div>
+      ${sub.status === "pending" ? `
+        <div class="review-form">
+          <label><span>信源类型</span>
+            <select data-field="type">
+              <option value="rss">RSS 订阅</option>
+              <option value="website">网站源（Firecrawl）</option>
+              <option value="html">HTML 抓取</option>
+              <option value="json">JSON API</option>
+            </select>
+          </label>
+          <label><span>国家</span>
+            <input data-field="country" placeholder="美国 / 加拿大 / 英国 / 澳大利亚" />
+          </label>
+          <label><span>分类</span>
+            <input data-field="category" placeholder="官方机构 / EB-5 / 排期" />
+          </label>
+          <label><span>优先级</span>
+            <input data-field="priority" type="number" min="0" max="100" value="50" />
+          </label>
+          <div class="review-actions">
+            <button class="primary-button" data-action="accept" data-id="${sub.id}" type="button">通过</button>
+            <button class="ghost-button" data-action="reject" data-id="${sub.id}" type="button">拒绝</button>
+          </div>
+        </div>
+      ` : ""}
+    </div>
+  `).join("");
+}
+
+document.addEventListener("click", async (event) => {
+  const btn = event.target.closest("[data-action]");
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const card = btn.closest(".review-card");
+  const action = btn.dataset.action;
+
+  if (action === "accept") {
+    const fields = {
+      type: card.querySelector('[data-field="type"]')?.value || "rss",
+      country: card.querySelector('[data-field="country"]')?.value || "",
+      category: card.querySelector('[data-field="category"]')?.value || "",
+      priority: card.querySelector('[data-field="priority"]')?.value || "50",
+    };
+    const res = await fetch(`/api/submissions/${id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "accepted", ...fields }),
+    });
+    const data = await res.json();
+    if (data.ok) loadSubmissions();
+  } else if (action === "reject") {
+    const res = await fetch(`/api/submissions/${id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "rejected" }),
+    });
+    const data = await res.json();
+    if (data.ok) loadSubmissions();
+  }
+});
 
 document.addEventListener("click", (event) => {
   const viewButton = event.target.closest("[data-view]");

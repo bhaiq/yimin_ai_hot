@@ -47,6 +47,10 @@
               <span class="nav-icon">＋</span>
               <span>信源提报</span>
             </button>
+            <button class="nav-item" data-view="review" type="button">
+              <span class="nav-icon">✓</span>
+              <span>信源审核</span>
+            </button>
             <button class="nav-item" data-view="about" type="button">
               <span class="nav-icon">?</span>
               <span>关于本站</span>
@@ -207,10 +211,20 @@
               <span>国家/主题</span>
               <input name="topic" placeholder="美国 EB-5 / 加拿大 EE / 澳大利亚签证" />
             </label>
-            <button class="primary-button" type="submit">保存到本地草稿</button>
-            <p class="form-note" id="sourceNote">草稿仅保存在当前浏览器。</p>
+            <button class="primary-button" type="submit">提交信源</button>
+            <p class="form-note" id="sourceNote">提交后需管理员审核通过才会启用。</p>
           </form>
           <div class="source-health" id="sourceHealth"></div>
+        </section>
+
+        <section class="view utility-view" id="view-review" aria-labelledby="reviewTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">信源审核</p>
+              <h1 id="reviewTitle">审核用户提报的信源</h1>
+            </div>
+          </div>
+          <div id="reviewList"></div>
         </section>
 
         <section class="view utility-view" id="view-about" aria-labelledby="aboutTitle">
