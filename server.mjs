@@ -1119,7 +1119,10 @@ async function refreshFeeds() {
   let sources = (await readSources()).filter((source) => source.enabled !== false);
 
   const dbWebsiteSources = await mysqlJson(`
-    SELECT name, url, country, category, priority, type
+    SELECT JSON_ARRAYAGG(
+      JSON_OBJECT('name', name, 'url', url, 'country', country,
+                  'category', category, 'priority', priority, 'type', type)
+    ) AS src_rows
     FROM yimin_sources
     WHERE type = 'website' AND enabled = 1;
   `);

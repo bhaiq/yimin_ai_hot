@@ -24,15 +24,17 @@ There is no build step, bundler, test framework, or linter. The project runs raw
 
 Single-file HTTP server handling both API and static files:
 
-- **Database layer**: Spawns `mysql` CLI via `child_process.spawn` for all SQL. No ORM, no driver. SQL helpers: `sqlString`, `sqlNumber`, `sqlDate`, `sqlIdentifier`. Tables auto-created on first request via `initDb()`.
+- **Database layer**: Spawns `mysql` CLI via `child_process.spawn` for all SQL. No ORM, no driver. SQL helpers: `sqlString`, `sqlNumber`, `sqlDate`, `sqlIdentifier`. Tables auto-created on first request via `initDb()`. Note: `mysqlJson()` requires SQL queries to return JSON natively (via `JSON_ARRAYAGG`/`JSON_OBJECT`), not raw column output.
 - **RSS pipeline**: `fetchWithTimeout` → regex-based XML parsing (`parseFeed`, `getBlocks`, `getTag`) → category/tag inference (`inferCategory`, `inferTags`) → heat scoring (`calculateHeat`) → upsert into `articles` table.
+- **Firecrawl integration**: `fetchWithFirecrawl` calls the Firecrawl scrape API to fetch pages without RSS. Used for `type: "website"` sources. Returns a single article per page (title, summary, url).
 - **DeepSeek integration**: `callDeepSeek` sends a structured prompt to the OpenAI-compatible chat completions endpoint. Falls back to `buildFallbackDailyMarkdown` if the API key is missing or the call fails.
-- **API routes**: `/api/health`, `/api/news`, `/api/daily`, `/api/sources` (GET/POST), `/api/feedback` (POST). Query param `refresh=1` forces re-fetch or re-generation.
+- **API routes**: `/api/health`, `/api/news`, `/api/daily`, `/api/sources` (GET/POST), `/api/submissions` (GET), `/api/submissions/:id` (PUT), `/api/feedback` (POST). Query param `refresh=1` forces re-fetch or re-generation.
+- **Source types**: `rss` (default), `twitter` (via Nitter), `html` (regex CSS selectors), `json` (dot-path), `website` (Firecrawl). Type is stored in `yimin_sources.type` column. Website sources are also read from DB in `refreshFeeds()`.
 - **Static serving**: `serveStatic` resolves paths under the project root with directory traversal protection. Serves `index.html`, `styles.css`, `app.js`.
 
 ### Frontend (`app.js` + `index.html` + `styles.css`)
 
-Single-page app with hash-based routing (`#home`, `#all`, `#daily`, `#radar`, `#sources`, `#about`, `#changelog`, `#feedback`). Works both served from the Node server (live API data) and opened as `file://` (falls back to hardcoded demo data and localStorage drafts).
+Single-page app with hash-based routing (`#home`, `#all`, `#daily`, `#radar`, `#sources`, `#review`, `#about`, `#changelog`, `#feedback`). Works both served from the Node server (live API data) and opened as `file://` (falls back to hardcoded demo data and localStorage drafts).
 
 Key frontend patterns:
 - `state` object holds all app state; `renderContent()` re-renders all views on any change
@@ -41,9 +43,9 @@ Key frontend patterns:
 
 ### Configuration
 
-- `.env` — MySQL connection + DeepSeek API config (loaded manually, no dotenv library)
-- `data/sources.json` — RSS feed definitions with name, url, country, category, priority fields
+- `.env` — MySQL connection + DeepSeek API config + Firecrawl API config (loaded manually, no dotenv library)
+- `data/sources.json` — RSS feed definitions with name, url, country, category, priority, type, fields (for html/json sources)
 
 ### Database schema
 
-Auto-created tables: `sources`, `articles`, `fetch_runs`, `daily_reports`, `source_submissions`, `feedback`. Database default: `yimin_ai_hot` (MySQL, utf8mb4).
+Auto-created tables: `sources` (with `type` column for source type), `articles`, `fetch_runs`, `daily_reports`, `source_submissions` (with `status` enum: pending/accepted/rejected), `feedback`. Database default: `yimin_ai_hot` (MySQL, utf8mb4).

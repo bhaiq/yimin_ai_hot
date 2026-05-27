@@ -48,14 +48,7 @@
     "country": "加拿大",
     "category": "官方机构",
     "priority": 78,
-    "type": "html",
-    "fields": {
-      "container": "li",
-      "title": "a",
-      "link": "a @href",
-      "summary": "p",
-      "time": "span.date"
-    }
+    "type": "website"
   },
   {
     "name": "Visa Bulletin API",
