@@ -1,113 +1,5 @@
 const categories = ["全部", "美国", "加拿大", "英国", "澳新", "欧洲", "EB-5", "排期", "签证", "投资", "雇主担保", "官方"];
 
-const demoNewsItems = [
-  {
-    id: 1,
-    title: "EB-5 投资移民进入高频问询期，区域中心、资金路径和排期成为核心问题",
-    summary:
-      "客户关注点从单纯项目收益转向资金证明、I-526E 周期和排期风险，顾问需要准备更细的节点解释。",
-    source: "项目快照",
-    country: "美国",
-    category: "EB-5",
-    time: "09:20",
-    heat: 97,
-    impact: "高影响",
-    tags: ["美国", "EB-5", "投资"],
-    image:
-      "https://images.unsplash.com/photo-1554224155-6726b3ff858f?auto=format&fit=crop&w=360&q=80",
-  },
-  {
-    id: 2,
-    title: "职业移民排期解读需求上升，亲属移民和职业移民咨询需分流",
-    summary:
-      "排期信息会直接影响签约预期，建议销售页面加入“排期解释”和“适配人群”两个固定模块。",
-    source: "Visa Bulletin",
-    country: "美国",
-    category: "排期",
-    time: "10:05",
-    heat: 91,
-    impact: "高影响",
-    tags: ["美国", "排期", "职业移民"],
-    image:
-      "https://images.unsplash.com/photo-1464037866556-6812c9d1c72e?auto=format&fit=crop&w=360&q=80",
-  },
-  {
-    id: 3,
-    title: "加拿大快速通道客户更关心邀请节奏，省提名仍是转化关键点",
-    summary:
-      "高分候选人倾向等待邀请，分数边缘客户更需要省提名路径和雇主资源解释。",
-    source: "IRCC Watch",
-    country: "加拿大",
-    category: "雇主担保",
-    time: "11:10",
-    heat: 86,
-    impact: "中影响",
-    tags: ["加拿大", "EE", "省提名"],
-    image:
-      "https://images.unsplash.com/photo-1523240795612-9a054b0db644?auto=format&fit=crop&w=360&q=80",
-  },
-  {
-    id: 4,
-    title: "澳大利亚技术移民咨询回暖，职业评估和英语成绩成为前置筛选门槛",
-    summary:
-      "文案团队可把职业清单、州担保要求和英语成绩拆成三段检查表，提高初筛效率。",
-    source: "Home Affairs",
-    country: "澳新",
-    category: "签证",
-    time: "12:30",
-    heat: 78,
-    impact: "中影响",
-    tags: ["澳新", "技术移民", "签证"],
-    image:
-      "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=360&q=80",
-  },
-  {
-    id: 5,
-    title: "欧洲黄金签证进入合规叙事阶段，税务居民和资产来源说明变得更重要",
-    summary:
-      "投资移民页面不宜只强调身份获取，应同步呈现居住要求、税务影响和续签条件。",
-    source: "EU Policy Notes",
-    country: "欧洲",
-    category: "投资",
-    time: "14:05",
-    heat: 74,
-    impact: "中影响",
-    tags: ["欧洲", "投资", "合规"],
-    image:
-      "https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=360&q=80",
-  },
-  {
-    id: 6,
-    title: "美国身份规划客户开始比较 EB-1、NIW 与 EB-5 的组合路径",
-    summary:
-      "高净值客户更愿意同时评估人才类和投资类路径，咨询话术需要从单项目介绍转为方案组合。",
-    source: "顾问观察",
-    country: "美国",
-    category: "签证",
-    time: "15:45",
-    heat: 82,
-    impact: "高影响",
-    tags: ["美国", "NIW", "EB-1", "EB-5"],
-    image:
-      "https://images.unsplash.com/photo-1521791136064-7986c2920216?auto=format&fit=crop&w=360&q=80",
-  },
-  {
-    id: 7,
-    title: "新西兰投资和创业相关咨询回升，资金来源解释仍是成交前风险点",
-    summary:
-      "建议把资金来源、商业背景和登陆后经营安排提前形成材料清单。",
-    source: "NZ Immigration",
-    country: "澳新",
-    category: "投资",
-    time: "16:20",
-    heat: 68,
-    impact: "低影响",
-    tags: ["澳新", "投资", "创业"],
-    image:
-      "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=360&q=80",
-  },
-];
-
 function buildSnapshots(items) {
   const countryMap = {};
   for (const item of items) {
@@ -160,9 +52,12 @@ function buildRadarItems(items) {
 
     return {
       title: rule.title,
+      keywords: rule.keywords,
+      matched,
       risk: riskLevel,
       riskText,
       value,
+      count,
       text: count > 0
         ? `${countries || "多个国家"}相关动态 ${count} 条，需要关注最新变化。`
         : "近期暂无明显风险信号，保持关注即可。",
@@ -174,19 +69,27 @@ const state = {
   view: "home",
   category: "全部",
   query: "",
-  items: demoNewsItems,
+  items: [],
+  radarDetail: null,
+  marketReportData: null,
+  marketLoading: false,
+  marketError: "",
+  marketHistory: [],
+  marketDate: null,
   sourceStatus: [],
   dailyReport: null,
   dailyLoading: false,
+  dailyHistory: [],
+  dailyDate: null,
   liveMeta: {
-    mode: "demo",
-    text: "演示数据 · 启动服务后自动抓取",
+    mode: "idle",
+    text: "等待真实信源数据",
   },
   user: null,
 };
 
 const authViews = ["sources", "review", "about", "changelog", "feedback"];
-const views = ["home", "all", "daily", "radar", "login", "sources", "review", "about", "changelog", "feedback"];
+const views = ["home", "all", "daily", "market", "radar", "login", "sources", "review", "about", "changelog", "feedback"];
 
 const filterStrip = document.querySelector("#filterStrip");
 const featuredFeed = document.querySelector("#featuredFeed");
@@ -197,6 +100,7 @@ const searchInput = document.querySelector("#searchInput");
 const homeCount = document.querySelector("#homeCount");
 const allCount = document.querySelector("#allCount");
 const dailyReport = document.querySelector("#dailyReport");
+const marketReport = document.querySelector("#marketReport");
 const monitorStatus = document.querySelector("#monitorStatus");
 const sourceHealth = document.querySelector("#sourceHealth");
 const refreshNews = document.querySelector("#refreshNews");
@@ -313,6 +217,11 @@ function renderFeed(container, items) {
 
 function renderSnapshots() {
   const items = buildSnapshots(state.items);
+  if (!items.length) {
+    snapshotList.innerHTML = '<div class="empty">暂无真实热点快照，等待信源抓取入库。</div>';
+    return;
+  }
+
   snapshotList.innerHTML = items
     .map(
       (item) => `
@@ -326,71 +235,272 @@ function renderSnapshots() {
 }
 
 function renderDaily() {
+  const historyHtml = state.dailyHistory.length > 0
+    ? `<div class="daily-history">
+        <h3>历史日报</h3>
+        <ul class="daily-history-list">
+          ${state.dailyHistory
+            .map((h) => {
+              const isCurrent = state.dailyDate === h.date || (!state.dailyDate && h.date === new Date().toISOString().slice(0, 10));
+              return `<li>
+              <button class="daily-history-item${isCurrent ? " active" : ""}" data-daily-date="${h.date}">
+                <span class="daily-history-date">${h.date}</span>
+                <span class="daily-history-count">${h.sourceItemCount || 0} 条</span>
+              </button>
+            </li>`;
+            })
+            .join("")}
+        </ul>
+      </div>`
+    : "";
+
   if (state.dailyReport?.html) {
     dailyReport.innerHTML = `
-      <div class="daily-meta">
-        <strong>${escapeHtml(state.dailyReport.title || "移民热点日报")}</strong>
-        <span>${escapeHtml(state.dailyReport.model || "AI")} · ${escapeHtml(state.dailyReport.sourceItemCount || 0)} 条来源</span>
+      <div class="daily-layout">
+        <div class="daily-main">
+          <div class="daily-meta">
+            <strong>${escapeHtml(state.dailyReport.title || "移民热点日报")}</strong>
+            <span>${escapeHtml(state.dailyReport.model || "AI")} · ${escapeHtml(state.dailyReport.sourceItemCount || 0)} 条来源</span>
+          </div>
+          ${state.dailyReport.html}
+        </div>
+        ${historyHtml}
       </div>
-      ${state.dailyReport.html}
     `;
     return;
   }
 
   if (state.dailyLoading) {
-    dailyReport.innerHTML = '<div class="empty">DeepSeek 正在生成今日移民日报...</div>';
+    dailyReport.innerHTML = `
+      <div class="daily-layout">
+        <div class="daily-main">
+          <div class="empty">DeepSeek 正在生成日报...</div>
+        </div>
+        ${historyHtml}
+      </div>
+    `;
     return;
   }
 
-  const topItems = filteredItems().slice(0, 5);
-  const countries = [...new Set(state.items.map((item) => item.country).filter(Boolean))].slice(0, 4);
-  const keyCategories = [...new Set(topItems.map((item) => item.category).filter(Boolean))].slice(0, 4);
-  const sourceText =
-    state.liveMeta.mode === "live"
-      ? `本简报基于 ${state.liveMeta.itemCount} 条实时抓取信息，来自 ${state.liveMeta.sourceCount} 个信源。`
-      : "本简报当前使用内置演示数据；通过本地服务打开后会自动切换为实时信源。";
-
   dailyReport.innerHTML = `
-    <h2>一、今日总结</h2>
-    <p>
-      ${escapeHtml(sourceText)} 今日关注区域包括 <strong>${escapeHtml(countries.join("、") || "美国、加拿大")}</strong>，重点主题集中在 ${escapeHtml(keyCategories.join("、") || "EB-5、排期、签证")}。
-    </p>
-    <h2>二、重要信息</h2>
-    <ul>
-      <li><strong>EB-5</strong>：资金路径、区域中心和排期仍是高频问题，适合制作单独 FAQ。</li>
-      <li><strong>排期</strong>：任何职业移民方案都应同步解释等待周期，避免客户预期偏差。</li>
-      <li><strong>雇主担保</strong>：加拿大和澳洲客户更依赖雇主资质、职位匹配和材料周期。</li>
-    </ul>
-    <h2>三、按主题整理</h2>
-    <ol>
-      ${topItems
-        .map((item) => {
-          const url = safeUrl(item.url);
-          const title = url
-            ? `<a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a>`
-            : `<strong>${escapeHtml(item.title)}</strong>`;
-          return `<li>${title}：${escapeHtml(item.summary)}</li>`;
-        })
-        .join("")}
-    </ol>
-    <h2>四、建议关注</h2>
-    <p>
-      建议项目经理优先更新 EB-5、美国排期、加拿大省提名和澳洲职业评估相关页面；销售团队同步准备排期解释话术和材料清单。
-    </p>
+    <div class="daily-layout">
+      <div class="daily-main">
+        <div class="empty">暂无已生成日报。请点击刷新或访问日报接口生成，页面不会再展示演示内容。</div>
+      </div>
+      ${historyHtml}
+    </div>
   `;
 }
 
+function renderMaterialCard(material, index, mode = "full") {
+  const url = safeUrl(material.url);
+  const channels = Array.isArray(material.channels) ? material.channels : [];
+  const ageText = Number.isFinite(Number(material.ageHours)) && Number(material.ageHours) <= 120
+    ? `${Math.round(Number(material.ageHours))} 小时前`
+    : "较早发布";
+  const actionLabel = {
+    useful: "已标记有用",
+    useless: "已标记没用",
+    used: "已采用",
+    later: "稍后看",
+  }[material.action];
+
+  return `
+    <article class="market-card ${material.action ? "has-feedback" : ""}">
+      <div class="market-card-top">
+        <span class="market-index">${index + 1}</span>
+        <span class="market-score">素材分 ${material.marketScore}</span>
+        <span class="market-status">${escapeHtml(material.freshnessType)}</span>
+        ${actionLabel ? `<span class="market-status muted-status">${actionLabel}</span>` : ""}
+      </div>
+      <h3>${escapeHtml(material.recommendedTitle)}</h3>
+      <p class="market-original">${escapeHtml(material.title)}</p>
+      <div class="market-meta">
+        <span>${escapeHtml(material.source)}</span>
+        <span>${escapeHtml(material.projectName)}</span>
+        <span>${ageText}</span>
+      </div>
+      <div class="market-channel-row">
+        ${channels.map((channel) => `<span class="tag impact">${escapeHtml(channel)}</span>`).join("")}
+      </div>
+      ${
+        mode === "full"
+          ? `
+            <dl class="market-fields">
+              <div><dt>推荐角度</dt><dd>${escapeHtml(material.angle)}</dd></div>
+              <div><dt>客户影响</dt><dd>${escapeHtml(material.customerImpact)}</dd></div>
+              <div><dt>销售话术</dt><dd>${escapeHtml(material.salesTalk)}</dd></div>
+              <div><dt>风险提醒</dt><dd>${escapeHtml(material.riskNote)}</dd></div>
+            </dl>
+          `
+          : `<p class="market-lite">${escapeHtml(material.angle)}</p>`
+      }
+      <div class="market-actions">
+        ${url ? `<a class="ghost-button compact" href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer">原文</a>` : ""}
+        <button class="ghost-button compact" data-market-action="useful" data-id="${escapeAttr(material.id)}" type="button">有用</button>
+        <button class="ghost-button compact" data-market-action="later" data-id="${escapeAttr(material.id)}" type="button">稍后看</button>
+        <button class="ghost-button compact" data-market-action="used" data-id="${escapeAttr(material.id)}" type="button">已采用</button>
+        <button class="ghost-button compact" data-market-action="useless" data-id="${escapeAttr(material.id)}" type="button">没用</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderMarketSection(title, desc, items, mode = "full") {
+  return `
+    <section class="market-section">
+      <div class="market-section-head">
+        <h2>${escapeHtml(title)}</h2>
+        <span>${items.length} 条</span>
+      </div>
+      <p>${escapeHtml(desc)}</p>
+      ${
+        items.length
+          ? `<div class="market-card-list">${items.map((item, index) => renderMaterialCard(item, index, mode)).join("")}</div>`
+          : '<div class="empty">暂无匹配素材。</div>'
+      }
+    </section>
+  `;
+}
+
+function renderNoUpdateProjects(projects) {
+  return `
+    <section class="market-section">
+      <div class="market-section-head">
+        <h2>今日无新增项目</h2>
+        <span>${projects.length} 个</span>
+      </div>
+      <p>这些重点项目今天没有发现新的有效信息，市场部不必硬包装成今日热点。</p>
+      <div class="no-update-grid">
+        ${
+          projects.length
+            ? projects
+                .map((project) => {
+                  const latestDate = project.latest ? new Date(project.latest) : null;
+                  const latest = latestDate && !Number.isNaN(latestDate.getTime())
+                    ? new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit" }).format(latestDate)
+                    : "暂无";
+                  return `
+                    <article class="no-update-item">
+                      <strong>${escapeHtml(project.name)}</strong>
+                      <span>最近有效更新：${escapeHtml(latest)}</span>
+                      <p>建议动作：今日不单独发新热点，可使用常青科普或等待新政策变化。</p>
+                    </article>
+                  `;
+                })
+                .join("")
+            : '<div class="empty">重点项目今天都有新增或延续素材。</div>'
+        }
+      </div>
+    </section>
+  `;
+}
+
+function renderMarketHistory() {
+  if (!state.marketHistory.length) {
+    return "";
+  }
+
+  return `<div class="daily-history">
+    <h3>历史素材</h3>
+    <ul class="daily-history-list">
+      ${state.marketHistory
+        .map((h) => {
+          const isCurrent = state.marketDate === h.date || (!state.marketDate && state.marketReportData?.date === h.date);
+          return `<li>
+            <button class="daily-history-item${isCurrent ? " active" : ""}" data-market-date="${h.date}">
+              <span class="daily-history-date">${h.date}</span>
+              <span class="daily-history-count">${h.usable || 0} 可发 · ${h.todayNew || 0} 新增</span>
+            </button>
+          </li>`;
+        })
+        .join("")}
+    </ul>
+  </div>`;
+}
+
+function renderMarketShell(content) {
+  return `
+    <div class="daily-layout">
+      <div class="daily-main">
+        ${content}
+      </div>
+      ${renderMarketHistory()}
+    </div>
+  `;
+}
+
+function renderMarket() {
+  if (!marketReport) return;
+  if (state.marketLoading) {
+    marketReport.innerHTML = renderMarketShell('<div class="empty">正在从数据库生成市场素材...</div>');
+    return;
+  }
+  if (state.marketError) {
+    marketReport.innerHTML = renderMarketShell(`<div class="empty">${escapeHtml(state.marketError)}</div>`);
+    return;
+  }
+  if (!state.marketReportData) {
+    marketReport.innerHTML = renderMarketShell('<div class="empty">暂无真实市场素材。请先抓取信源数据，系统不会展示演示素材。</div>');
+    return;
+  }
+
+  const report = state.marketReportData;
+  const summary = report.summary || {};
+  const reportDate = report.date ? new Date(`${report.date}T00:00:00`) : new Date();
+  const dateText = `${reportDate.getFullYear()}.${String(reportDate.getMonth() + 1).padStart(2, "0")}.${String(reportDate.getDate()).padStart(2, "0")}`;
+
+  marketReport.innerHTML = renderMarketShell(`
+    <div class="market-summary">
+      <div>
+        <span class="eyebrow">市场素材日报</span>
+        <h2>${dateText}</h2>
+        <p>
+          今日新增 ${summary.todayNew || 0} 条，可发布 ${summary.usable || 0} 条，延续关注 ${summary.continuing || 0} 条，
+          ${summary.noUpdate || 0} 个重点项目无新增，${summary.notRecommended || 0} 条不建议重复发布。
+        </p>
+      </div>
+      <div class="market-summary-stats">
+        <span><strong>${summary.todayNew || 0}</strong>今日新增</span>
+        <span><strong>${summary.usable || 0}</strong>可发布</span>
+        <span><strong>${summary.noUpdate || 0}</strong>无新增</span>
+      </div>
+    </div>
+
+    <section class="market-section">
+      <h2>AI 使用建议</h2>
+      <p>
+        市场部优先处理“今日新增素材”，把“延续关注”改成 FAQ、客户答疑或销售私聊。
+        “今日无新增项目”不要硬写成新热点；已采用或超过 72 小时无新事实的素材建议降级复盘。
+      </p>
+    </section>
+
+    ${renderMarketSection("一、今日新增素材", "24 小时内首次出现且具备传播价值的素材，适合优先发布。", report.todayNew || [], "full")}
+    ${renderMarketSection("二、延续关注素材", "不是今天新增，但仍有客户沟通价值，适合做二次解读或销售答疑。", report.continuing || [], "full")}
+    ${renderNoUpdateProjects(report.noUpdateProjects || [])}
+    ${renderMarketSection("四、不建议重复发布", "这些内容已过新鲜期、已采用或市场分较低，今天不建议作为新热点重复发布。", report.notRecommended || [], "lite")}
+  `);
+}
+
 function renderRadar() {
+  if (state.radarDetail) {
+    renderRadarDetail();
+    return;
+  }
   const radarItems = buildRadarItems(state.items);
   radarGrid.innerHTML = radarItems
     .map(
-      (item) => `
-        <article class="radar-card">
+      (item, i) => `
+        <article class="radar-card clickable" data-radar="${i}">
           <header>
             <h2>${item.title}</h2>
             <span class="risk ${item.risk}">${item.riskText}</span>
           </header>
           <p>${item.text}</p>
+          <div class="radar-card-footer">
+            <span class="radar-count">${item.count} 篇文章</span>
+            <span class="radar-arrow">→</span>
+          </div>
           <div class="meter" aria-label="${item.title}风险指数 ${item.value}">
             <span style="width: ${item.value}%"></span>
           </div>
@@ -398,6 +508,38 @@ function renderRadar() {
       `,
     )
     .join("");
+}
+
+function renderRadarDetail() {
+  const rule = buildRadarItems(state.items).find((r) => r.title === state.radarDetail);
+  if (!rule) {
+    state.radarDetail = null;
+    renderRadar();
+    return;
+  }
+  radarGrid.innerHTML = `
+    <div class="radar-detail">
+      <button class="radar-back" id="radarBack">← 返回雷达</button>
+      <div class="radar-detail-header">
+        <h2>${rule.title}</h2>
+        <span class="risk ${rule.risk}">${rule.riskText}</span>
+      </div>
+      <div class="radar-keywords">${rule.keywords.map((k) => `<span class="tag">${k}</span>`).join("")}</div>
+      <p class="radar-detail-desc">${rule.text}</p>
+      <div class="radar-feed" id="radarFeed"></div>
+    </div>
+  `;
+  renderFeed(document.getElementById("radarFeed"), rule.matched);
+}
+
+function showRadarDetail(title) {
+  state.radarDetail = title;
+  renderRadar();
+}
+
+function hideRadarDetail() {
+  state.radarDetail = null;
+  renderRadar();
 }
 
 function renderCounts(items) {
@@ -501,6 +643,7 @@ function renderContent() {
   renderFeed(allFeed, items);
   renderSnapshots();
   renderDaily();
+  renderMarket();
   renderRadar();
   renderCounts(items);
   renderStatus(items);
@@ -518,11 +661,10 @@ function normalizeApiItem(item) {
     heat: Number(item.heat || 60),
     impact: item.impact || "中影响",
     tags: Array.isArray(item.tags) ? item.tags : [],
-    image:
-      item.image ||
-      "https://images.unsplash.com/photo-1521791136064-7986c2920216?auto=format&fit=crop&w=360&q=80",
+    image: item.image || "",
     url: item.url || "",
     publishedAt: item.publishedAt || null,
+    fetchedAt: item.fetchedAt || null,
   };
 }
 
@@ -561,16 +703,18 @@ async function loadLiveNews({ refresh = false } = {}) {
         generatedAt: data.generatedAt,
       };
     } else {
+      state.items = [];
       state.sourceStatus = Array.isArray(data.sources) ? data.sources : [];
       state.liveMeta = {
-        mode: "demo",
-        text: "实时信源暂无返回，暂用演示数据",
+        mode: "empty",
+        text: "实时信源暂无真实返回",
       };
     }
   } catch (error) {
+    state.items = [];
     state.liveMeta = {
-      mode: "demo",
-      text: `实时信源连接失败，暂用演示数据`,
+      mode: "error",
+      text: "实时信源连接失败，未加载演示数据",
       error: error instanceof Error ? error.message : String(error),
     };
   } finally {
@@ -579,10 +723,58 @@ async function loadLiveNews({ refresh = false } = {}) {
     renderContent();
   }
 
+  loadMarketReport({ refresh });
   loadDailyReport({ refresh });
 }
 
-async function loadDailyReport({ refresh = false } = {}) {
+async function loadMarketReport({ refresh = false, date } = {}) {
+  if (window.location.protocol === "file:") {
+    return;
+  }
+
+  state.marketLoading = true;
+  state.marketError = "";
+  renderContent();
+
+  try {
+    const params = new URLSearchParams();
+    if (refresh) params.set("refresh", "1");
+    if (date) params.set("date", date);
+    const qs = params.toString();
+    const response = await fetch(`/api/market${qs ? `?${qs}` : ""}`, {
+      headers: { accept: "application/json" },
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    state.marketReportData = data.report || null;
+    state.marketDate = data.report?.date || date || null;
+    loadMarketHistory();
+  } catch (error) {
+    state.marketReportData = null;
+    state.marketError = `市场素材加载失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    state.marketLoading = false;
+    renderContent();
+  }
+}
+
+async function loadMarketHistory() {
+  if (window.location.protocol === "file:") return;
+  try {
+    const res = await fetch("/api/market/history");
+    const data = await res.json();
+    if (data.ok) {
+      state.marketHistory = data.history || [];
+      renderContent();
+    }
+  } catch { /* ignore */ }
+}
+
+async function loadDailyReport({ refresh = false, date } = {}) {
   if (window.location.protocol === "file:") {
     return;
   }
@@ -591,7 +783,11 @@ async function loadDailyReport({ refresh = false } = {}) {
   renderContent();
 
   try {
-    const response = await fetch(`/api/daily${refresh ? "?refresh=1" : ""}`, {
+    const params = new URLSearchParams();
+    if (refresh) params.set("refresh", "1");
+    if (date) params.set("date", date);
+    const qs = params.toString();
+    const response = await fetch(`/api/daily${qs ? `?${qs}` : ""}`, {
       headers: { accept: "application/json" },
     });
 
@@ -601,12 +797,25 @@ async function loadDailyReport({ refresh = false } = {}) {
 
     const data = await response.json();
     state.dailyReport = data.report || null;
+    state.dailyDate = date || null;
   } catch {
     state.dailyReport = null;
   } finally {
     state.dailyLoading = false;
     renderContent();
   }
+}
+
+async function loadDailyHistory() {
+  if (window.location.protocol === "file:") return;
+  try {
+    const res = await fetch("/api/daily/history");
+    const data = await res.json();
+    if (data.ok) {
+      state.dailyHistory = data.history || [];
+      renderContent();
+    }
+  } catch { /* ignore */ }
 }
 
 function setView(viewName) {
@@ -619,6 +828,7 @@ function setView(viewName) {
   }
 
   state.view = viewName;
+  state.radarDetail = null;
   document.querySelectorAll(".view").forEach((view) => {
     view.classList.toggle("active", view.id === `view-${viewName}`);
   });
@@ -728,7 +938,7 @@ document.addEventListener("click", async (event) => {
   }
 });
 
-document.addEventListener("click", (event) => {
+document.addEventListener("click", async (event) => {
   const viewButton = event.target.closest("[data-view]");
   if (viewButton) {
     setView(viewButton.dataset.view);
@@ -739,6 +949,80 @@ document.addEventListener("click", (event) => {
   if (categoryButton) {
     state.category = categoryButton.dataset.category;
     renderContent();
+    return;
+  }
+
+  const radarCard = event.target.closest(".radar-card.clickable");
+  if (radarCard) {
+    const radarItems = buildRadarItems(state.items);
+    const idx = parseInt(radarCard.dataset.radar, 10);
+    if (radarItems[idx]) showRadarDetail(radarItems[idx].title);
+    return;
+  }
+
+  if (event.target.closest("#radarBack")) {
+    hideRadarDetail();
+    return;
+  }
+
+  const historyBtn = event.target.closest("[data-daily-date]");
+  if (historyBtn) {
+    const date = historyBtn.dataset.dailyDate;
+    loadDailyReport({ date });
+    return;
+  }
+
+  const marketHistoryBtn = event.target.closest("[data-market-date]");
+  if (marketHistoryBtn) {
+    const date = marketHistoryBtn.dataset.marketDate;
+    loadMarketReport({ date });
+    return;
+  }
+
+  const newsCard = event.target.closest(".news-card-link:not(.inert-card)");
+  if (newsCard && newsCard.closest("#radarFeed") && !event.metaKey && !event.ctrlKey) {
+    const article = newsCard.closest(".news-card");
+    const url = newsCard.getAttribute("href");
+    if (url) {
+      showArticleModal(article, url);
+      event.preventDefault();
+    }
+    return;
+  }
+
+  if (event.target.closest("#modalOverlay") || event.target.closest(".modal-close")) {
+    closeArticleModal();
+    return;
+  }
+
+  const marketAction = event.target.closest("[data-market-action]");
+  if (marketAction) {
+    const id = marketAction.dataset.id;
+    if (id) {
+      try {
+        const response = await fetch("/api/market/feedback", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            articleHash: id,
+            action: marketAction.dataset.marketAction,
+            date: state.marketReportData?.date,
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.error || `HTTP ${response.status}`);
+        }
+        state.marketReportData = data.report || state.marketReportData;
+        state.marketDate = data.report?.date || state.marketDate;
+        state.marketError = "";
+        loadMarketHistory();
+      } catch (error) {
+        state.marketError = `反馈保存失败：${error instanceof Error ? error.message : String(error)}`;
+      }
+      renderContent();
+    }
+    return;
   }
 });
 
@@ -765,6 +1049,19 @@ document.querySelector("#copyDaily").addEventListener("click", async () => {
     }, 1400);
   } catch {
     document.querySelector("#copyDaily").textContent = "复制失败";
+  }
+});
+
+document.querySelector("#copyMarket").addEventListener("click", async () => {
+  const text = marketReport.innerText.trim();
+  try {
+    await navigator.clipboard.writeText(text);
+    document.querySelector("#copyMarket").textContent = "已复制";
+    setTimeout(() => {
+      document.querySelector("#copyMarket").textContent = "复制素材";
+    }, 1400);
+  } catch {
+    document.querySelector("#copyMarket").textContent = "复制失败";
   }
 });
 
@@ -840,6 +1137,15 @@ window.addEventListener("hashchange", () => {
   const view = window.location.hash.replace("#", "");
   if (view) {
     setView(view);
+  }
+});
+
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    const overlay = document.getElementById("modalOverlay");
+    if (overlay?.classList.contains("active")) {
+      closeArticleModal();
+    }
   }
 });
 
@@ -927,3 +1233,58 @@ checkAuth().then(() => {
   setView(initialView);
 });
 loadLiveNews();
+loadMarketHistory();
+loadDailyHistory();
+
+function showArticleModal(cardEl, url) {
+  let overlay = document.getElementById("modalOverlay");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "modalOverlay";
+    overlay.className = "modal-overlay";
+    document.body.appendChild(overlay);
+  }
+  const title = cardEl.querySelector("h3")?.textContent || "";
+  const summary = cardEl.querySelector(".news-body p")?.textContent || "";
+  const source = cardEl.querySelector(".meta-row span:nth-child(2)")?.textContent || "";
+  const time = cardEl.querySelector(".meta-row span:nth-child(3)")?.textContent || "";
+  const heat = cardEl.querySelector(".priority")?.textContent || "";
+  const impact = cardEl.querySelector(".tag.impact")?.textContent || "";
+  const tags = [...cardEl.querySelectorAll(".tag-row .tag:not(.impact)")].map((t) => t.textContent);
+  const image = cardEl.querySelector(".thumb img")?.src || "";
+
+  overlay.innerHTML = `
+    <div class="modal-content">
+      <button class="modal-close">&times;</button>
+      ${image ? `<img class="modal-image" src="${image}" alt="" />` : ""}
+      <div class="modal-header">
+        <h2>${escapeHtml(title)}</h2>
+        <div class="modal-meta">
+          <span>${escapeHtml(source)}</span>
+          <span>${escapeHtml(time)}</span>
+          ${heat ? `<span class="priority">${escapeHtml(heat)}</span>` : ""}
+        </div>
+        <div class="tag-row">
+          ${impact ? `<span class="tag impact">${escapeHtml(impact)}</span>` : ""}
+          ${tags.map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join("")}
+        </div>
+      </div>
+      <div class="modal-body">
+        <p>${escapeHtml(summary)}</p>
+      </div>
+      <div class="modal-actions">
+        <a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer" class="modal-link">查看原文 →</a>
+      </div>
+    </div>
+  `;
+  overlay.classList.add("active");
+  document.body.style.overflow = "hidden";
+}
+
+function closeArticleModal() {
+  const overlay = document.getElementById("modalOverlay");
+  if (overlay) {
+    overlay.classList.remove("active");
+  }
+  document.body.style.overflow = "";
+}

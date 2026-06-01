@@ -27,14 +27,17 @@ Single-file HTTP server handling both API and static files:
 - **Database layer**: Spawns `mysql` CLI via `child_process.spawn` for all SQL. No ORM, no driver. SQL helpers: `sqlString`, `sqlNumber`, `sqlDate`, `sqlIdentifier`. Tables auto-created on first request via `initDb()`. Note: `mysqlJson()` requires SQL queries to return JSON natively (via `JSON_ARRAYAGG`/`JSON_OBJECT`), not raw column output.
 - **RSS pipeline**: `fetchWithTimeout` → regex-based XML parsing (`parseFeed`, `getBlocks`, `getTag`) → category/tag inference (`inferCategory`, `inferTags`) → heat scoring (`calculateHeat`) → upsert into `articles` table.
 - **Firecrawl integration**: `fetchWithFirecrawl` calls the Firecrawl scrape API to fetch pages without RSS. Used for `type: "website"` sources. Returns a single article per page (title, summary, url).
+- **Jina Reader integration**: `fetchWithJina` calls `https://r.jina.ai/<url>` to extract page content as markdown. Used for `type: "html"` sources. Returns parsed articles via `parseJinaMarkdown`. **Requires proxy (127.0.0.1:7890)** — the server environment cannot reach `r.jina.ai` directly.
 - **DeepSeek integration**: `callDeepSeek` sends a structured prompt to the OpenAI-compatible chat completions endpoint. Falls back to `buildFallbackDailyMarkdown` if the API key is missing or the call fails.
-- **API routes**: `/api/health`, `/api/news`, `/api/daily`, `/api/sources` (GET/POST), `/api/submissions` (GET), `/api/submissions/:id` (PUT), `/api/feedback` (POST). Query param `refresh=1` forces re-fetch or re-generation.
-- **Source types**: `rss` (default), `twitter` (via Nitter), `html` (regex CSS selectors), `json` (dot-path), `website` (Firecrawl). Type is stored in `yimin_sources.type` column. Website sources are also read from DB in `refreshFeeds()`.
+- **Market素材生成**: `callDeepSeek` 生成市场素材日报，按新鲜度分类（今日新增/延续关注/无新增/不建议发布），包含推荐标题、渠道、话术。存入 `yimin_market_reports` + `yimin_market_materials`。反馈写入 `yimin_market_feedback`。
+- **Auth**: Cookie-based session login (`/api/login`, `/api/logout`, `/api/me`). Credentials from `.env` (`AUTH_USER`/`AUTH_PASS`).
+- **API routes**: `/api/health`, `/api/news`, `/api/daily`, `/api/daily/history`, `/api/market` (GET), `/api/market/history`, `/api/market/feedback` (POST), `/api/sources` (GET/POST), `/api/submissions` (GET), `/api/submissions/:id` (PUT), `/api/feedback` (POST), `/api/login` (POST), `/api/logout` (POST), `/api/me` (GET). Query param `refresh=1` forces re-fetch or re-generation.
+- **Source types**: `rss` (default), `twitter` (via Nitter), `html` (Jina Reader API), `json` (dot-path), `website` (Firecrawl). Type is stored in `yimin_sources.type` column. Both `website` and `html` sources are read from DB in `refreshFeeds()` via `WHERE type IN ('website', 'html') AND enabled = 1`.
 - **Static serving**: `serveStatic` resolves paths under the project root with directory traversal protection. Serves `index.html`, `styles.css`, `app.js`.
 
 ### Frontend (`app.js` + `index.html` + `styles.css`)
 
-Single-page app with hash-based routing (`#home`, `#all`, `#daily`, `#radar`, `#sources`, `#review`, `#about`, `#changelog`, `#feedback`). Works both served from the Node server (live API data) and opened as `file://` (falls back to hardcoded demo data and localStorage drafts).
+Single-page app with hash-based routing (`#home`, `#all`, `#daily`, `#market`, `#radar`, `#login`, `#sources`, `#review`, `#about`, `#changelog`, `#feedback`). Works both served from the Node server (live API data) and opened as `file://` (falls back to hardcoded demo data and localStorage drafts).
 
 Key frontend patterns:
 - `state` object holds all app state; `renderContent()` re-renders all views on any change
@@ -43,9 +46,9 @@ Key frontend patterns:
 
 ### Configuration
 
-- `.env` — MySQL connection + DeepSeek API config + Firecrawl API config (loaded manually, no dotenv library)
+- `.env` — MySQL connection + DeepSeek API config + Firecrawl API config + auth credentials (loaded manually, no dotenv library)
 - `data/sources.json` — RSS feed definitions with name, url, country, category, priority, type, fields (for html/json sources)
 
 ### Database schema
 
-Auto-created tables: `sources` (with `type` column for source type), `articles`, `fetch_runs`, `daily_reports`, `source_submissions` (with `status` enum: pending/accepted/rejected), `feedback`. Database default: `yimin_ai_hot` (MySQL, utf8mb4).
+Auto-created tables: `yimin_sources` (with `type` column for source type), `yimin_articles`, `yimin_fetch_runs`, `yimin_daily_reports`, `yimin_daily_report_items` (article dedup across 7 days), `yimin_source_submissions` (with `status` enum: pending/accepted/rejected), `yimin_feedback`, `yimin_market_reports`, `yimin_market_materials`, `yimin_market_project_status`, `yimin_market_feedback`. Database default: `yimin_ai_hot` (MySQL, utf8mb4).

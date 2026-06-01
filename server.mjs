@@ -27,6 +27,14 @@ const deepseekConfig = {
   baseUrl: process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com/v1",
   model: process.env.DEEPSEEK_MODEL || "deepseek-chat",
 };
+const marketProjects = [
+  { name: "美国 EB-5", country: "美国", keywords: ["eb-5", "eb5", "regional center", "投资"] },
+  { name: "美国 NIW / EB-1", country: "美国", keywords: ["niw", "eb-1", "eb1", "national interest waiver"] },
+  { name: "加拿大 EE / 省提名", country: "加拿大", keywords: ["express entry", "ee", "pnp", "provincial nominee", "省提名"] },
+  { name: "英国工签 / 雇主担保", country: "英国", keywords: ["work visa", "sponsor", "skilled worker", "工签", "雇主"] },
+  { name: "澳大利亚技术移民", country: "澳新", keywords: ["australia", "skill", "occupation", "州担保", "职业"] },
+  { name: "欧洲投资居留", country: "欧洲", keywords: ["golden visa", "investment", "investor", "投资居留"] },
+];
 const authConfig = {
   user: process.env.AUTH_USER || "admin",
   pass: process.env.AUTH_PASS || "admin123",
@@ -133,6 +141,10 @@ function sqlDate(value) {
   }
 
   return sqlString(date.toISOString().slice(0, 19).replace("T", " "));
+}
+
+function sqlJson(value) {
+  return `CAST(${sqlString(JSON.stringify(value ?? null))} AS JSON)`;
 }
 
 function mysqlRun(sql, { database = true, json = false } = {}) {
@@ -275,6 +287,22 @@ async function initDb() {
           UNIQUE KEY uk_yimin_daily_reports_date (report_date)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI 每日移民报告表';
 
+        CREATE TABLE IF NOT EXISTS yimin_daily_report_items (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          report_id BIGINT NOT NULL COMMENT '日报 ID',
+          article_hash CHAR(40) NOT NULL COMMENT '文章去重哈希',
+          topic_key VARCHAR(160) NOT NULL COMMENT '归一化主题 Key',
+          section VARCHAR(40) NOT NULL COMMENT '日报分组（today_new/important/continuing/repeated）',
+          article_date DATETIME NULL COMMENT '文章发布时间或抓取时间',
+          article_snapshot JSON NOT NULL COMMENT '文章快照',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          UNIQUE KEY uk_daily_report_item (report_id, article_hash, section),
+          INDEX idx_daily_report_items_hash (article_hash),
+          INDEX idx_daily_report_items_topic (topic_key),
+          INDEX idx_daily_report_items_section (section),
+          CONSTRAINT fk_daily_report_items_report FOREIGN KEY (report_id) REFERENCES yimin_daily_reports(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='日报引用文章明细表';
+
         CREATE TABLE IF NOT EXISTS yimin_source_submissions (
           id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
           name VARCHAR(160) NOT NULL COMMENT '提交的来源名称',
@@ -291,6 +319,64 @@ async function initDb() {
           message TEXT NULL COMMENT '反馈内容',
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '反馈时间'
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户反馈表';
+
+        CREATE TABLE IF NOT EXISTS yimin_market_reports (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          report_date DATE NOT NULL COMMENT '素材日报日期',
+          title VARCHAR(200) NOT NULL COMMENT '素材日报标题',
+          summary_json JSON NOT NULL COMMENT '素材日报统计信息',
+          generated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '生成时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_yimin_market_reports_date (report_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='市场素材日报表';
+
+        CREATE TABLE IF NOT EXISTS yimin_market_materials (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          report_id BIGINT NOT NULL COMMENT '市场素材日报 ID',
+          article_hash CHAR(40) NOT NULL COMMENT '文章去重哈希',
+          section VARCHAR(40) NOT NULL COMMENT '素材分组（today_new/continuing/not_recommended）',
+          project_name VARCHAR(160) NOT NULL COMMENT '匹配项目名称',
+          market_score INT NOT NULL DEFAULT 0 COMMENT '市场素材评分',
+          freshness_type VARCHAR(40) NOT NULL COMMENT '新鲜度类型',
+          recommended_title VARCHAR(600) NOT NULL COMMENT '推荐发布标题',
+          channels_json JSON NOT NULL COMMENT '推荐发布渠道',
+          angle TEXT NULL COMMENT '推荐角度',
+          customer_impact TEXT NULL COMMENT '客户影响',
+          sales_talk TEXT NULL COMMENT '销售话术',
+          risk_note TEXT NULL COMMENT '风险提醒',
+          article_snapshot JSON NOT NULL COMMENT '文章快照',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          UNIQUE KEY uk_yimin_market_material (report_id, article_hash, section),
+          INDEX idx_yimin_market_materials_article (article_hash),
+          INDEX idx_yimin_market_materials_section (section),
+          CONSTRAINT fk_market_material_report FOREIGN KEY (report_id) REFERENCES yimin_market_reports(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='市场素材明细表';
+
+        CREATE TABLE IF NOT EXISTS yimin_market_project_status (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          report_id BIGINT NOT NULL COMMENT '市场素材日报 ID',
+          project_name VARCHAR(160) NOT NULL COMMENT '项目名称',
+          country VARCHAR(80) NOT NULL COMMENT '所属国家/地区',
+          matched_count INT NOT NULL DEFAULT 0 COMMENT '匹配文章数量',
+          latest_article_at DATETIME NULL COMMENT '最近有效文章时间',
+          suggestion TEXT NULL COMMENT '市场建议',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          UNIQUE KEY uk_yimin_market_project_status (report_id, project_name),
+          CONSTRAINT fk_market_project_report FOREIGN KEY (report_id) REFERENCES yimin_market_reports(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='市场素材项目更新状态表';
+
+        CREATE TABLE IF NOT EXISTS yimin_market_feedback (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          article_hash CHAR(40) NOT NULL COMMENT '文章去重哈希',
+          action ENUM('useful','later','used','useless') NOT NULL COMMENT '市场部反馈动作',
+          note TEXT NULL COMMENT '反馈备注',
+          created_by VARCHAR(120) NULL COMMENT '反馈人',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次反馈时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_yimin_market_feedback_article (article_hash),
+          INDEX idx_yimin_market_feedback_action (action)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='市场素材反馈表';
       `);
 
       const colCheck = await mysqlRun(`
@@ -305,11 +391,58 @@ async function initDb() {
         `);
       }
 
+      await ensureReportDateUniqueness();
       await seedConfiguredSources();
     })();
   }
 
   return dbReadyPromise;
+}
+
+async function ensureReportDateUniqueness() {
+  await mysqlExec(`
+    DELETE d FROM yimin_daily_reports d
+    JOIN (
+      SELECT report_date, MAX(id) AS keep_id
+      FROM yimin_daily_reports
+      GROUP BY report_date
+      HAVING COUNT(*) > 1
+    ) dup ON dup.report_date = d.report_date AND d.id <> dup.keep_id;
+
+    DELETE m FROM yimin_market_reports m
+    JOIN (
+      SELECT report_date, MAX(id) AS keep_id
+      FROM yimin_market_reports
+      GROUP BY report_date
+      HAVING COUNT(*) > 1
+    ) dup ON dup.report_date = m.report_date AND m.id <> dup.keep_id;
+  `);
+
+  const dailyIndex = await mysqlRun(`
+    SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+    WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+      AND TABLE_NAME = 'yimin_daily_reports'
+      AND INDEX_NAME = 'uk_yimin_daily_reports_date';
+  `);
+  if (!dailyIndex.includes("uk_yimin_daily_reports_date")) {
+    await mysqlExec(`
+      ALTER TABLE yimin_daily_reports
+      ADD UNIQUE KEY uk_yimin_daily_reports_date (report_date);
+    `);
+  }
+
+  const marketIndex = await mysqlRun(`
+    SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+    WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+      AND TABLE_NAME = 'yimin_market_reports'
+      AND INDEX_NAME = 'uk_yimin_market_reports_date';
+  `);
+  if (!marketIndex.includes("uk_yimin_market_reports_date")) {
+    await mysqlExec(`
+      ALTER TABLE yimin_market_reports
+      ADD UNIQUE KEY uk_yimin_market_reports_date (report_date);
+    `);
+  }
 }
 
 async function seedConfiguredSources() {
@@ -415,8 +548,7 @@ async function upsertArticle(item, sourceId) {
       image = VALUES(image),
       heat = VALUES(heat),
       impact = VALUES(impact),
-      published_at = VALUES(published_at),
-      fetched_at = CURRENT_TIMESTAMP,
+      published_at = COALESCE(published_at, VALUES(published_at)),
       raw_json = VALUES(raw_json),
       updated_at = CURRENT_TIMESTAMP;
   `);
@@ -435,6 +567,7 @@ async function listArticlesFromDb(limit = maxTotalItems) {
           'category', category,
           'time', COALESCE(DATE_FORMAT(published_at, '%H:%i'), '刚刚'),
           'publishedAt', IF(published_at IS NULL, NULL, DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s.000Z')),
+          'fetchedAt', IF(fetched_at IS NULL, NULL, DATE_FORMAT(fetched_at, '%Y-%m-%dT%H:%i:%s.000Z')),
           'url', url,
           'heat', heat,
           'impact', impact,
@@ -448,6 +581,38 @@ async function listArticlesFromDb(limit = maxTotalItems) {
         JOIN yimin_sources s ON s.id = a.source_id
         ORDER BY a.heat DESC, COALESCE(a.published_at, a.fetched_at) DESC, a.id DESC
         LIMIT ${sqlNumber(limit, maxTotalItems)}
+      ) ranked;
+    `)) || []
+  );
+}
+
+async function listRecentArticlesFromDb(limit = Math.max(maxTotalItems * 2, 160)) {
+  return (
+    (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(
+        JSON_OBJECT(
+          'id', dedupe_hash,
+          'title', title,
+          'summary', COALESCE(summary, ''),
+          'source', source_name,
+          'country', country,
+          'category', category,
+          'time', COALESCE(DATE_FORMAT(published_at, '%H:%i'), '刚刚'),
+          'publishedAt', IF(published_at IS NULL, NULL, DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s.000Z')),
+          'fetchedAt', IF(fetched_at IS NULL, NULL, DATE_FORMAT(fetched_at, '%Y-%m-%dT%H:%i:%s.000Z')),
+          'url', url,
+          'heat', heat,
+          'impact', impact,
+          'tags', CAST(tags_json AS JSON),
+          'image', image
+        )
+      ), JSON_ARRAY())
+      FROM (
+        SELECT a.*, s.name AS source_name
+        FROM yimin_articles a
+        JOIN yimin_sources s ON s.id = a.source_id
+        ORDER BY COALESCE(a.published_at, a.fetched_at) DESC, a.heat DESC, a.id DESC
+        LIMIT ${sqlNumber(limit, Math.max(maxTotalItems * 2, 160))}
       ) ranked;
     `)) || []
   );
@@ -475,6 +640,476 @@ async function listSourceStatusesFromDb() {
       ) source_rows;
     `)) || []
   );
+}
+
+function getMarketArticleDate(item) {
+  const rawDate = item.publishedAt || item.fetchedAt;
+  const date = rawDate ? new Date(rawDate) : null;
+  return date && !Number.isNaN(date.getTime()) ? date : null;
+}
+
+function getMarketArticleAgeHours(item) {
+  const date = getMarketArticleDate(item);
+  if (!date) return 168;
+  const age = (Date.now() - date.getTime()) / 36e5;
+  if (age < 0) return 168;
+  return age;
+}
+
+function matchMarketProject(item) {
+  const text = `${item.title} ${item.summary} ${item.country} ${item.category} ${(item.tags || []).join(" ")}`.toLowerCase();
+  return marketProjects.find((project) =>
+    item.country === project.country || project.keywords.some((keyword) => text.includes(keyword)),
+  );
+}
+
+function getMarketBusinessScore(item) {
+  const text = `${item.title} ${item.summary} ${(item.tags || []).join(" ")}`.toLowerCase();
+  let score = 0;
+  if (matchMarketProject(item)) score += 18;
+  if (/eb-?5|niw|eb-?1|express entry|pnp|skilled worker|visa bulletin|priority date/.test(text)) score += 16;
+  if (/fee|rule|policy|quota|cap|limit|processing|排期|费用|新规|配额|审理|工签/.test(text)) score += 14;
+  return Math.min(35, score);
+}
+
+function getMarketFreshnessType(item, action) {
+  if (action === "used") return "已采用";
+  if (action === "useless") return "不相关";
+
+  const age = getMarketArticleAgeHours(item);
+  if (age <= 24) return "今日新增";
+  if (age <= 72) return "延续关注";
+  return "不建议重复";
+}
+
+function getMarketRecommendedChannels(item) {
+  const text = `${item.title} ${item.summary} ${item.category}`.toLowerCase();
+  const channels = new Set();
+  if (/policy|rule|regulation|uscis|ircc|home office|官方|政策|新规/.test(text)) {
+    channels.add("公众号");
+    channels.add("销售私聊");
+  }
+  if (/eb-?5|investor|investment|排期|priority date|visa bulletin/.test(text)) {
+    channels.add("朋友圈");
+    channels.add("客户社群");
+  }
+  if (/student|work permit|skilled worker|工签|留学|雇主/.test(text)) {
+    channels.add("小红书");
+    channels.add("短视频");
+  }
+  if (!channels.size) {
+    channels.add("朋友圈");
+    channels.add("销售私聊");
+  }
+  return [...channels].slice(0, 3);
+}
+
+function buildMarketRecommendedTitle(item) {
+  const project = matchMarketProject(item);
+  const label = project?.name || item.country || "移民政策";
+  const text = `${item.title} ${item.summary}`.toLowerCase();
+  if (/visa bulletin|priority date|排期/.test(text)) return `${label}排期变化，哪些客户需要关注？`;
+  if (/fee|费用/.test(text)) return `${label}费用或缴费要求变化，申请前要确认什么？`;
+  if (/work|sponsor|permit|工签|雇主/.test(text)) return `${label}工签/雇主相关动态，适合哪些申请人？`;
+  if (/eb-?5|investor|investment|投资/.test(text)) return `${label}投资移民动态，客户最关心的影响点是什么？`;
+  return `${label}最新动态：市场部可以怎么解读？`;
+}
+
+function buildMarketAngle(item) {
+  const text = `${item.title} ${item.summary}`.toLowerCase();
+  if (/visa bulletin|priority date|排期/.test(text)) return "从客户等待周期、签约预期和递案节奏切入。";
+  if (/fee|费用/.test(text)) return "从申请成本、预算准备和时间节点切入。";
+  if (/policy|rule|regulation|政策|新规/.test(text)) return "从政策变化对目标客户的实际影响切入。";
+  if (/work|sponsor|permit|工签|雇主/.test(text)) return "从雇主资质、岗位匹配和材料准备切入。";
+  return "从客户是否需要重新评估方案切入。";
+}
+
+function buildMarketCustomerImpact(item) {
+  const project = matchMarketProject(item);
+  const target = project?.name || item.country || "相关移民项目";
+  return `可能影响正在关注${target}的潜在客户，适合用于初步教育和咨询前置沟通。`;
+}
+
+function buildMarketSalesTalk(item) {
+  const project = matchMarketProject(item);
+  const label = project?.name || item.country || "相关项目";
+  return `最近${label}有新动态，如果您正在评估方案，可以先看这条信息是否影响申请节奏或材料准备。`;
+}
+
+function buildMarketRiskNote(item) {
+  const source = item.source || "原文";
+  return `发布时建议引用${source}原文，不要扩大为所有申请人都受影响；涉及条件、费用、排期需以官方页面为准。`;
+}
+
+async function getMarketFeedbackMap() {
+  const rows = await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'articleHash', article_hash,
+        'action', action,
+        'note', note,
+        'createdBy', created_by,
+        'updatedAt', DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:%s.000Z')
+      )
+    ), JSON_ARRAY())
+    FROM yimin_market_feedback;
+  `);
+
+  return Object.fromEntries((rows || []).map((row) => [row.articleHash, row]));
+}
+
+function buildMarketMaterial(item, feedbackMap) {
+  const feedback = feedbackMap[item.id] || null;
+  const action = feedback?.action || null;
+  const age = getMarketArticleAgeHours(item);
+  const freshnessType = getMarketFreshnessType(item, action);
+  const freshnessScore = age <= 24 ? 30 : age <= 72 ? 16 : 4;
+  const authorityScore = /官方|USCIS|IRCC|Visas and Immigration|Department|Gov/i.test(item.source) ? 18 : 10;
+  const businessScore = getMarketBusinessScore(item);
+  const customerScore = item.heat >= 85 ? 14 : item.heat >= 70 ? 9 : 5;
+  const actionPenalty = action === "used" ? 45 : action === "useless" ? 55 : action === "later" ? 6 : 0;
+  const oldPenalty = age > 72 ? 18 : 0;
+  const marketScore = Math.max(0, Math.min(99, freshnessScore + authorityScore + businessScore + customerScore - actionPenalty - oldPenalty));
+
+  return {
+    ...item,
+    action,
+    feedback,
+    marketScore,
+    freshnessType,
+    projectName: matchMarketProject(item)?.name || item.country || "综合移民",
+    recommendedTitle: buildMarketRecommendedTitle(item),
+    channels: getMarketRecommendedChannels(item),
+    angle: buildMarketAngle(item),
+    customerImpact: buildMarketCustomerImpact(item),
+    salesTalk: buildMarketSalesTalk(item),
+    riskNote: buildMarketRiskNote(item),
+    ageHours: age,
+  };
+}
+
+function buildMarketReport(date, items, feedbackMap) {
+  const materials = items.map((item) => buildMarketMaterial(item, feedbackMap)).sort((a, b) => b.marketScore - a.marketScore);
+  const todayNew = materials.filter((m) => m.freshnessType === "今日新增" && m.marketScore >= 45).slice(0, 6);
+  const continuing = materials
+    .filter((m) => m.freshnessType === "延续关注" && m.action !== "used" && m.action !== "useless")
+    .slice(0, 6);
+  const notRecommended = materials
+    .filter((m) => ["不建议重复", "已采用", "不相关"].includes(m.freshnessType) || m.marketScore < 35)
+    .slice(0, 6);
+  const usableCount = materials.filter((m) => m.marketScore >= 55 && !["used", "useless"].includes(m.action)).length;
+  const noUpdateProjects = marketProjects
+    .map((project) => {
+      const matched = materials.filter((m) => {
+        const text = `${m.title} ${m.summary} ${m.country} ${m.category} ${(m.tags || []).join(" ")}`.toLowerCase();
+        return m.country === project.country || project.keywords.some((keyword) => text.includes(keyword));
+      });
+      const hasFresh = matched.some((m) => m.ageHours <= 24);
+      const latestDate = matched
+        .map((m) => getMarketArticleDate(m))
+        .filter(Boolean)
+        .sort((a, b) => b - a)[0];
+      return {
+        ...project,
+        matchedCount: matched.length,
+        hasFresh,
+        latest: latestDate ? latestDate.toISOString() : null,
+        suggestion: "今日不单独发新热点，可使用常青科普或等待新政策变化。",
+      };
+    })
+    .filter((project) => !project.hasFresh)
+    .slice(0, 8);
+
+  const report = {
+    date,
+    title: `市场素材日报（${date}）`,
+    generatedAt: new Date().toISOString(),
+    todayNew,
+    continuing,
+    noUpdateProjects,
+    notRecommended,
+    summary: {
+      total: materials.length,
+      todayNew: todayNew.length,
+      usable: usableCount,
+      continuing: continuing.length,
+      noUpdate: noUpdateProjects.length,
+      notRecommended: notRecommended.length,
+    },
+  };
+
+  return report;
+}
+
+function getMarketArticleSnapshot(material) {
+  return {
+    id: material.id,
+    title: material.title,
+    summary: material.summary,
+    source: material.source,
+    country: material.country,
+    category: material.category,
+    time: material.time,
+    publishedAt: material.publishedAt,
+    fetchedAt: material.fetchedAt,
+    url: material.url,
+    heat: material.heat,
+    impact: material.impact,
+    tags: material.tags || [],
+    image: material.image || "",
+    ageHours: material.ageHours,
+  };
+}
+
+async function saveMarketReport(report) {
+  await mysqlExec(`
+    INSERT INTO yimin_market_reports (report_date, title, summary_json, generated_at)
+    VALUES (
+      ${sqlString(report.date)},
+      ${sqlString(report.title)},
+      ${sqlJson(report.summary)},
+      CURRENT_TIMESTAMP
+    )
+    ON DUPLICATE KEY UPDATE
+      title = VALUES(title),
+      summary_json = VALUES(summary_json),
+      generated_at = CURRENT_TIMESTAMP,
+      updated_at = CURRENT_TIMESTAMP;
+  `);
+
+  const row = await mysqlJson(`
+    SELECT JSON_OBJECT('id', id)
+    FROM yimin_market_reports
+    WHERE report_date = ${sqlString(report.date)}
+    LIMIT 1;
+  `);
+  const reportId = row?.id;
+  if (!reportId) return;
+
+  await mysqlExec(`
+    DELETE FROM yimin_market_materials WHERE report_id = ${sqlNumber(reportId)};
+    DELETE FROM yimin_market_project_status WHERE report_id = ${sqlNumber(reportId)};
+  `);
+
+  const sections = [
+    ["today_new", report.todayNew],
+    ["continuing", report.continuing],
+    ["not_recommended", report.notRecommended],
+  ];
+
+  for (const [section, materials] of sections) {
+    for (const material of materials) {
+      await mysqlExec(`
+        INSERT INTO yimin_market_materials (
+          report_id, article_hash, section, project_name, market_score, freshness_type,
+          recommended_title, channels_json, angle, customer_impact, sales_talk, risk_note, article_snapshot
+        )
+        VALUES (
+          ${sqlNumber(reportId)},
+          ${sqlString(material.id)},
+          ${sqlString(section)},
+          ${sqlString(material.projectName)},
+          ${sqlNumber(material.marketScore)},
+          ${sqlString(material.freshnessType)},
+          ${sqlString(material.recommendedTitle)},
+          ${sqlJson(material.channels || [])},
+          ${sqlString(material.angle)},
+          ${sqlString(material.customerImpact)},
+          ${sqlString(material.salesTalk)},
+          ${sqlString(material.riskNote)},
+          ${sqlJson(getMarketArticleSnapshot(material))}
+        );
+      `);
+    }
+  }
+
+  for (const project of report.noUpdateProjects) {
+    await mysqlExec(`
+      INSERT INTO yimin_market_project_status (
+        report_id, project_name, country, matched_count, latest_article_at, suggestion
+      )
+      VALUES (
+        ${sqlNumber(reportId)},
+        ${sqlString(project.name)},
+        ${sqlString(project.country)},
+        ${sqlNumber(project.matchedCount)},
+        ${sqlDate(project.latest)},
+        ${sqlString(project.suggestion)}
+      );
+    `);
+  }
+}
+
+async function listSavedMarketMaterials(reportId, section) {
+  return (
+    (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(material_json), JSON_ARRAY())
+      FROM (
+        SELECT JSON_MERGE_PATCH(
+          article_snapshot,
+          JSON_OBJECT(
+            'id', m.article_hash,
+            'action', f.action,
+            'feedback', IF(
+              f.article_hash IS NULL,
+              CAST(NULL AS JSON),
+              JSON_OBJECT(
+                'action', f.action,
+                'note', f.note,
+                'createdBy', f.created_by,
+                'updatedAt', DATE_FORMAT(f.updated_at, '%Y-%m-%dT%H:%i:%s.000Z')
+              )
+            ),
+            'marketScore', market_score,
+            'freshnessType', freshness_type,
+            'projectName', project_name,
+            'recommendedTitle', recommended_title,
+            'channels', CAST(channels_json AS JSON),
+            'angle', angle,
+            'customerImpact', customer_impact,
+            'salesTalk', sales_talk,
+            'riskNote', risk_note
+          )
+        ) AS material_json
+        FROM yimin_market_materials m
+        LEFT JOIN yimin_market_feedback f ON f.article_hash = m.article_hash
+        WHERE m.report_id = ${sqlNumber(reportId)}
+          AND m.section = ${sqlString(section)}
+        ORDER BY m.market_score DESC, m.id ASC
+      ) saved_materials;
+    `)) || []
+  );
+}
+
+async function listSavedMarketProjects(reportId) {
+  return (
+    (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(project_json), JSON_ARRAY())
+      FROM (
+        SELECT JSON_OBJECT(
+          'name', project_name,
+          'country', country,
+          'matchedCount', matched_count,
+          'latest', IF(latest_article_at IS NULL, NULL, DATE_FORMAT(latest_article_at, '%Y-%m-%dT%H:%i:%s.000Z')),
+          'suggestion', suggestion
+        ) AS project_json
+        FROM yimin_market_project_status
+        WHERE report_id = ${sqlNumber(reportId)}
+        ORDER BY id ASC
+      ) saved_projects;
+    `)) || []
+  );
+}
+
+async function getSavedMarketReport(date) {
+  const existing = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'id', id,
+      'date', DATE_FORMAT(report_date, '%Y-%m-%d'),
+      'title', title,
+      'summary', CAST(summary_json AS JSON),
+      'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s.000Z')
+    )
+    FROM yimin_market_reports
+    WHERE report_date = ${sqlString(date)}
+    LIMIT 1;
+  `);
+
+  if (!existing) {
+    return null;
+  }
+
+  const reportId = existing.id;
+  return {
+    date: existing.date,
+    title: existing.title,
+    summary: existing.summary || {},
+    generatedAt: existing.generatedAt,
+    todayNew: await listSavedMarketMaterials(reportId, "today_new"),
+    continuing: await listSavedMarketMaterials(reportId, "continuing"),
+    noUpdateProjects: await listSavedMarketProjects(reportId),
+    notRecommended: await listSavedMarketMaterials(reportId, "not_recommended"),
+  };
+}
+
+async function listMarketHistory() {
+  await initDb();
+  return (
+    (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(
+        JSON_OBJECT(
+          'date', DATE_FORMAT(report_date, '%Y-%m-%d'),
+          'title', title,
+          'todayNew', CAST(JSON_UNQUOTE(JSON_EXTRACT(summary_json, '$.todayNew')) AS UNSIGNED),
+          'usable', CAST(JSON_UNQUOTE(JSON_EXTRACT(summary_json, '$.usable')) AS UNSIGNED),
+          'continuing', CAST(JSON_UNQUOTE(JSON_EXTRACT(summary_json, '$.continuing')) AS UNSIGNED),
+          'notRecommended', CAST(JSON_UNQUOTE(JSON_EXTRACT(summary_json, '$.notRecommended')) AS UNSIGNED),
+          'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s.000Z')
+        )
+      ), JSON_ARRAY())
+      FROM (
+        SELECT report_date, title, summary_json, generated_at
+        FROM yimin_market_reports
+        ORDER BY report_date DESC
+        LIMIT 30
+      ) recent;
+    `)) || []
+  );
+}
+
+async function getMarketReport(date = getShanghaiDate(), { refresh = false, rebuild = false } = {}) {
+  await initDb();
+
+  if (!refresh && !rebuild) {
+    const existing = await getSavedMarketReport(date);
+    if (existing) {
+      return existing;
+    }
+  }
+
+  if (refresh) {
+    await refreshFeeds();
+  }
+
+  let items = await listRecentArticlesFromDb(Math.max(maxTotalItems * 2, 160));
+  if (items.length === 0) {
+    await refreshFeeds().catch(() => {});
+    items = await listRecentArticlesFromDb(Math.max(maxTotalItems * 2, 160));
+  }
+
+  const feedbackMap = await getMarketFeedbackMap();
+  const report = buildMarketReport(date, items, feedbackMap);
+  await saveMarketReport(report);
+  return (await getSavedMarketReport(date)) || report;
+}
+
+async function saveMarketFeedback(data, session = null) {
+  await initDb();
+  const articleHash = String(data.articleHash || data.id || "").trim();
+  const action = String(data.action || "").trim();
+  if (!articleHash) {
+    throw new Error("articleHash is required");
+  }
+  if (!["useful", "later", "used", "useless"].includes(action)) {
+    throw new Error("invalid feedback action");
+  }
+
+  await mysqlExec(`
+    INSERT INTO yimin_market_feedback (article_hash, action, note, created_by)
+    VALUES (
+      ${sqlString(articleHash)},
+      ${sqlString(action)},
+      ${sqlString(data.note || "")},
+      ${sqlString(session?.username || data.createdBy || "")}
+    )
+    ON DUPLICATE KEY UPDATE
+      action = VALUES(action),
+      note = VALUES(note),
+      created_by = VALUES(created_by),
+      updated_at = CURRENT_TIMESTAMP;
+  `);
+
+  return { articleHash, action };
 }
 
 async function saveSourceSubmission(data) {
@@ -580,6 +1215,87 @@ async function fetchWithFirecrawl(url) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function fetchWithJina(url) {
+  const jinaUrl = `https://r.jina.ai/${url}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const response = await fetch(jinaUrl, {
+      signal: controller.signal,
+      headers: { Accept: "text/plain" },
+    });
+    const text = await response.text();
+    return {
+      ok: response.ok,
+      status: response.status,
+      text,
+      title: response.headers.get("x-title") || "",
+    };
+  } catch (err) {
+    return { ok: false, status: 0, text: "", title: "", error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function parseJinaMarkdown(markdown, source, pageTitle) {
+  if (!markdown) return [];
+  const lines = markdown.split("\n");
+  const articles = [];
+  let currentTitle = "";
+  let currentUrl = "";
+  let currentSummary = "";
+  const urlRe = /\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g;
+
+  for (const line of lines) {
+    const headingMatch = line.match(/^#{1,3}\s+(.+)/);
+    const linkMatch = line.match(/\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/);
+
+    if (headingMatch) {
+      if (currentTitle && (currentUrl || currentSummary)) {
+        articles.push({ title: currentTitle, url: currentUrl, summary: currentSummary.trim() });
+      }
+      currentTitle = headingMatch[1].replace(/[*_`]/g, "").trim();
+      currentUrl = "";
+      currentSummary = "";
+    } else if (linkMatch && !currentUrl) {
+      currentUrl = linkMatch[2];
+      if (!currentTitle) currentTitle = linkMatch[1] || pageTitle || source.name;
+    } else if (line.trim() && !line.startsWith("!") && !line.startsWith("[")) {
+      if (currentTitle) {
+        currentSummary += (currentSummary ? " " : "") + line.replace(/[*_`#\[\]()]/g, "").trim();
+      }
+    }
+  }
+  if (currentTitle && (currentUrl || currentSummary)) {
+    articles.push({ title: currentTitle, url: currentUrl, summary: currentSummary.trim() });
+  }
+
+  return articles.slice(0, maxItemsPerSource).map((a) => {
+    const publishedAt = null;
+    const category = inferCategory(`${a.title} ${a.summary}`, source.category);
+    const item = {
+      id: createHash("sha1").update(`${a.url || ""}|${a.title}`).digest("hex").slice(0, 12),
+      title: cleanText(a.title),
+      summary: truncate(a.summary || "查看原文获取完整信息。", 150),
+      source: source.name,
+      country: source.country,
+      category,
+      time: "刚刚",
+      publishedAt,
+      url: a.url ? resolveRelativeUrl(a.url, source.url) : source.url,
+    };
+    const heat = calculateHeat(item, source);
+    return {
+      ...item,
+      heat,
+      impact: heat >= 85 ? "高影响" : heat >= 70 ? "中影响" : "低影响",
+      tags: inferTags({ ...item, category }, source),
+      image: imageFor({ ...item, category }, source),
+    };
+  });
 }
 
 const nitterInstances = [
@@ -1015,9 +1731,7 @@ async function fetchSource(source) {
     }
 
     const extraHeaders = {};
-    if (sourceType === "html") {
-      extraHeaders.accept = "text/html, */*";
-    } else if (sourceType === "json") {
+    if (sourceType === "json") {
       extraHeaders.accept = "application/json, */*";
     }
 
@@ -1050,6 +1764,17 @@ async function fetchSource(source) {
         tags: inferTags({}, source),
         image: imageFor({}, source),
       }];
+    } else if (sourceType === "html") {
+      const jinaResult = await fetchWithJina(fetchUrl);
+      if (!jinaResult.ok) {
+        await updateSourceFetchStatus(sourceId, jinaResult.error || `HTTP ${jinaResult.status}`);
+        return {
+          source,
+          items: [],
+          status: { name: source.name, country: source.country, ok: false, count: 0, error: jinaResult.error || `HTTP ${jinaResult.status}` },
+        };
+      }
+      items = parseJinaMarkdown(jinaResult.text, source, jinaResult.title);
     } else {
       const response = await fetchWithTimeout(fetchUrl, extraHeaders);
       if (!response.ok) {
@@ -1069,8 +1794,6 @@ async function fetchSource(source) {
 
       if (sourceType === "rss" || sourceType === "twitter") {
         items = parseFeed(response.text, source);
-      } else if (sourceType === "html") {
-        items = parseHtml(response.text, source);
       } else if (sourceType === "json") {
         items = parseJson(response.text, source);
       } else {
@@ -1124,7 +1847,7 @@ async function refreshFeeds() {
                   'category', category, 'priority', priority, 'type', type)
     ) AS src_rows
     FROM yimin_sources
-    WHERE type = 'website' AND enabled = 1;
+    WHERE type IN ('website', 'html') AND enabled = 1;
   `);
   if (Array.isArray(dbWebsiteSources) && dbWebsiteSources.length > 0) {
     const existingUrls = new Set(sources.map((s) => s.url));
@@ -1274,41 +1997,164 @@ function formatInlineMarkdown(value) {
     );
 }
 
-function buildFallbackDailyMarkdown(date, items, reason = "") {
-  const countries = [...new Set(items.map((item) => item.country).filter(Boolean))].slice(0, 5);
-  const categories = [...new Set(items.map((item) => item.category).filter(Boolean))].slice(0, 6);
-  const topItems = items.slice(0, 8);
+function normalizeDailyTopicText(value) {
+  const stopWords = new Set([
+    "the",
+    "and",
+    "for",
+    "with",
+    "from",
+    "that",
+    "this",
+    "have",
+    "has",
+    "are",
+    "will",
+    "news",
+    "update",
+    "updates",
+    "immigration",
+    "visa",
+  ]);
 
-  return `# 移民热点日报 | ${date}
-
-## 一、今日总结
-
-今日共收录 ${items.length} 条移民相关动态，覆盖 ${countries.join("、") || "多个国家/地区"}。重点主题集中在 ${categories.join("、") || "政策、签证、排期"}。
-
-${reason ? `> AI 日报生成暂不可用：${reason}` : ""}
-
-## 二、重要信息
-
-- 美国 EB-5、身份调整、签证排期和资金合规仍是高热度关注点。
-- 加拿大与英国官方动态适合项目经理持续跟进，尤其是工签、雇主担保和顾问合规。
-- 销售侧建议把等待周期、材料边界和政策不确定性放在咨询前段说明。
-
-## 三、热点列表
-
-${topItems
-  .map((item, index) => `${index + 1}. [${item.title}](${item.url || "#"}) - ${item.summary}`)
-  .join("\n")}
-
-## 四、建议关注
-
-- 更新美国 EB-5 与签证排期 FAQ。
-- 跟进加拿大 IRCC 官方公告，筛出对省提名、EE、工签客户有直接影响的信息。
-- 对英国雇主担保与 eVisa 内容建立单独解释卡片。`;
+  return String(value || "")
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/\b(19|20)\d{2}\b/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length > 1 && !stopWords.has(word))
+    .slice(0, 18)
+    .join(" ");
 }
 
-function buildDailyPrompt(date, items) {
-  const articleLines = items
-    .slice(0, 28)
+function getDailyTopicKey(item) {
+  const normalized = normalizeDailyTopicText(`${item.country} ${item.category} ${item.title}`);
+  return createHash("sha1").update(normalized || item.id || item.title || "").digest("hex").slice(0, 32);
+}
+
+function getDailyArticleDate(item) {
+  const rawDate = item.publishedAt || item.fetchedAt;
+  const date = rawDate ? new Date(rawDate) : null;
+  return date && !Number.isNaN(date.getTime()) ? date : null;
+}
+
+function getDailyDateWindow(date) {
+  const start = new Date(`${date}T00:00:00+08:00`);
+  const end = new Date(start.getTime() + 24 * 36e5);
+  const recentStart = new Date(end.getTime() - 72 * 36e5);
+  return { start, end, recentStart };
+}
+
+function getDailyItemScore(item, articleDate, window) {
+  const heat = Number(item.heat || 0);
+  const ageHours = articleDate ? Math.max(0, (window.end.getTime() - articleDate.getTime()) / 36e5) : 999;
+  const freshness = ageHours <= 24 ? 35 : ageHours <= 72 ? 18 : 0;
+  const official = /官方|uscis|ircc|gov|government|department|home office/i.test(item.source || "") ? 12 : 0;
+  const highIntent = /eb-?5|niw|eb-?1|visa bulletin|priority date|express entry|pnp|skilled worker|排期|费用|新规|配额|审理|工签/.test(
+    `${item.title} ${item.summary} ${(item.tags || []).join(" ")}`.toLowerCase(),
+  )
+    ? 10
+    : 0;
+  return heat + freshness + official + highIntent;
+}
+
+async function getRecentDailyUsage(date, lookbackDays = 7) {
+  const rows = await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'articleHash', i.article_hash,
+        'topicKey', i.topic_key,
+        'section', i.section,
+        'reportDate', DATE_FORMAT(r.report_date, '%Y-%m-%d')
+      )
+    ), JSON_ARRAY())
+    FROM yimin_daily_report_items i
+    JOIN yimin_daily_reports r ON r.id = i.report_id
+    WHERE r.report_date < ${sqlString(date)}
+      AND r.report_date >= DATE_SUB(${sqlString(date)}, INTERVAL ${sqlNumber(lookbackDays, 7)} DAY);
+  `);
+
+  const byHash = new Map();
+  const byTopic = new Map();
+  for (const row of rows || []) {
+    if (row.articleHash && !byHash.has(row.articleHash)) byHash.set(row.articleHash, row);
+    if (row.topicKey && !byTopic.has(row.topicKey)) byTopic.set(row.topicKey, row);
+  }
+  return { rows: rows || [], byHash, byTopic };
+}
+
+function uniqueDailyItemsByTopic(items) {
+  const usedTopics = new Set();
+  return items
+    .sort((a, b) => b.dailyScore - a.dailyScore)
+    .filter((item) => {
+      if (usedTopics.has(item.topicKey)) return false;
+      usedTopics.add(item.topicKey);
+      return true;
+    });
+}
+
+async function buildDailyContext(date) {
+  let items = await listRecentArticlesFromDb(Math.max(maxTotalItems * 2, 160));
+  if (items.length === 0) {
+    await refreshFeeds();
+    items = await listRecentArticlesFromDb(Math.max(maxTotalItems * 2, 160));
+  }
+
+  const window = getDailyDateWindow(date);
+  const usage = await getRecentDailyUsage(date);
+  const enriched = items.map((item) => {
+    const articleDate = getDailyArticleDate(item);
+    const topicKey = getDailyTopicKey(item);
+    const recentUsage = usage.byHash.get(item.id) || usage.byTopic.get(topicKey) || null;
+    const ageHours = articleDate ? Math.max(0, (window.end.getTime() - articleDate.getTime()) / 36e5) : 999;
+    const isToday = articleDate ? articleDate >= window.start && articleDate < window.end : false;
+    const isRecent = articleDate ? articleDate >= window.recentStart && articleDate < window.end : false;
+    return {
+      ...item,
+      articleDate: articleDate ? articleDate.toISOString() : null,
+      ageHours,
+      isToday,
+      isRecent,
+      topicKey,
+      recentUsage,
+      dailyScore: getDailyItemScore(item, articleDate, window),
+    };
+  });
+
+  const uniqueItems = uniqueDailyItemsByTopic(enriched);
+  const todayNew = uniqueItems.filter((item) => item.isToday && !item.recentUsage).slice(0, 12);
+  const todayKeys = new Set(todayNew.map((item) => item.id));
+  const important = uniqueItems
+    .filter((item) => item.isRecent && !item.isToday && !item.recentUsage && !todayKeys.has(item.id))
+    .slice(0, 8);
+  const selectedKeys = new Set([...todayNew, ...important].map((item) => item.id));
+  const continuing = uniqueItems
+    .filter((item) => item.isRecent && !selectedKeys.has(item.id))
+    .slice(0, 8);
+  const continuingKeys = new Set(continuing.map((item) => item.id));
+  const repeated = uniqueItems
+    .filter((item) => (item.recentUsage || !item.isRecent) && !selectedKeys.has(item.id) && !continuingKeys.has(item.id))
+    .slice(0, 8);
+
+  return {
+    date,
+    rawItems: items,
+    todayNew: todayNew.map((item) => ({ ...item, dailySection: "today_new" })),
+    important: important.map((item) => ({ ...item, dailySection: "important" })),
+    continuing: continuing.map((item) => ({ ...item, dailySection: "continuing" })),
+    repeated: repeated.map((item) => ({ ...item, dailySection: "repeated" })),
+  };
+}
+
+function formatDailyPromptItems(items) {
+  if (!items.length) {
+    return "暂无。";
+  }
+
+  return items
     .map(
       (item, index) =>
         `${index + 1}. 标题：${item.title}
@@ -1316,32 +2162,156 @@ function buildDailyPrompt(date, items) {
 国家：${item.country}
 主题：${item.category}
 热度：${item.heat}
+时间：${item.articleDate || item.publishedAt || item.fetchedAt || "未知"}
 链接：${item.url || ""}
-摘要：${item.summary}`,
+摘要：${item.summary}
+${item.recentUsage ? `历史状态：近 7 天已在 ${item.recentUsage.reportDate} 的 ${item.recentUsage.section} 中出现，不能写入今日总结。` : "历史状态：近 7 天未在日报中出现。"}`,
     )
     .join("\n\n");
+}
 
+function dailyItemLink(item) {
+  return item.url ? `[${item.title}](${item.url})` : item.title;
+}
+
+function buildFallbackDailyMarkdown(date, context, reason = "") {
+  const todayNew = context.todayNew || [];
+  const important = context.important || [];
+  const continuing = context.continuing || [];
+  const repeated = context.repeated || [];
+
+  return `# 移民热点日报 | ${date}
+
+## 一、今日总结
+
+${todayNew.length ? `今日发现 ${todayNew.length} 条未在近 7 天日报中出现的新增事实，重点集中在 ${[...new Set(todayNew.map((item) => item.country).filter(Boolean))].slice(0, 4).join("、") || "多个地区"}。` : "今日暂无可确认的新增事实，避免把旧热点包装成今日新闻。"}
+
+${reason ? `> AI 日报生成暂不可用：${reason}` : ""}
+
+## 二、今日新增
+
+${todayNew.length ? todayNew.map((item) => `- ${item.country || "未知地区"}｜${item.category || "未分类"}：${dailyItemLink(item)} - ${item.summary}`).join("\n") : "- 暂无。"}
+
+## 三、重要变化
+
+${important.length ? important.map((item) => `- ${item.country || "未知地区"}｜${item.category || "未分类"}：${dailyItemLink(item)} - ${item.summary}`).join("\n") : "- 暂无新的重要变化。"}
+
+## 四、延续关注
+
+${continuing.length ? continuing.map((item) => `- ${dailyItemLink(item)}：${item.recentUsage ? `近 7 天已出现过（${item.recentUsage.reportDate}），仅适合作为背景跟进。` : "不是今日新增，仅作为延续关注。"}`).join("\n") : "- 暂无。"}
+
+## 五、不建议重复
+
+${repeated.length ? repeated.map((item) => `- ${item.title}：已过新鲜期或近期出现过，不建议放入今日总结。`).join("\n") : "- 暂无。"}
+
+## 六、行动建议
+
+- 今日总结只发布“今日新增”里的事实。
+- 延续关注内容可做 FAQ、客户答疑或内部跟进，不要包装为新政策。`;
+}
+
+function buildDailyPrompt(date, context) {
   return `你是一位资深移民行业信息分析师。请基于以下抓取到的移民资讯，生成中文移民热点日报。
 
 日期：${date}
-资讯数量：${items.length}
+候选资讯总数：${context.rawItems.length}
 
-${articleLines}
+【今日新增：只能这些内容进入“今日总结”】
+${formatDailyPromptItems(context.todayNew)}
 
-请严格使用 Markdown，包含以下四节：
+【重要变化：近 72 小时内，近 7 天日报未出现，但不是今天新增】
+${formatDailyPromptItems(context.important)}
+
+【延续关注：可作为跟进，不得包装为今日新增】
+${formatDailyPromptItems(context.continuing)}
+
+【不建议重复：过旧或近 7 天已出现】
+${formatDailyPromptItems(context.repeated)}
+
+请严格使用 Markdown，包含以下六节：
 ## 一、今日总结
-用 3-5 句话概括主要变化。
+只总结【今日新增】里的事实。若今日新增为空，必须明确写“今日暂无可确认的重大新增事实”，不要复述延续关注或不建议重复内容。
 
-## 二、重要信息
-列出 3-6 条最值得项目经理关注的信息，明确国家、项目、影响对象。
+## 二、今日新增
+列出今日新增事实，明确国家、项目、影响对象，并保留原文链接。
 
-## 三、按主题整理
-按主题归纳，不要简单逐条复述。重要条目保留原文链接，格式为 [标题](链接)。
+## 三、重要变化
+列出不是今天新增、但近 72 小时内且近 7 天未写过的变化。
 
-## 四、建议关注
+## 四、延续关注
+列出需要跟进但不能当作今日新闻的内容，说明为什么不能重复包装。
+
+## 五、不建议重复
+列出过旧或近 7 天已出现的信息，提醒不要放进今日总结。
+
+## 六、行动建议
 给销售、文案、项目经理各 1-2 条行动建议。
 
-要求：客观、专业、中文表达，不夸大政策影响，不编造原文没有的信息。`;
+硬性要求：
+- 不要把【延续关注】或【不建议重复】写进“今日总结”。
+- 不要编造政策、日期、费用、影响范围。
+- 如果某条信息近 7 天已经出现，只能放在“延续关注”或“不建议重复”。`;
+}
+
+function getDailyContextItems(context) {
+  return [
+    ...(context.todayNew || []),
+    ...(context.important || []),
+    ...(context.continuing || []),
+    ...(context.repeated || []),
+  ];
+}
+
+function getDailyArticleSnapshot(item) {
+  return {
+    id: item.id,
+    title: item.title,
+    summary: item.summary,
+    source: item.source,
+    country: item.country,
+    category: item.category,
+    time: item.time,
+    publishedAt: item.publishedAt,
+    fetchedAt: item.fetchedAt,
+    articleDate: item.articleDate,
+    url: item.url,
+    heat: item.heat,
+    impact: item.impact,
+    tags: item.tags || [],
+    image: item.image || "",
+    recentUsage: item.recentUsage || null,
+  };
+}
+
+async function saveDailyReportItems(reportDate, context) {
+  const row = await mysqlJson(`
+    SELECT JSON_OBJECT('id', id)
+    FROM yimin_daily_reports
+    WHERE report_date = ${sqlString(reportDate)}
+    LIMIT 1;
+  `);
+  const reportId = row?.id;
+  if (!reportId) return;
+
+  await mysqlExec(`
+    DELETE FROM yimin_daily_report_items WHERE report_id = ${sqlNumber(reportId)};
+  `);
+
+  for (const item of getDailyContextItems(context)) {
+    await mysqlExec(`
+      INSERT INTO yimin_daily_report_items (
+        report_id, article_hash, topic_key, section, article_date, article_snapshot
+      )
+      VALUES (
+        ${sqlNumber(reportId)},
+        ${sqlString(item.id)},
+        ${sqlString(item.topicKey)},
+        ${sqlString(item.dailySection)},
+        ${sqlDate(item.articleDate)},
+        ${sqlJson(getDailyArticleSnapshot(item))}
+      );
+    `);
+  }
 }
 
 async function callDeepSeek(prompt) {
@@ -1410,21 +2380,18 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false } = {}
     }
   }
 
-  let items = await listArticlesFromDb(maxTotalItems);
-  if (items.length === 0) {
-    await refreshFeeds();
-    items = await listArticlesFromDb(maxTotalItems);
-  }
+  const dailyContext = await buildDailyContext(date);
+  const selectedItems = getDailyContextItems(dailyContext);
 
   let markdown;
   let model = deepseekConfig.model;
   try {
-    markdown = await callDeepSeek(buildDailyPrompt(date, items));
+    markdown = await callDeepSeek(buildDailyPrompt(date, dailyContext));
   } catch (error) {
     model = "fallback";
     markdown = buildFallbackDailyMarkdown(
       date,
-      items,
+      dailyContext,
       error instanceof Error ? error.message : String(error),
     );
   }
@@ -1441,7 +2408,7 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false } = {}
       ${sqlString(title)},
       ${sqlString(markdown)},
       ${sqlString(html)},
-      ${sqlNumber(items.length)},
+      ${sqlNumber(selectedItems.length)},
       ${sqlString(model)},
       CURRENT_TIMESTAMP
     )
@@ -1454,13 +2421,14 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false } = {}
       generated_at = CURRENT_TIMESTAMP,
       updated_at = CURRENT_TIMESTAMP;
   `);
+  await saveDailyReportItems(date, dailyContext);
 
   return {
     date,
     title,
     contentMarkdown: markdown,
     html,
-    sourceItemCount: items.length,
+    sourceItemCount: selectedItems.length,
     model,
     generatedAt: new Date().toISOString(),
   };
@@ -1628,6 +2596,57 @@ const server = createServer(async (req, res) => {
       });
       sendJson(res, 200, {
         ok: true,
+        report,
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/daily/history") {
+      await initDb();
+      const rows = await mysqlJson(`
+        SELECT COALESCE(JSON_ARRAYAGG(
+          JSON_OBJECT(
+            'date', DATE_FORMAT(report_date, '%Y-%m-%d'),
+            'title', title,
+            'sourceItemCount', source_item_count,
+            'model', model
+          )
+        ), JSON_ARRAY())
+        FROM (
+          SELECT report_date, title, source_item_count, model
+          FROM yimin_daily_reports
+          ORDER BY report_date DESC
+          LIMIT 30
+        ) recent;
+      `);
+      sendJson(res, 200, { ok: true, history: rows || [] });
+      return;
+    }
+
+    if (url.pathname === "/api/market" && req.method === "GET") {
+      const report = await getMarketReport(url.searchParams.get("date") || getShanghaiDate(), {
+        refresh: url.searchParams.get("refresh") === "1",
+      });
+      sendJson(res, 200, {
+        ok: true,
+        report,
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/market/history") {
+      const history = await listMarketHistory();
+      sendJson(res, 200, { ok: true, history });
+      return;
+    }
+
+    if (url.pathname === "/api/market/feedback" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const feedback = await saveMarketFeedback(body, requireAuth(req));
+      const report = await getMarketReport(body.date || getShanghaiDate(), { rebuild: true });
+      sendJson(res, 200, {
+        ok: true,
+        feedback,
         report,
       });
       return;
