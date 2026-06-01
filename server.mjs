@@ -1150,6 +1150,38 @@ async function readSources() {
   return JSON.parse(raw);
 }
 
+async function listEnabledSourcesForFetch() {
+  const fileSources = (await readSources()).filter((source) => source.enabled !== false);
+  const fileSourceByUrl = new Map(fileSources.map((source) => [source.url, source]));
+  const dbSources =
+    (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(
+        JSON_OBJECT(
+          'id', id,
+          'name', name,
+          'url', url,
+          'country', country,
+          'category', category,
+          'priority', priority,
+          'type', type,
+          'enabled', enabled
+        )
+      ), JSON_ARRAY())
+      FROM (
+        SELECT *
+        FROM yimin_sources
+        WHERE enabled = 1
+        ORDER BY priority DESC, id ASC
+      ) enabled_sources;
+    `)) || [];
+
+  return dbSources.map((source) => ({
+    ...(fileSourceByUrl.get(source.url) || {}),
+    ...source,
+    enabled: Boolean(source.enabled),
+  }));
+}
+
 async function fetchWithTimeout(url, extraHeaders = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
@@ -1839,24 +1871,7 @@ async function fetchSource(source) {
 
 async function refreshFeeds() {
   await initDb();
-  let sources = (await readSources()).filter((source) => source.enabled !== false);
-
-  const dbWebsiteSources = await mysqlJson(`
-    SELECT JSON_ARRAYAGG(
-      JSON_OBJECT('name', name, 'url', url, 'country', country,
-                  'category', category, 'priority', priority, 'type', type)
-    ) AS src_rows
-    FROM yimin_sources
-    WHERE type IN ('website', 'html') AND enabled = 1;
-  `);
-  if (Array.isArray(dbWebsiteSources) && dbWebsiteSources.length > 0) {
-    const existingUrls = new Set(sources.map((s) => s.url));
-    for (const ws of dbWebsiteSources) {
-      if (!existingUrls.has(ws.url)) {
-        sources.push(ws);
-      }
-    }
-  }
+  const sources = await listEnabledSourcesForFetch();
 
   const runId = await createFetchRun(sources.length);
 
