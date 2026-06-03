@@ -27,6 +27,7 @@ const dbConfig = {
   database: process.env.DATABASE_NAME || "yimin_ai_hot",
   mysqlBin: process.env.MYSQL_BIN || "mysql",
 };
+
 const deepseekConfig = {
   apiKey: process.env.DEEPSEEK_API_KEY || "",
   baseUrl: process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com/v1",
@@ -2223,6 +2224,7 @@ function markdownToHtml(markdown) {
   const lines = String(markdown || "").split(/\r?\n/);
   const html = [];
   let listType = null;
+  let orderedListCounter = 0;
 
   function closeList() {
     if (listType) {
@@ -2241,19 +2243,22 @@ function markdownToHtml(markdown) {
     const heading = trimmed.match(/^(#{1,3})\s+(.+)$/);
     if (heading) {
       closeList();
+      orderedListCounter = 0;
       const level = heading[1].length + 1;
       html.push(`<h${level}>${escapeHtml(heading[2])}</h${level}>`);
       continue;
     }
 
-    const ordered = trimmed.match(/^\d+\.\s+(.+)$/);
+    const ordered = trimmed.match(/^(\d+)\.\s+(.+)$/);
     if (ordered) {
+      const markdownNumber = Number(ordered[1]);
+      orderedListCounter = Math.max(orderedListCounter + 1, Number.isFinite(markdownNumber) ? markdownNumber : 1);
       if (listType !== "ol") {
         closeList();
         listType = "ol";
-        html.push("<ol>");
+        html.push(`<ol start="${orderedListCounter}">`);
       }
-      html.push(`<li>${formatInlineMarkdown(ordered[1])}</li>`);
+      html.push(`<li>${formatInlineMarkdown(ordered[2])}</li>`);
       continue;
     }
 
@@ -2277,12 +2282,31 @@ function markdownToHtml(markdown) {
 }
 
 function formatInlineMarkdown(value) {
-  return escapeHtml(value)
-    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+  const links = [];
+  let content = escapeHtml(value).replace(
+    /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/gi,
+    (_match, label, href) => {
+      const token = `@@DAILY_LINK_${links.length}@@`;
+      links.push(`<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`);
+      return token;
+    },
+  );
+
+  content = content
     .replace(
-      /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
-      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
-    );
+      /(^|[\s(（])((?:https?:\/\/)[^\s<>"']+)/gi,
+      (_match, prefix, rawUrl) => {
+        const trailing = rawUrl.match(/[),，。；;!！?？、\]】）]+$/)?.[0] || "";
+        const href = rawUrl.slice(0, rawUrl.length - trailing.length);
+        if (!href) {
+          return `${prefix}${rawUrl}`;
+        }
+        return `${prefix}<a href="${href}" target="_blank" rel="noopener noreferrer">${href}</a>${trailing}`;
+      },
+    )
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+
+  return content.replace(/@@DAILY_LINK_(\d+)@@/g, (_match, index) => links[Number(index)] || "");
 }
 
 function normalizeDailyTopicText(value) {
@@ -2602,7 +2626,8 @@ ${formatDailyPromptItems(context.repeated)}
 硬性要求：
 - 不要把【延续关注】或【不建议重复】写进“今日总结”。
 - 不要编造政策、日期、费用、影响范围。
-- 如果某条信息近 7 天已经出现，只能放在“延续关注”或“不建议重复”。`;
+- 如果某条信息近 7 天已经出现，只能放在“延续关注”或“不建议重复”。
+- 同一章节内如使用数字编号，必须连续递增，不要每条都写成“1.”。`;
 }
 
 function getDailyContextItems(context) {
@@ -2746,6 +2771,9 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
     `);
 
     if (existing) {
+      if (existing.contentMarkdown) {
+        existing.html = markdownToHtml(existing.contentMarkdown);
+      }
       return attachDailyWindowLabel(existing);
     }
   }

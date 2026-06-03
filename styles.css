@@ -635,6 +635,16 @@ img {
   color: var(--text);
 }
 
+.daily-report a {
+  color: var(--accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.daily-report a:hover {
+  color: var(--accent);
+}
+
 .daily-meta {
   display: flex;
   flex-wrap: wrap;

@@ -136,6 +136,68 @@ function safeUrl(value) {
   }
 }
 
+function linkifyPlainUrls(root) {
+  if (!root) {
+    return;
+  }
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (!/https?:\/\//i.test(node.nodeValue || "")) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      if (node.parentElement?.closest("a, button, script, style")) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+
+  const textNodes = [];
+  while (walker.nextNode()) {
+    textNodes.push(walker.currentNode);
+  }
+
+  const urlPattern = /https?:\/\/[^\s<>"']+/gi;
+  textNodes.forEach((node) => {
+    const text = node.nodeValue || "";
+    const fragment = document.createDocumentFragment();
+    let lastIndex = 0;
+    let changed = false;
+
+    text.replace(urlPattern, (rawUrl, index) => {
+      const trailing = rawUrl.match(/[),，。；;!！?？、\]】）]+$/)?.[0] || "";
+      const href = rawUrl.slice(0, rawUrl.length - trailing.length);
+      const safeHref = safeUrl(href);
+
+      fragment.appendChild(document.createTextNode(text.slice(lastIndex, index)));
+      if (safeHref) {
+        const link = document.createElement("a");
+        link.href = safeHref;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = href;
+        fragment.appendChild(link);
+        changed = true;
+      } else {
+        fragment.appendChild(document.createTextNode(rawUrl));
+      }
+      if (trailing) {
+        fragment.appendChild(document.createTextNode(trailing));
+      }
+      lastIndex = index + rawUrl.length;
+      return rawUrl;
+    });
+
+    if (!changed) {
+      return;
+    }
+
+    fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+    node.parentNode?.replaceChild(fragment, node);
+  });
+}
+
 function matchesItem(item) {
   const itemLabels = getItemFilterLabels(item);
   const inCategory =
@@ -373,13 +435,14 @@ function renderDaily() {
         <div class="daily-main">
           <div class="daily-meta">
             <strong>${escapeHtml(state.dailyReport.title || "移民热点日报")}</strong>
-            <span>${escapeHtml(state.dailyReport.model || "AI")} · ${escapeHtml(state.dailyReport.sourceItemCount || 0)} 条来源${windowText}</span>
+            <span>${escapeHtml(state.dailyReport.model || "AI")} · ${escapeHtml(state.dailyReport.sourceItemCount || 0)} 条资讯${windowText}</span>
           </div>
           ${state.dailyReport.html}
         </div>
         ${historyHtml}
       </div>
     `;
+    linkifyPlainUrls(dailyReport.querySelector(".daily-main"));
     return;
   }
 
