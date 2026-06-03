@@ -203,6 +203,10 @@ img {
   backdrop-filter: blur(16px);
 }
 
+.toolbar[hidden] {
+  display: none;
+}
+
 .search-wrap {
   display: flex;
   align-items: center;

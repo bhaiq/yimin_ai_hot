@@ -1,5 +1,6 @@
 const maxFilterChips = 18;
 const filterViews = ["home", "all"];
+const toolbarViews = ["home", "all"];
 const filterCategoryStorageKey = "yiminHot.filterCategory";
 
 function buildSnapshots(items) {
@@ -320,6 +321,19 @@ function getDynamicCategories() {
 }
 
 function renderFilters() {
+  const showToolbar = toolbarViews.includes(state.view);
+  if (toolbar) {
+    toolbar.hidden = !showToolbar;
+  }
+  if (refreshNews && state.user) {
+    refreshNews.hidden = !showToolbar;
+  }
+
+  if (!showToolbar) {
+    filterStrip.hidden = true;
+    return;
+  }
+
   if (!filterViews.includes(state.view)) {
     filterStrip.hidden = true;
     toolbar?.classList.add("filters-hidden");
@@ -1454,7 +1468,7 @@ function updateAuthUI() {
     authSection.style.display = "";
     loginBtn.classList.add("hidden");
     userArea.classList.remove("hidden");
-    refreshNews.hidden = false;
+    refreshNews.hidden = !toolbarViews.includes(state.view);
     document.querySelector("#userName").textContent = state.user.username;
     document.querySelector("#userAvatar").textContent = state.user.username.charAt(0).toUpperCase();
   } else {
