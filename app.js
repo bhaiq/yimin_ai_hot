@@ -1,5 +1,6 @@
 const maxFilterChips = 18;
 const filterViews = ["home", "all"];
+const filterCategoryStorageKey = "yiminHot.filterCategory";
 
 function buildSnapshots(items) {
   const countryMap = {};
@@ -193,6 +194,32 @@ function getItemFilterLabels(item) {
     .filter(Boolean);
 }
 
+function saveFilterCategory() {
+  try {
+    sessionStorage.setItem(filterCategoryStorageKey, state.category);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function setCategory(category) {
+  const raw = String(category || "").trim();
+  const cleaned = cleanFilterLabel(raw);
+  state.category = raw === "全部" || !cleaned ? "全部" : cleaned;
+  saveFilterCategory();
+}
+
+function restoreFilterCategory() {
+  try {
+    const savedCategory = sessionStorage.getItem(filterCategoryStorageKey);
+    if (savedCategory) {
+      setCategory(savedCategory);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
 function getDynamicCategories() {
   const categoryMap = new Map();
 
@@ -221,6 +248,7 @@ function getDynamicCategories() {
     const currentCategory = cleanFilterLabel(state.category);
     if (!currentCategory) {
       state.category = "全部";
+      saveFilterCategory();
     } else if (!dynamicCategories.includes(currentCategory)) {
       dynamicCategories.push(currentCategory);
     }
@@ -756,6 +784,17 @@ function renderContent() {
   renderStatus(items);
 }
 
+function parseHashRoute(value = window.location.hash) {
+  const raw = String(value || "").replace(/^#/, "");
+  const queryIndex = raw.indexOf("?");
+  const view = queryIndex === -1 ? raw : raw.slice(0, queryIndex);
+  const query = queryIndex === -1 ? "" : raw.slice(queryIndex);
+  return {
+    view: view || "home",
+    query,
+  };
+}
+
 function normalizeApiItem(item) {
   return {
     id: item.id,
@@ -992,8 +1031,12 @@ async function loadDailyHistory() {
   } catch { /* ignore */ }
 }
 
-function setView(viewName) {
-  viewName = String(viewName || "").split("?")[0];
+function setView(routeValue) {
+  const route = parseHashRoute(routeValue);
+  let viewName = route.view;
+  const currentRoute = parseHashRoute();
+  const routeQuery = route.query || currentRoute.query;
+
   if (!views.includes(viewName)) {
     viewName = "home";
   }
@@ -1011,7 +1054,11 @@ function setView(viewName) {
     item.classList.toggle("active", item.dataset.view === viewName);
   });
   document.body.classList.remove("menu-open");
-  window.location.hash = viewName;
+  const nextHash = `${viewName}${routeQuery}`;
+  if (window.location.hash.replace(/^#/, "") !== nextHash) {
+    window.location.hash = nextHash;
+  }
+  renderContent();
 
   if (viewName === "review") {
     loadSubmissions();
@@ -1134,7 +1181,7 @@ document.addEventListener("click", async (event) => {
 
   const categoryButton = event.target.closest("[data-category]");
   if (categoryButton) {
-    state.category = categoryButton.dataset.category;
+    setCategory(categoryButton.dataset.category);
     renderContent();
     return;
   }
@@ -1321,9 +1368,9 @@ document.querySelector("#feedbackForm").addEventListener("submit", async (event)
 });
 
 window.addEventListener("hashchange", () => {
-  const view = window.location.hash.replace("#", "").split("?")[0];
-  if (view) {
-    setView(view);
+  const route = window.location.hash.replace("#", "");
+  if (route) {
+    setView(route);
   }
 });
 
@@ -1413,7 +1460,8 @@ if (todayDate) {
   todayDate.textContent = `${y}.${m}.${d}`;
 }
 
-const initialView = window.location.hash.replace("#", "").split("?")[0] || "home";
+const initialView = window.location.hash.replace("#", "") || "home";
+restoreFilterCategory();
 renderContent();
 checkAuth().then(() => {
   updateAuthUI();
