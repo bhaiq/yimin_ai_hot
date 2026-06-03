@@ -88,7 +88,7 @@ const state = {
   user: null,
 };
 
-const authViews = ["sources", "review", "about", "changelog", "feedback"];
+const authViews = ["market", "sources", "review", "about", "changelog", "feedback"];
 const views = ["home", "all", "daily", "market", "radar", "login", "sources", "review", "about", "changelog", "feedback"];
 
 const filterStrip = document.querySelector("#filterStrip");
@@ -723,8 +723,11 @@ async function loadLiveNews({ refresh = false } = {}) {
     renderContent();
   }
 
-  loadMarketReport({ refresh });
-  loadDailyReport({ refresh });
+  if (state.view === "market") {
+    loadMarketReport({ refresh });
+  } else if (state.view === "daily") {
+    loadDailyReport({ refresh });
+  }
 }
 
 async function loadMarketReport({ refresh = false, date } = {}) {
@@ -819,6 +822,7 @@ async function loadDailyHistory() {
 }
 
 function setView(viewName) {
+  viewName = String(viewName || "").split("?")[0];
   if (!views.includes(viewName)) {
     viewName = "home";
   }
@@ -840,6 +844,18 @@ function setView(viewName) {
 
   if (viewName === "review") {
     loadSubmissions();
+  }
+  if (viewName === "daily") {
+    loadDailyHistory();
+    if (!state.dailyReport && !state.dailyLoading) {
+      loadDailyReport();
+    }
+  }
+  if (viewName === "market") {
+    loadMarketHistory();
+    if (!state.marketReportData && !state.marketLoading) {
+      loadMarketReport();
+    }
   }
 }
 
@@ -1134,7 +1150,7 @@ document.querySelector("#feedbackForm").addEventListener("submit", async (event)
 });
 
 window.addEventListener("hashchange", () => {
-  const view = window.location.hash.replace("#", "");
+  const view = window.location.hash.replace("#", "").split("?")[0];
   if (view) {
     setView(view);
   }
@@ -1226,15 +1242,13 @@ if (todayDate) {
   todayDate.textContent = `${y}.${m}.${d}`;
 }
 
-const initialView = window.location.hash.replace("#", "") || "home";
+const initialView = window.location.hash.replace("#", "").split("?")[0] || "home";
 renderContent();
 checkAuth().then(() => {
   updateAuthUI();
   setView(initialView);
 });
 loadLiveNews();
-loadMarketHistory();
-loadDailyHistory();
 
 function showArticleModal(cardEl, url) {
   let overlay = document.getElementById("modalOverlay");
