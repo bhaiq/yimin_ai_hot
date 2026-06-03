@@ -1,4 +1,5 @@
-const categories = ["全部", "美国", "加拿大", "英国", "澳新", "欧洲", "EB-5", "排期", "签证", "投资", "雇主担保", "官方"];
+const maxFilterChips = 18;
+const filterViews = ["home", "all"];
 
 function buildSnapshots(items) {
   const countryMap = {};
@@ -85,6 +86,7 @@ const state = {
     mode: "idle",
     text: "等待真实信源数据",
   },
+  fetchRun: null,
   user: null,
 };
 
@@ -104,6 +106,8 @@ const marketReport = document.querySelector("#marketReport");
 const monitorStatus = document.querySelector("#monitorStatus");
 const sourceHealth = document.querySelector("#sourceHealth");
 const refreshNews = document.querySelector("#refreshNews");
+const toolbar = document.querySelector(".toolbar");
+let fetchRunPollTimer = null;
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -132,11 +136,10 @@ function safeUrl(value) {
 }
 
 function matchesItem(item) {
+  const itemLabels = getItemFilterLabels(item);
   const inCategory =
     state.category === "全部" ||
-    item.country === state.category ||
-    item.category === state.category ||
-    (item.tags || []).includes(state.category);
+    itemLabels.includes(state.category);
 
   const query = state.query.trim().toLowerCase();
   const inQuery =
@@ -153,12 +156,93 @@ function filteredItems() {
   return state.items.filter(matchesItem).sort((a, b) => b.heat - a.heat);
 }
 
+function looksLikeGarbledText(value) {
+  const text = String(value || "");
+  if (!text) return false;
+  if (/[�]/.test(text)) return true;
+  if (/%[0-9a-f]{2}/i.test(text)) return true;
+  if (/[ÃÂ]|â[€\u0080-\u00bf]/.test(text)) return true;
+
+  const mojibakeChars = text.match(/[æçåäèêëìíîïðñòóôõöùúûüýÿ]/g) || [];
+  return mojibakeChars.length >= 2 && !/[\u4e00-\u9fff]/.test(text);
+}
+
+function cleanFilterLabel(label) {
+  const text = String(label || "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!text || text === "全部") {
+    return "";
+  }
+
+  if (text.length > 24 || /^https?:\/\//i.test(text) || looksLikeGarbledText(text)) {
+    return "";
+  }
+
+  if (!/^[\p{L}\p{N}][\p{L}\p{N}\s/&+().·-]{0,23}$/u.test(text)) {
+    return "";
+  }
+
+  return text;
+}
+
+function getItemFilterLabels(item) {
+  return [item.country, item.category, ...(item.tags || [])]
+    .map(cleanFilterLabel)
+    .filter(Boolean);
+}
+
+function getDynamicCategories() {
+  const categoryMap = new Map();
+
+  function addCategory(label, item) {
+    const name = cleanFilterLabel(label);
+    if (!name) {
+      return;
+    }
+
+    const current = categoryMap.get(name) || { name, count: 0, heat: 0 };
+    current.count += 1;
+    current.heat += Number(item.heat || 0);
+    categoryMap.set(name, current);
+  }
+
+  state.items.forEach((item) => {
+    getItemFilterLabels(item).forEach((label) => addCategory(label, item));
+  });
+
+  const dynamicCategories = [...categoryMap.values()]
+    .sort((a, b) => b.count - a.count || b.heat - a.heat || a.name.localeCompare(b.name, "zh-Hans-CN"))
+    .slice(0, maxFilterChips)
+    .map((item) => item.name);
+
+  if (state.category !== "全部") {
+    const currentCategory = cleanFilterLabel(state.category);
+    if (!currentCategory) {
+      state.category = "全部";
+    } else if (!dynamicCategories.includes(currentCategory)) {
+      dynamicCategories.push(currentCategory);
+    }
+  }
+
+  return ["全部", ...dynamicCategories];
+}
+
 function renderFilters() {
-  filterStrip.innerHTML = categories
+  if (!filterViews.includes(state.view)) {
+    filterStrip.hidden = true;
+    toolbar?.classList.add("filters-hidden");
+    return;
+  }
+
+  filterStrip.hidden = false;
+  toolbar?.classList.remove("filters-hidden");
+  filterStrip.innerHTML = getDynamicCategories()
     .map(
       (category) => `
         <button class="chip ${state.category === category ? "active" : ""}" type="button" data-category="${category}">
-          ${category}
+          ${escapeHtml(category)}
         </button>
       `,
     )
@@ -255,12 +339,13 @@ function renderDaily() {
     : "";
 
   if (state.dailyReport?.html) {
+    const windowText = state.dailyReport.windowLabel ? ` · ${escapeHtml(state.dailyReport.windowLabel)}` : "";
     dailyReport.innerHTML = `
       <div class="daily-layout">
         <div class="daily-main">
           <div class="daily-meta">
             <strong>${escapeHtml(state.dailyReport.title || "移民热点日报")}</strong>
-            <span>${escapeHtml(state.dailyReport.model || "AI")} · ${escapeHtml(state.dailyReport.sourceItemCount || 0)} 条来源</span>
+            <span>${escapeHtml(state.dailyReport.model || "AI")} · ${escapeHtml(state.dailyReport.sourceItemCount || 0)} 条来源${windowText}</span>
           </div>
           ${state.dailyReport.html}
         </div>
@@ -547,16 +632,38 @@ function renderCounts(items) {
   allCount.textContent = `${items.length} 条`;
 }
 
+function isFetchRunActive(run = state.fetchRun) {
+  return run?.status === "running";
+}
+
+function formatFetchRunStatus(run) {
+  if (!run) {
+    return "";
+  }
+  const processed = Number(run.processedSourceCount || 0);
+  const total = Number(run.sourceCount || 0);
+  const progress = Number(run.progress || 0);
+  const itemCount = Number(run.itemCount || 0);
+  return `后台抓取中 ${processed}/${total} 个信源 · ${progress}% · 已入库 ${itemCount} 条`;
+}
+
 function renderStatus(items) {
   const healthySources = state.sourceStatus.filter((source) => source.ok).length;
   const failedSources = state.sourceStatus.length - healthySources;
 
-  if (state.liveMeta.mode === "live") {
+  if (isFetchRunActive()) {
+    monitorStatus.textContent = formatFetchRunStatus(state.fetchRun);
+  } else if (state.liveMeta.mode === "live") {
     monitorStatus.textContent = `${items.length} 条更新 · ${healthySources}/${state.sourceStatus.length} 个信源在线`;
   } else if (state.liveMeta.mode === "loading") {
     monitorStatus.textContent = "正在连接实时信源...";
   } else {
     monitorStatus.textContent = state.liveMeta.text;
+  }
+
+  if (refreshNews) {
+    refreshNews.disabled = isFetchRunActive();
+    refreshNews.textContent = isFetchRunActive() ? "抓取中" : "刷新";
   }
 
   if (!sourceHealth) {
@@ -655,17 +762,72 @@ function normalizeApiItem(item) {
     title: item.title || "未命名动态",
     summary: item.summary || "查看原文获取完整信息。",
     source: item.source || "未知信源",
-    country: item.country || "全球",
-    category: item.category || "政策",
+    country: cleanFilterLabel(item.country) || "全球",
+    category: cleanFilterLabel(item.category) || "政策",
     time: item.time || "刚刚",
     heat: Number(item.heat || 60),
     impact: item.impact || "中影响",
-    tags: Array.isArray(item.tags) ? item.tags : [],
+    tags: Array.isArray(item.tags) ? item.tags.map(cleanFilterLabel).filter(Boolean) : [],
     image: item.image || "",
     url: item.url || "",
     publishedAt: item.publishedAt || null,
     fetchedAt: item.fetchedAt || null,
   };
+}
+
+function stopFetchRunPolling() {
+  if (fetchRunPollTimer) {
+    clearTimeout(fetchRunPollTimer);
+    fetchRunPollTimer = null;
+  }
+}
+
+function scheduleFetchRunPolling(runId) {
+  if (!runId || window.location.protocol === "file:") {
+    return;
+  }
+
+  stopFetchRunPolling();
+
+  const poll = async () => {
+    try {
+      const response = await fetch(`/api/fetch-runs/${runId}`, {
+        headers: { accept: "application/json" },
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      state.fetchRun = data.run || null;
+
+      if (isFetchRunActive(state.fetchRun)) {
+        renderContent();
+        fetchRunPollTimer = setTimeout(poll, 2500);
+        return;
+      }
+
+      const finishedRun = state.fetchRun;
+      state.fetchRun = null;
+      state.liveMeta = {
+        mode: finishedRun?.status === "failed" ? "error" : "live",
+        text: finishedRun?.status === "failed"
+          ? `后台抓取失败：${finishedRun.error || "未知错误"}`
+          : `后台抓取完成：${finishedRun?.successSourceCount || 0} 个信源成功，新增/更新 ${finishedRun?.itemCount || 0} 条`,
+      };
+      renderContent();
+      await loadLiveNews();
+    } catch (error) {
+      state.fetchRun = null;
+      state.liveMeta = {
+        mode: "error",
+        text: "抓取进度查询失败",
+        error: error instanceof Error ? error.message : String(error),
+      };
+      renderContent();
+    }
+  };
+
+  fetchRunPollTimer = setTimeout(poll, 1200);
 }
 
 async function loadLiveNews({ refresh = false } = {}) {
@@ -692,12 +854,13 @@ async function loadLiveNews({ refresh = false } = {}) {
     }
 
     const data = await response.json();
+    state.fetchRun = data.fetchRun || null;
     if (Array.isArray(data.items) && data.items.length) {
       state.items = data.items.map(normalizeApiItem);
       state.sourceStatus = Array.isArray(data.sources) ? data.sources : [];
       state.liveMeta = {
-        mode: "live",
-        text: "实时数据",
+        mode: data.refreshing ? "refreshing" : "live",
+        text: data.refreshing ? "后台抓取任务已启动，当前先展示已有数据" : "实时数据",
         itemCount: data.itemCount,
         sourceCount: data.sourceCount,
         generatedAt: data.generatedAt,
@@ -706,11 +869,18 @@ async function loadLiveNews({ refresh = false } = {}) {
       state.items = [];
       state.sourceStatus = Array.isArray(data.sources) ? data.sources : [];
       state.liveMeta = {
-        mode: "empty",
-        text: "实时信源暂无真实返回",
+        mode: data.refreshing ? "refreshing" : "empty",
+        text: data.refreshing ? "后台抓取任务已启动，暂无历史文章可展示" : "实时信源暂无真实返回",
       };
     }
+    if (isFetchRunActive(state.fetchRun)) {
+      scheduleFetchRunPolling(state.fetchRun.id);
+    } else {
+      stopFetchRunPolling();
+    }
   } catch (error) {
+    state.fetchRun = null;
+    stopFetchRunPolling();
     state.items = [];
     state.liveMeta = {
       mode: "error",
@@ -718,15 +888,16 @@ async function loadLiveNews({ refresh = false } = {}) {
       error: error instanceof Error ? error.message : String(error),
     };
   } finally {
-    refreshNews.disabled = false;
-    refreshNews.textContent = "刷新";
+    refreshNews.disabled = isFetchRunActive();
+    refreshNews.textContent = isFetchRunActive() ? "抓取中" : "刷新";
     renderContent();
   }
 
+  const dependentRefresh = refresh && !isFetchRunActive();
   if (state.view === "market") {
-    loadMarketReport({ refresh });
+    loadMarketReport({ refresh: dependentRefresh });
   } else if (state.view === "daily") {
-    loadDailyReport({ refresh });
+    loadDailyReport({ refresh: dependentRefresh });
   }
 }
 

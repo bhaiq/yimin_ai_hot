@@ -14,6 +14,11 @@ const cacheTtlMs = Number(process.env.CACHE_TTL_MS || 10 * 60 * 1000);
 const requestTimeoutMs = Number(process.env.FEED_TIMEOUT_MS || 9000);
 const maxItemsPerSource = Number(process.env.MAX_ITEMS_PER_SOURCE || 16);
 const maxTotalItems = Number(process.env.MAX_TOTAL_ITEMS || 80);
+const dailyCandidateLimit = Number(process.env.DAILY_CANDIDATE_LIMIT || Math.max(maxTotalItems * 8, 600));
+const dailyDefaultWindow = ["calendar", "last24h"].includes(process.env.DAILY_DEFAULT_WINDOW)
+  ? process.env.DAILY_DEFAULT_WINDOW
+  : "last24h";
+const feedFetchConcurrency = Math.max(1, Number(process.env.FEED_FETCH_CONCURRENCY || 12));
 const dbConfig = {
   host: process.env.DATABASE_HOST || "127.0.0.1",
   port: Number(process.env.DATABASE_PORT || 3306),
@@ -60,6 +65,7 @@ const mimeTypes = {
 
 let cache = null;
 let dbReadyPromise = null;
+let activeFetchRun = null;
 
 async function loadEnv() {
   const envPath = join(rootDir, ".env");
@@ -269,6 +275,9 @@ async function initDb() {
           finished_at DATETIME NULL COMMENT '抓取完成时间',
           status ENUM('running','completed','failed') NOT NULL DEFAULT 'running' COMMENT '运行状态（running=进行中 completed=完成 failed=失败）',
           source_count INT NOT NULL DEFAULT 0 COMMENT '本轮抓取的来源数量',
+          processed_source_count INT NOT NULL DEFAULT 0 COMMENT '已处理来源数量',
+          success_source_count INT NOT NULL DEFAULT 0 COMMENT '成功来源数量',
+          failed_source_count INT NOT NULL DEFAULT 0 COMMENT '失败来源数量',
           item_count INT NOT NULL DEFAULT 0 COMMENT '本轮抓取的文章数量',
           error TEXT NULL COMMENT '错误信息'
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='RSS 抓取运行记录表';
@@ -276,6 +285,9 @@ async function initDb() {
         CREATE TABLE IF NOT EXISTS yimin_daily_reports (
           id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
           report_date DATE NOT NULL COMMENT '报告日期',
+          window_start_at DATETIME NULL COMMENT '日报统计窗口开始时间',
+          window_end_at DATETIME NULL COMMENT '日报统计窗口结束时间',
+          window_mode VARCHAR(20) NOT NULL DEFAULT 'calendar' COMMENT '日报统计窗口模式（calendar/last24h）',
           title VARCHAR(200) NOT NULL COMMENT '报告标题',
           content_markdown LONGTEXT NOT NULL COMMENT '报告 Markdown 原文',
           content_html LONGTEXT NOT NULL COMMENT '报告 HTML 内容',
@@ -388,6 +400,62 @@ async function initDb() {
           ALTER TABLE yimin_sources
           ADD COLUMN type VARCHAR(20) NOT NULL DEFAULT 'rss' COMMENT '来源类型（rss/twitter/html/json/website）'
           AFTER priority;
+        `);
+      }
+
+      const dailyReportColumns = await mysqlRun(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+          AND TABLE_NAME = 'yimin_daily_reports'
+          AND COLUMN_NAME IN ('window_start_at', 'window_end_at', 'window_mode');
+      `);
+      if (!dailyReportColumns.includes("window_start_at")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_daily_reports
+          ADD COLUMN window_start_at DATETIME NULL COMMENT '日报统计窗口开始时间'
+          AFTER report_date;
+        `);
+      }
+      if (!dailyReportColumns.includes("window_end_at")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_daily_reports
+          ADD COLUMN window_end_at DATETIME NULL COMMENT '日报统计窗口结束时间'
+          AFTER window_start_at;
+        `);
+      }
+      if (!dailyReportColumns.includes("window_mode")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_daily_reports
+          ADD COLUMN window_mode VARCHAR(20) NOT NULL DEFAULT 'calendar' COMMENT '日报统计窗口模式（calendar/last24h）'
+          AFTER window_end_at;
+        `);
+      }
+
+      const fetchRunColumns = await mysqlRun(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+          AND TABLE_NAME = 'yimin_fetch_runs'
+          AND COLUMN_NAME IN ('processed_source_count', 'success_source_count', 'failed_source_count');
+      `);
+      if (!fetchRunColumns.includes("processed_source_count")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_fetch_runs
+          ADD COLUMN processed_source_count INT NOT NULL DEFAULT 0 COMMENT '已处理来源数量'
+          AFTER source_count;
+        `);
+      }
+      if (!fetchRunColumns.includes("success_source_count")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_fetch_runs
+          ADD COLUMN success_source_count INT NOT NULL DEFAULT 0 COMMENT '成功来源数量'
+          AFTER processed_source_count;
+        `);
+      }
+      if (!fetchRunColumns.includes("failed_source_count")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_fetch_runs
+          ADD COLUMN failed_source_count INT NOT NULL DEFAULT 0 COMMENT '失败来源数量'
+          AFTER success_source_count;
         `);
       }
 
@@ -513,6 +581,79 @@ async function finishFetchRun(runId, { status, itemCount, error = null }) {
   `);
 }
 
+async function updateFetchRunProgress(
+  runId,
+  { processedSourceCount, successSourceCount, failedSourceCount, itemCount },
+) {
+  await mysqlExec(`
+    UPDATE yimin_fetch_runs
+    SET processed_source_count = GREATEST(processed_source_count, ${sqlNumber(processedSourceCount)}),
+        success_source_count = GREATEST(success_source_count, ${sqlNumber(successSourceCount)}),
+        failed_source_count = GREATEST(failed_source_count, ${sqlNumber(failedSourceCount)}),
+        item_count = GREATEST(item_count, ${sqlNumber(itemCount)})
+    WHERE id = ${sqlNumber(runId)};
+  `);
+}
+
+function normalizeFetchRun(run) {
+  if (!run) {
+    return null;
+  }
+  const sourceCount = Number(run.sourceCount || 0);
+  const processedSourceCount = Number(run.processedSourceCount || 0);
+  return {
+    ...run,
+    sourceCount,
+    processedSourceCount,
+    successSourceCount: Number(run.successSourceCount || 0),
+    failedSourceCount: Number(run.failedSourceCount || 0),
+    itemCount: Number(run.itemCount || 0),
+    progress: sourceCount > 0 ? Math.min(100, Math.round((processedSourceCount / sourceCount) * 100)) : 100,
+  };
+}
+
+async function getFetchRunById(runId) {
+  const run = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'id', id,
+      'status', status,
+      'sourceCount', source_count,
+      'processedSourceCount', processed_source_count,
+      'successSourceCount', success_source_count,
+      'failedSourceCount', failed_source_count,
+      'itemCount', item_count,
+      'error', error,
+      'startedAt', DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%s.000Z'),
+      'finishedAt', IF(finished_at IS NULL, NULL, DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%s.000Z'))
+    )
+    FROM yimin_fetch_runs
+    WHERE id = ${sqlNumber(runId)}
+    LIMIT 1;
+  `);
+  return normalizeFetchRun(run);
+}
+
+async function getLatestFetchRun() {
+  const run = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'id', id,
+      'status', status,
+      'sourceCount', source_count,
+      'processedSourceCount', processed_source_count,
+      'successSourceCount', success_source_count,
+      'failedSourceCount', failed_source_count,
+      'itemCount', item_count,
+      'error', error,
+      'startedAt', DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%s.000Z'),
+      'finishedAt', IF(finished_at IS NULL, NULL, DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%s.000Z'))
+    )
+    FROM yimin_fetch_runs
+    ORDER BY id DESC
+    LIMIT 1;
+  `);
+  return normalizeFetchRun(run);
+}
+
 async function upsertArticle(item, sourceId) {
   const rawJson = JSON.stringify(item);
   const tagsJson = JSON.stringify(item.tags || []);
@@ -613,6 +754,40 @@ async function listRecentArticlesFromDb(limit = Math.max(maxTotalItems * 2, 160)
         JOIN yimin_sources s ON s.id = a.source_id
         ORDER BY COALESCE(a.published_at, a.fetched_at) DESC, a.heat DESC, a.id DESC
         LIMIT ${sqlNumber(limit, Math.max(maxTotalItems * 2, 160))}
+      ) ranked;
+    `)) || []
+  );
+}
+
+async function listDailyCandidateArticlesFromDb(window, limit = dailyCandidateLimit) {
+  return (
+    (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(
+        JSON_OBJECT(
+          'id', dedupe_hash,
+          'title', title,
+          'summary', COALESCE(summary, ''),
+          'source', source_name,
+          'country', country,
+          'category', category,
+          'time', COALESCE(DATE_FORMAT(published_at, '%H:%i'), '刚刚'),
+          'publishedAt', IF(published_at IS NULL, NULL, DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s.000Z')),
+          'fetchedAt', IF(fetched_at IS NULL, NULL, DATE_FORMAT(fetched_at, '%Y-%m-%dT%H:%i:%s.000Z')),
+          'url', url,
+          'heat', heat,
+          'impact', impact,
+          'tags', CAST(tags_json AS JSON),
+          'image', image
+        )
+      ), JSON_ARRAY())
+      FROM (
+        SELECT a.*, s.name AS source_name, COALESCE(a.published_at, a.fetched_at) AS article_at
+        FROM yimin_articles a
+        JOIN yimin_sources s ON s.id = a.source_id
+        WHERE COALESCE(a.published_at, a.fetched_at) >= ${sqlDate(window.recentStart)}
+          AND COALESCE(a.published_at, a.fetched_at) < ${sqlDate(window.end)}
+        ORDER BY a.heat DESC, article_at DESC, a.id DESC
+        LIMIT ${sqlNumber(limit, dailyCandidateLimit)}
       ) ranked;
     `)) || []
   );
@@ -1869,43 +2044,137 @@ async function fetchSource(source) {
   }
 }
 
-async function refreshFeeds() {
-  await initDb();
-  const sources = await listEnabledSourcesForFetch();
+async function runWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, limit), items.length);
 
-  const runId = await createFetchRun(sources.length);
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        results[currentIndex] = await worker(items[currentIndex], currentIndex);
+      }
+    }),
+  );
+
+  return results;
+}
+
+async function executeFetchRun(runId, sources, { concurrency = feedFetchConcurrency } = {}) {
+  let processedSourceCount = 0;
+  let successSourceCount = 0;
+  let failedSourceCount = 0;
+  let itemCount = 0;
 
   try {
-    const results = await Promise.all(sources.map(fetchSource));
-    const itemCount = results.reduce((sum, result) => sum + result.items.length, 0);
+    const results = await runWithConcurrency(sources, concurrency, async (source) => {
+      const result = await fetchSource(source);
+      itemCount += result.items.length;
+      processedSourceCount += 1;
+      if (result.status.ok) {
+        successSourceCount += 1;
+      } else {
+        failedSourceCount += 1;
+      }
+
+      await updateFetchRunProgress(runId, {
+        processedSourceCount,
+        successSourceCount,
+        failedSourceCount,
+        itemCount,
+      });
+
+      return result;
+    });
+
     await finishFetchRun(runId, {
       status: "completed",
       itemCount,
     });
+    cache = null;
     return results.map((result) => result.status);
   } catch (error) {
     await finishFetchRun(runId, {
       status: "failed",
-      itemCount: 0,
+      itemCount,
       error: error instanceof Error ? error.message : String(error),
     }).catch(() => {});
+    cache = null;
     throw error;
   }
 }
 
-async function getNews({ force = false } = {}) {
+async function refreshFeeds({ concurrency = feedFetchConcurrency } = {}) {
+  await initDb();
+  const sources = await listEnabledSourcesForFetch();
+
+  const runId = await createFetchRun(sources.length);
+  return executeFetchRun(runId, sources, { concurrency });
+}
+
+async function startBackgroundFeedRefresh() {
   await initDb();
 
-  if (!force && cache && cache.expiresAt > Date.now()) {
+  if (activeFetchRun?.status === "running") {
+    return activeFetchRun;
+  }
+
+  const sources = await listEnabledSourcesForFetch();
+  const runId = await createFetchRun(sources.length);
+  activeFetchRun = normalizeFetchRun({
+    id: runId,
+    status: "running",
+    sourceCount: sources.length,
+    processedSourceCount: 0,
+    successSourceCount: 0,
+    failedSourceCount: 0,
+    itemCount: 0,
+    error: null,
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+  });
+
+  executeFetchRun(runId, sources)
+    .then(() => getFetchRunById(runId))
+    .then((run) => {
+      activeFetchRun = run;
+    })
+    .catch((error) => {
+      console.error("Background feed refresh failed:", error);
+    })
+    .finally(() => {
+      if (activeFetchRun?.id === runId) {
+        activeFetchRun = null;
+      }
+    });
+
+  return activeFetchRun;
+}
+
+async function getNews({ force = false, background = false } = {}) {
+  await initDb();
+
+  if (!force && !activeFetchRun && cache && cache.expiresAt > Date.now()) {
     return cache.payload;
   }
 
   let statuses = await listSourceStatusesFromDb();
   let items = await listArticlesFromDb(maxTotalItems);
+  let fetchRun = activeFetchRun?.status === "running"
+    ? (await getFetchRunById(activeFetchRun.id)) || activeFetchRun
+    : null;
 
-  if (force || items.length === 0) {
-    statuses = await refreshFeeds();
+  if (force) {
+    if (background) {
+      fetchRun = await startBackgroundFeedRefresh();
+    } else {
+      statuses = await refreshFeeds();
+    }
     items = await listArticlesFromDb(maxTotalItems);
+  } else if (items.length === 0) {
+    fetchRun = await startBackgroundFeedRefresh();
   }
 
   const generatedAt = new Date().toISOString();
@@ -1918,12 +2187,16 @@ async function getNews({ force = false } = {}) {
     itemCount: items.length,
     items,
     sources: statuses,
+    refreshing: Boolean(fetchRun?.status === "running"),
+    fetchRun,
   };
 
-  cache = {
-    expiresAt: Date.now() + cacheTtlMs,
-    payload,
-  };
+  if (!force && !payload.refreshing) {
+    cache = {
+      expiresAt: Date.now() + cacheTtlMs,
+      payload,
+    };
+  }
 
   return payload;
 }
@@ -2055,11 +2328,69 @@ function getDailyArticleDate(item) {
   return date && !Number.isNaN(date.getTime()) ? date : null;
 }
 
-function getDailyDateWindow(date) {
+function normalizeDailyWindowMode(value, fallback = dailyDefaultWindow) {
+  const mode = String(value || "").toLowerCase();
+  if (["last24h", "rolling", "24h", "past24h"].includes(mode)) {
+    return "last24h";
+  }
+  if (["calendar", "day", "date"].includes(mode)) {
+    return "calendar";
+  }
+  return fallback === "calendar" ? "calendar" : "last24h";
+}
+
+function formatShanghaiDateTime(date) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date).replace(/\//g, "-");
+}
+
+function getDailyWindowLabel(window) {
+  if (!window?.start || !window?.end) {
+    return "";
+  }
+  return `${formatShanghaiDateTime(window.start)} - ${formatShanghaiDateTime(window.end)}`;
+}
+
+function getDailyDateWindow(date, mode = "calendar", now = new Date()) {
+  const normalizedMode = normalizeDailyWindowMode(mode, "calendar");
+  if (normalizedMode === "last24h") {
+    const end = now;
+    const start = new Date(end.getTime() - 24 * 36e5);
+    const recentStart = new Date(end.getTime() - 72 * 36e5);
+    return {
+      mode: "last24h",
+      start,
+      end,
+      recentStart,
+      label: getDailyWindowLabel({ start, end }),
+    };
+  }
+
   const start = new Date(`${date}T00:00:00+08:00`);
   const end = new Date(start.getTime() + 24 * 36e5);
   const recentStart = new Date(end.getTime() - 72 * 36e5);
-  return { start, end, recentStart };
+  return {
+    mode: "calendar",
+    start,
+    end,
+    recentStart,
+    label: getDailyWindowLabel({ start, end }),
+  };
+}
+
+function getDailyWindowModeFromSearch(searchParams) {
+  const explicitDate = Boolean(searchParams.get("date"));
+  if (searchParams.has("window")) {
+    return normalizeDailyWindowMode(searchParams.get("window"));
+  }
+  return explicitDate ? "calendar" : normalizeDailyWindowMode(dailyDefaultWindow);
 }
 
 function getDailyItemScore(item, articleDate, window) {
@@ -2111,14 +2442,14 @@ function uniqueDailyItemsByTopic(items) {
     });
 }
 
-async function buildDailyContext(date) {
-  let items = await listRecentArticlesFromDb(Math.max(maxTotalItems * 2, 160));
+async function buildDailyContext(date, { windowMode = "calendar" } = {}) {
+  const window = getDailyDateWindow(date, windowMode);
+  let items = await listDailyCandidateArticlesFromDb(window);
   if (items.length === 0) {
     await refreshFeeds();
-    items = await listRecentArticlesFromDb(Math.max(maxTotalItems * 2, 160));
+    items = await listDailyCandidateArticlesFromDb(window);
   }
 
-  const window = getDailyDateWindow(date);
   const usage = await getRecentDailyUsage(date);
   const enriched = items.map((item) => {
     const articleDate = getDailyArticleDate(item);
@@ -2156,6 +2487,7 @@ async function buildDailyContext(date) {
 
   return {
     date,
+    window,
     rawItems: items,
     todayNew: todayNew.map((item) => ({ ...item, dailySection: "today_new" })),
     important: important.map((item) => ({ ...item, dailySection: "important" })),
@@ -2194,12 +2526,15 @@ function buildFallbackDailyMarkdown(date, context, reason = "") {
   const important = context.important || [];
   const continuing = context.continuing || [];
   const repeated = context.repeated || [];
+  const windowText = context.window?.label || date;
 
   return `# 移民热点日报 | ${date}
 
+> 统计窗口：${windowText}
+
 ## 一、今日总结
 
-${todayNew.length ? `今日发现 ${todayNew.length} 条未在近 7 天日报中出现的新增事实，重点集中在 ${[...new Set(todayNew.map((item) => item.country).filter(Boolean))].slice(0, 4).join("、") || "多个地区"}。` : "今日暂无可确认的新增事实，避免把旧热点包装成今日新闻。"}
+${todayNew.length ? `本期发现 ${todayNew.length} 条未在近 7 天日报中出现的新增事实，重点集中在 ${[...new Set(todayNew.map((item) => item.country).filter(Boolean))].slice(0, 4).join("、") || "多个地区"}。` : "本期暂无可确认的重大新增事实，避免把旧热点包装成今日新闻。"}
 
 ${reason ? `> AI 日报生成暂不可用：${reason}` : ""}
 
@@ -2221,7 +2556,7 @@ ${repeated.length ? repeated.map((item) => `- ${item.title}：已过新鲜期或
 
 ## 六、行动建议
 
-- 今日总结只发布“今日新增”里的事实。
+- 今日总结只发布“今日新增”里的本期新增事实。
 - 延续关注内容可做 FAQ、客户答疑或内部跟进，不要包装为新政策。`;
 }
 
@@ -2229,15 +2564,17 @@ function buildDailyPrompt(date, context) {
   return `你是一位资深移民行业信息分析师。请基于以下抓取到的移民资讯，生成中文移民热点日报。
 
 日期：${date}
+统计窗口：${context.window?.label || date}
+窗口模式：${context.window?.mode === "last24h" ? "过去 24 小时早报" : "自然日完整日报"}
 候选资讯总数：${context.rawItems.length}
 
-【今日新增：只能这些内容进入“今日总结”】
+【本期新增：只能这些内容进入“今日总结”】
 ${formatDailyPromptItems(context.todayNew)}
 
-【重要变化：近 72 小时内，近 7 天日报未出现，但不是今天新增】
+【重要变化：近 72 小时内，近 7 天日报未出现，但不是本期新增】
 ${formatDailyPromptItems(context.important)}
 
-【延续关注：可作为跟进，不得包装为今日新增】
+【延续关注：可作为跟进，不得包装为本期新增】
 ${formatDailyPromptItems(context.continuing)}
 
 【不建议重复：过旧或近 7 天已出现】
@@ -2245,13 +2582,13 @@ ${formatDailyPromptItems(context.repeated)}
 
 请严格使用 Markdown，包含以下六节：
 ## 一、今日总结
-只总结【今日新增】里的事实。若今日新增为空，必须明确写“今日暂无可确认的重大新增事实”，不要复述延续关注或不建议重复内容。
+只总结【本期新增】里的事实。若本期新增为空，必须明确写“本期暂无可确认的重大新增事实”，不要复述延续关注或不建议重复内容。
 
 ## 二、今日新增
-列出今日新增事实，明确国家、项目、影响对象，并保留原文链接。
+列出本期新增事实，明确国家、项目、影响对象，并保留原文链接。
 
 ## 三、重要变化
-列出不是今天新增、但近 72 小时内且近 7 天未写过的变化。
+列出不是本期新增、但近 72 小时内且近 7 天未写过的变化。
 
 ## 四、延续关注
 列出需要跟进但不能当作今日新闻的内容，说明为什么不能重复包装。
@@ -2371,7 +2708,22 @@ async function callDeepSeek(prompt) {
   return content;
 }
 
-async function getDailyReport(date = getShanghaiDate(), { refresh = false } = {}) {
+function attachDailyWindowLabel(report) {
+  if (!report) {
+    return report;
+  }
+  const start = report.windowStart ? new Date(report.windowStart) : null;
+  const end = report.windowEnd ? new Date(report.windowEnd) : null;
+  return {
+    ...report,
+    windowLabel:
+      start && end && !Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())
+        ? getDailyWindowLabel({ start, end })
+        : "",
+  };
+}
+
+async function getDailyReport(date = getShanghaiDate(), { refresh = false, windowMode = "calendar" } = {}) {
   await initDb();
 
   if (!refresh) {
@@ -2383,7 +2735,10 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false } = {}
         'html', content_html,
         'sourceItemCount', source_item_count,
         'model', model,
-        'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s.000Z')
+        'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s.000Z'),
+        'windowMode', window_mode,
+        'windowStart', IF(window_start_at IS NULL, NULL, DATE_FORMAT(window_start_at, '%Y-%m-%dT%H:%i:%s.000Z')),
+        'windowEnd', IF(window_end_at IS NULL, NULL, DATE_FORMAT(window_end_at, '%Y-%m-%dT%H:%i:%s.000Z'))
       )
       FROM yimin_daily_reports
       WHERE report_date = ${sqlString(date)}
@@ -2391,11 +2746,11 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false } = {}
     `);
 
     if (existing) {
-      return existing;
+      return attachDailyWindowLabel(existing);
     }
   }
 
-  const dailyContext = await buildDailyContext(date);
+  const dailyContext = await buildDailyContext(date, { windowMode });
   const selectedItems = getDailyContextItems(dailyContext);
 
   let markdown;
@@ -2411,15 +2766,19 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false } = {}
     );
   }
 
-  const title = `移民热点日报（${date}）`;
+  const title = dailyContext.window.mode === "last24h" ? `移民热点早报（${date}）` : `移民热点日报（${date}）`;
   const html = markdownToHtml(markdown);
 
   await mysqlExec(`
     INSERT INTO yimin_daily_reports (
-      report_date, title, content_markdown, content_html, source_item_count, model, generated_at
+      report_date, window_start_at, window_end_at, window_mode,
+      title, content_markdown, content_html, source_item_count, model, generated_at
     )
     VALUES (
       ${sqlString(date)},
+      ${sqlDate(dailyContext.window.start)},
+      ${sqlDate(dailyContext.window.end)},
+      ${sqlString(dailyContext.window.mode)},
       ${sqlString(title)},
       ${sqlString(markdown)},
       ${sqlString(html)},
@@ -2428,6 +2787,9 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false } = {}
       CURRENT_TIMESTAMP
     )
     ON DUPLICATE KEY UPDATE
+      window_start_at = VALUES(window_start_at),
+      window_end_at = VALUES(window_end_at),
+      window_mode = VALUES(window_mode),
       title = VALUES(title),
       content_markdown = VALUES(content_markdown),
       content_html = VALUES(content_html),
@@ -2438,15 +2800,18 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false } = {}
   `);
   await saveDailyReportItems(date, dailyContext);
 
-  return {
+  return attachDailyWindowLabel({
     date,
     title,
     contentMarkdown: markdown,
     html,
     sourceItemCount: selectedItems.length,
     model,
+    windowMode: dailyContext.window.mode,
+    windowStart: dailyContext.window.start.toISOString(),
+    windowEnd: dailyContext.window.end.toISOString(),
     generatedAt: new Date().toISOString(),
-  };
+  });
 }
 
 async function serveStatic(req, res) {
@@ -2600,14 +2965,48 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/news") {
-      const payload = await getNews({ force: url.searchParams.get("refresh") === "1" });
+      const force = url.searchParams.get("refresh") === "1";
+      const sync = url.searchParams.get("sync") === "1";
+      const payload = await getNews({ force, background: force && !sync });
       sendJson(res, 200, payload);
+      return;
+    }
+
+    if (url.pathname === "/api/fetch-runs/latest") {
+      await initDb();
+      const run = activeFetchRun?.status === "running"
+        ? (await getFetchRunById(activeFetchRun.id)) || activeFetchRun
+        : await getLatestFetchRun();
+      sendJson(res, 200, {
+        ok: true,
+        run,
+      });
+      return;
+    }
+
+    const fetchRunMatch = url.pathname.match(/^\/api\/fetch-runs\/(\d+)$/);
+    if (fetchRunMatch) {
+      await initDb();
+      const runId = Number(fetchRunMatch[1]);
+      const run = await getFetchRunById(runId);
+      if (!run) {
+        sendJson(res, 404, {
+          ok: false,
+          error: "Fetch run not found",
+        });
+        return;
+      }
+      sendJson(res, 200, {
+        ok: true,
+        run,
+      });
       return;
     }
 
     if (url.pathname === "/api/daily") {
       const report = await getDailyReport(url.searchParams.get("date") || getShanghaiDate(), {
         refresh: url.searchParams.get("refresh") === "1",
+        windowMode: getDailyWindowModeFromSearch(url.searchParams),
       });
       sendJson(res, 200, {
         ok: true,

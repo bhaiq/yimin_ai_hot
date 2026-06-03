@@ -235,6 +235,18 @@ img {
   scrollbar-width: none;
 }
 
+.toolbar.filters-hidden {
+  grid-template-columns: minmax(260px, 420px) auto;
+}
+
+.toolbar.filters-hidden .refresh-button {
+  justify-self: end;
+}
+
+.filter-strip[hidden] {
+  display: none;
+}
+
 .filter-strip::-webkit-scrollbar {
   display: none;
 }

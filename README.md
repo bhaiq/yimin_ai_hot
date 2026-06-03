@@ -25,6 +25,7 @@ http://127.0.0.1:4173
 - 市场素材：按“今日新增 / 延续关注 / 无新增项目 / 不建议重复发布”生成素材日报
 - 分类筛选和关键词搜索
 - 实时 RSS 抓取 API：`/api/news`
+- 后台抓取队列：`/api/news?refresh=1` 会立即返回已有文章和 `fetchRun`，实际抓取按 `FEED_FETCH_CONCURRENCY` 限制并发，进度可查 `/api/fetch-runs/latest`
 - 信源列表：`/api/sources`
 - DeepSeek 生成并入库的日报：`/api/daily`
 - 日报会记录引用明细，今日总结只使用近 7 天未出现过的当天新增事实
@@ -84,5 +85,5 @@ http://127.0.0.1:4173
 
 - ~~给后台增加信源审核开关，把 `source_submissions` 里的有效源转为启用源~~（已完成）
 - 将政策雷达从静态规则升级为基于文章主题和 AI 分类的数据库视图
-- 增加定时任务，按小时执行 `/api/news?refresh=1`，每天生成一次 `/api/daily?refresh=1`
+- 增加定时任务，按小时执行 `/api/news?refresh=1` 启动后台抓取；每天 7 点执行 `/api/daily?refresh=1` 生成过去 24 小时早报。若需要自然日完整日报，可调用 `/api/daily?refresh=1&window=calendar&date=YYYY-MM-DD`
 - 为 Jina Reader 配置代理支持，解决服务器网络环境连通性
