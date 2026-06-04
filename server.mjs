@@ -1416,6 +1416,15 @@ async function getWxJsapiTicket(accessToken) {
   return data.ticket;
 }
 
+async function getWxAgentTicket(accessToken) {
+  const res = await fetch(`https://qyapi.weixin.qq.com/cgi-bin/ticket/get?access_token=${accessToken}&type=agent_config`);
+  const data = await res.json();
+  if (data.errcode !== 0) {
+    throw new Error(`WeChat Work get_agent_ticket failed: ${data.errcode} ${data.errmsg}`);
+  }
+  return data.ticket;
+}
+
 function buildWxJsConfig(jsapiTicket, url) {
   const nonceStr = Math.random().toString(36).slice(2, 15);
   const timestamp = Math.floor(Date.now() / 1000);
@@ -3595,16 +3604,23 @@ const server = createServer(async (req, res) => {
         if (ua.includes("wxwork")) {
           const currentUrl = `${process.env.PUBLIC_BASE_URL || ""}/d/${token}`;
           let jsConfig = null;
+          let agentConfig = null;
           try {
             const accessToken = await getWxAccessToken();
             const ticket = await getWxJsapiTicket(accessToken);
             jsConfig = buildWxJsConfig(ticket, currentUrl);
+            const agentTicket = await getWxAgentTicket(accessToken);
+            agentConfig = buildWxJsConfig(agentTicket, currentUrl);
           } catch {}
 
           const corpId = wxWorkConfig.corpId;
+          const agentId = wxWorkConfig.agentId;
           const nonceStr = jsConfig ? jsConfig.nonceStr : "";
           const timestamp = jsConfig ? jsConfig.timestamp : "";
           const signature = jsConfig ? jsConfig.signature : "";
+          const agentNonceStr = agentConfig ? agentConfig.nonceStr : "";
+          const agentTimestamp = agentConfig ? agentConfig.timestamp : "";
+          const agentSignature = agentConfig ? agentConfig.signature : "";
 
           res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
           res.end(`<!DOCTYPE html>
@@ -3627,34 +3643,50 @@ body{background:#0d0d1a;color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFo
 var targetUrl = '${targetUrl}';
 var dbg = document.getElementById('dbg');
 function log(msg) { dbg.textContent += msg + '\\n'; }
-log('corpId=${corpId} hasSign=${signature ? "1" : "0"}');
+var done = false;
+function go() { if(!done){done=true;window.location.href=targetUrl;} }
+setTimeout(go, 6000);
+log('hasSign=${signature ? "1" : "0"} hasAgent=${agentSignature ? "1" : "0"}');
 try {
   wx.config({
     beta: true,
-    debug: true,
+    debug: false,
     appId: '${corpId}',
     timestamp: ${timestamp},
     nonceStr: '${nonceStr}',
     signature: '${signature}',
     jsApiList: ['openDefaultBrowser']
   });
-  log('config called');
+  log('config ok');
   wx.ready(function() {
     log('ready');
-    wx.invoke('openDefaultBrowser', { url: targetUrl }, function(res) {
-      log('invoke: ' + (res.err_msg || JSON.stringify(res)));
-      if (res.err_msg !== 'openDefaultBrowser:ok') {
-        window.location.href = targetUrl;
+    wx.agentConfig({
+      corpid: '${corpId}',
+      agentid: ${agentId},
+      timestamp: ${agentTimestamp},
+      nonceStr: '${agentNonceStr}',
+      signature: '${agentSignature}',
+      jsApiList: ['openDefaultBrowser'],
+      success: function() {
+        log('agentConfig ok');
+        wx.invoke('openDefaultBrowser', { url: targetUrl }, function(res) {
+          log('invoke: ' + (res.err_msg || JSON.stringify(res)));
+          if (res.err_msg !== 'openDefaultBrowser:ok') { go(); }
+        });
+      },
+      fail: function(res) {
+        log('agentConfig fail: ' + JSON.stringify(res));
+        go();
       }
     });
   });
   wx.error(function(res) {
-    log('error: ' + JSON.stringify(res));
-    setTimeout(function() { window.location.href = targetUrl; }, 3000);
+    log('config error: ' + JSON.stringify(res));
+    go();
   });
 } catch(e) {
   log('catch: ' + e.message);
-  window.location.href = targetUrl;
+  go();
 }
 </script>
 </body></html>`);
