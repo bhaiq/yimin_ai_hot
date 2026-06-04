@@ -3621,6 +3621,13 @@ const server = createServer(async (req, res) => {
           const agentNonceStr = agentConfig ? agentConfig.nonceStr : "";
           const agentTimestamp = agentConfig ? agentConfig.timestamp : "";
           const agentSignature = agentConfig ? agentConfig.signature : "";
+          const targetUrlJson = JSON.stringify(targetUrl);
+          const corpIdJson = JSON.stringify(corpId);
+          const nonceStrJson = JSON.stringify(nonceStr);
+          const signatureJson = JSON.stringify(signature);
+          const agentNonceStrJson = JSON.stringify(agentNonceStr);
+          const agentSignatureJson = JSON.stringify(agentSignature);
+          const hasWxSdkConfig = Boolean(corpId && agentId && signature && agentSignature);
 
           res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
           res.end(`<!DOCTYPE html>
@@ -3639,14 +3646,19 @@ body{background:#0d0d1a;color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFo
 <p id="dbg" style="font-size:11px;color:#9ca3af;margin-top:12px;word-break:break-all;text-align:left;min-height:40px"></p>
 </div>
 <script>
-var targetUrl = '${targetUrl}';
+var targetUrl = ${targetUrlJson};
 var dbg = document.getElementById('dbg');
-function log(msg) { try{dbg.textContent += msg + '\n';}catch(e){} }
+function log(msg) {
+  try {
+    console.log('[daily-open]', msg);
+    if (dbg) dbg.textContent += msg + "\\n";
+  } catch(e) {}
+}
 var done = false;
-function go() { if(!done){done=true;window.location.href=targetUrl;} }
+function go() { if(!done){done=true;window.location.replace(targetUrl);} }
 log('1. page loaded');
-log('2. sign=${signature ? "1" : "0"} agent=${agentSignature ? "1" : "0"}');
-setTimeout(function(){ log('6. timeout, redirecting...'); go(); }, 6000);
+log('2. sign=${signature ? "1" : "0"} agent=${agentSignature ? "1" : "0"} ua=' + navigator.userAgent);
+setTimeout(function(){ log('6. timeout fallback, redirecting...'); go(); }, 3000);
 </script>
 <script src="https://res.wx.qq.com/open/js/jweixin-1.2.0.js"
   onload="log('3. sdk loaded')"
@@ -3654,25 +3666,29 @@ setTimeout(function(){ log('6. timeout, redirecting...'); go(); }, 6000);
 <script>
 log('4. after sdk tag');
 try {
-  if(typeof wx === 'undefined') { log('4b. wx undefined'); go(); } else {
+  var hasWxSdkConfig = ${hasWxSdkConfig ? "true" : "false"};
+  if (!hasWxSdkConfig) {
+    log('4a. missing wx sdk signature, normal redirect');
+    setTimeout(go, 100);
+  } else if(typeof wx === 'undefined') { log('4b. wx undefined'); go(); } else {
   wx.config({
     beta: true,
     debug: false,
-    appId: '${corpId}',
-    timestamp: ${timestamp},
-    nonceStr: '${nonceStr}',
-    signature: '${signature}',
+    appId: ${corpIdJson},
+    timestamp: ${Number(timestamp) || 0},
+    nonceStr: ${nonceStrJson},
+    signature: ${signatureJson},
     jsApiList: ['openDefaultBrowser']
   });
   log('5. config called');
   wx.ready(function() {
     log('5a. ready');
     wx.agentConfig({
-      corpid: '${corpId}',
-      agentid: ${agentId},
-      timestamp: ${agentTimestamp},
-      nonceStr: '${agentNonceStr}',
-      signature: '${agentSignature}',
+      corpid: ${corpIdJson},
+      agentid: ${Number(agentId) || 0},
+      timestamp: ${Number(agentTimestamp) || 0},
+      nonceStr: ${agentNonceStrJson},
+      signature: ${agentSignatureJson},
       jsApiList: ['openDefaultBrowser'],
       success: function() {
         log('5b. agentConfig ok');
