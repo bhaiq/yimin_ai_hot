@@ -3550,12 +3550,10 @@ const server = createServer(async (req, res) => {
       const token = url.pathname.replace("/d/", "").split("/")[0];
       if (token && /^[a-kmnp-z2-9]{12}$/i.test(token)) {
         const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "";
-        const result = await recordPushVisit(token, ip);
-        if (result) {
-          res.writeHead(302, { Location: "/#daily" });
-          res.end();
-          return;
-        }
+        await recordPushVisit(token, ip);
+        res.writeHead(302, { Location: "/#daily" });
+        res.end();
+        return;
       }
       res.writeHead(302, { Location: "/" });
       res.end();
