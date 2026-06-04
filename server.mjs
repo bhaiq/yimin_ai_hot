@@ -3627,27 +3627,34 @@ const server = createServer(async (req, res) => {
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>移民热点日报</title>
-<script src="https://res.wx.qq.com/open/js/jweixin-1.2.0.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0d0d1a;color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFont,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center}
-.wrap{text-align:center;padding:24px;max-width:320px}
+.wrap{text-align:center;padding:24px;max-width:360px}
 </style>
 </head>
 <body>
 <div class="wrap">
 <p>正在打开日报...</p>
-<p id="dbg" style="font-size:11px;color:#6b7280;margin-top:12px;word-break:break-all"></p>
+<p id="dbg" style="font-size:11px;color:#9ca3af;margin-top:12px;word-break:break-all;text-align:left;min-height:40px"></p>
 </div>
 <script>
 var targetUrl = '${targetUrl}';
 var dbg = document.getElementById('dbg');
-function log(msg) { dbg.textContent += msg + '\\n'; }
+function log(msg) { try{dbg.textContent += msg + '\n';}catch(e){} }
 var done = false;
 function go() { if(!done){done=true;window.location.href=targetUrl;} }
-setTimeout(go, 6000);
-log('hasSign=${signature ? "1" : "0"} hasAgent=${agentSignature ? "1" : "0"}');
+log('1. page loaded');
+log('2. sign=${signature ? "1" : "0"} agent=${agentSignature ? "1" : "0"}');
+setTimeout(function(){ log('6. timeout, redirecting...'); go(); }, 6000);
+</script>
+<script src="https://res.wx.qq.com/open/js/jweixin-1.2.0.js"
+  onload="log('3. sdk loaded')"
+  onerror="log('3. sdk FAILED'); go();"></script>
+<script>
+log('4. after sdk tag');
 try {
+  if(typeof wx === 'undefined') { log('4b. wx undefined'); go(); } else {
   wx.config({
     beta: true,
     debug: false,
@@ -3657,9 +3664,9 @@ try {
     signature: '${signature}',
     jsApiList: ['openDefaultBrowser']
   });
-  log('config ok');
+  log('5. config called');
   wx.ready(function() {
-    log('ready');
+    log('5a. ready');
     wx.agentConfig({
       corpid: '${corpId}',
       agentid: ${agentId},
@@ -3668,28 +3675,30 @@ try {
       signature: '${agentSignature}',
       jsApiList: ['openDefaultBrowser'],
       success: function() {
-        log('agentConfig ok');
+        log('5b. agentConfig ok');
         wx.invoke('openDefaultBrowser', { url: targetUrl }, function(res) {
-          log('invoke: ' + (res.err_msg || JSON.stringify(res)));
+          log('5c. invoke: ' + (res.err_msg || JSON.stringify(res)));
           if (res.err_msg !== 'openDefaultBrowser:ok') { go(); }
         });
       },
       fail: function(res) {
-        log('agentConfig fail: ' + JSON.stringify(res));
+        log('5d. agentConfig fail: ' + JSON.stringify(res));
         go();
       }
     });
   });
   wx.error(function(res) {
-    log('config error: ' + JSON.stringify(res));
+    log('5e. config error: ' + JSON.stringify(res));
     go();
   });
+  }
 } catch(e) {
-  log('catch: ' + e.message);
+  log('ERR: ' + e.message);
   go();
 }
 </script>
 </body></html>`);
+
           return;
         }
 
