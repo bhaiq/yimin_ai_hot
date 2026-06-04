@@ -1516,42 +1516,36 @@ async function executePushTask(taskId) {
   let failedCount = 0;
   const batchSize = 100;
 
-  for (let i = 0; i < allLogs.length; i += batchSize) {
-    const batch = allLogs.slice(i, i + batchSize);
-    const userIds = batch.map((l) => l.userid);
-
-    const dailyUrl = `${baseUrl}/d/${batch[0].token}`;
+  for (const logEntry of allLogs) {
+    const dailyUrl = `${baseUrl}/d/${logEntry.token}`;
     const title = "移民热点日报";
     const description = `${dailyDate} 移民政策日报已生成，点击查看今日动态。`;
 
     try {
-      const result = await sendWxTextCard(accessToken, userIds, title, description, dailyUrl);
+      const result = await sendWxTextCard(accessToken, [logEntry.userid], title, description, dailyUrl);
 
       if (result.errcode === 0) {
-        const ids = batch.map((l) => l.id);
         await mysqlExec(`
           UPDATE yimin_push_logs
           SET send_status = 'sent', sent_at = CURRENT_TIMESTAMP
-          WHERE id IN (${ids.map((id) => sqlNumber(id)).join(",")})
+          WHERE id = ${sqlNumber(logEntry.id)}
         `);
-        sentCount += batch.length;
+        sentCount += 1;
       } else {
-        const ids = batch.map((l) => l.id);
         await mysqlExec(`
           UPDATE yimin_push_logs
           SET send_status = 'failed', error = ${sqlString(`${result.errcode}: ${result.errmsg}`)}
-          WHERE id IN (${ids.map((id) => sqlNumber(id)).join(",")})
+          WHERE id = ${sqlNumber(logEntry.id)}
         `);
-        failedCount += batch.length;
+        failedCount += 1;
       }
     } catch (err) {
-      const ids = batch.map((l) => l.id);
       await mysqlExec(`
         UPDATE yimin_push_logs
         SET send_status = 'failed', error = ${sqlString(err.message)}
-        WHERE id IN (${ids.map((id) => sqlNumber(id)).join(",")})
+        WHERE id = ${sqlNumber(logEntry.id)}
       `);
-      failedCount += batch.length;
+      failedCount += 1;
     }
   }
 
