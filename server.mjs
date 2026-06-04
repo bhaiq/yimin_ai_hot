@@ -3551,7 +3551,41 @@ const server = createServer(async (req, res) => {
       if (token && /^[a-kmnp-z2-9]{12}$/i.test(token)) {
         const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "";
         await recordPushVisit(token, ip);
-        res.writeHead(302, { Location: "/#daily" });
+
+        const targetUrl = `${process.env.PUBLIC_BASE_URL || ""}/#daily`;
+        const ua = (req.headers["user-agent"] || "").toLowerCase();
+
+        if (ua.includes("wxwork")) {
+          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+          res.end(`<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>移民热点日报</title>
+<script src="https://res.wx.qq.com/open/js/jweixin-1.2.0.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0d0d1a;color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFont,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.wrap{text-align:center;padding:24px;max-width:320px}
+</style>
+</head>
+<body>
+<div class="wrap"><p>正在打开日报...</p></div>
+<script>
+try {
+  wx.invoke('openDefaultBrowser', { url: '${targetUrl}' }, function(res) {
+    if (res.err_msg !== 'openDefaultBrowser:ok') {
+      window.location.href = '${targetUrl}';
+    }
+  });
+} catch(e) {
+  window.location.href = '${targetUrl}';
+}
+</script>
+</body></html>`);
+          return;
+        }
+
+        res.writeHead(302, { Location: targetUrl });
         res.end();
         return;
       }
