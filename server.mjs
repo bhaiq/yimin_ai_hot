@@ -390,6 +390,48 @@ async function initDb() {
           UNIQUE KEY uk_yimin_market_feedback_article (article_hash),
           INDEX idx_yimin_market_feedback_action (action)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='市场素材反馈表';
+
+        CREATE TABLE IF NOT EXISTS yimin_push_tasks (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          push_date DATE NOT NULL COMMENT '推送日期',
+          daily_date DATE NOT NULL COMMENT '日报日期',
+          status ENUM('pending','running','completed','partial_failed','failed') NOT NULL DEFAULT 'pending' COMMENT '批次状态',
+          total_count INT NOT NULL DEFAULT 0 COMMENT '目标人数',
+          sent_count INT NOT NULL DEFAULT 0 COMMENT '已发送',
+          failed_count INT NOT NULL DEFAULT 0 COMMENT '发送失败',
+          visited_count INT NOT NULL DEFAULT 0 COMMENT '已访问',
+          error TEXT NULL COMMENT '错误信息',
+          started_at DATETIME NULL COMMENT '开始时间',
+          finished_at DATETIME NULL COMMENT '完成时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          UNIQUE KEY uk_push_tasks_date (push_date),
+          INDEX idx_push_tasks_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='日报推送批次表';
+
+        CREATE TABLE IF NOT EXISTS yimin_push_logs (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          task_id BIGINT NOT NULL COMMENT '推送批次 ID',
+          userid VARCHAR(128) NOT NULL COMMENT '企业微信 userid',
+          username VARCHAR(128) NOT NULL DEFAULT '' COMMENT '用户姓名',
+          token CHAR(12) NOT NULL COMMENT '访问令牌',
+          send_status ENUM('pending','sent','failed') NOT NULL DEFAULT 'pending' COMMENT '发送状态',
+          sent_at DATETIME NULL COMMENT '发送时间',
+          visit_at DATETIME NULL COMMENT '首次访问时间',
+          visit_ip VARCHAR(45) NULL COMMENT '访问 IP',
+          error TEXT NULL COMMENT '发送错误信息',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          UNIQUE KEY uk_push_logs_token (token),
+          INDEX idx_push_logs_task (task_id),
+          INDEX idx_push_logs_userid (userid),
+          CONSTRAINT fk_push_logs_task FOREIGN KEY (task_id) REFERENCES yimin_push_tasks(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='日报推送日志表';
+
+        CREATE TABLE IF NOT EXISTS yimin_wx_token_cache (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          access_token VARCHAR(512) NOT NULL COMMENT '企业微信 access_token',
+          expires_at DATETIME NOT NULL COMMENT '过期时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '缓存时间'
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='企业微信令牌缓存';
       `);
 
       const colCheck = await mysqlRun(`
@@ -1286,6 +1328,335 @@ async function saveMarketFeedback(data, session = null) {
   `);
 
   return { articleHash, action };
+}
+
+// ── WeChat Work (企业微信) push integration ──────────────────────────
+
+const wxWorkConfig = {
+  corpId: process.env.WX_WORK_CORP_ID || "",
+  agentId: Number(process.env.WX_WORK_AGENT_ID || 0),
+  secret: process.env.WX_WORK_SECRET || "",
+  pushDeptIds: (process.env.WX_WORK_PUSH_DEPT_IDS || "").split(",").filter(Boolean).map(Number),
+  pushTagIds: (process.env.WX_WORK_PUSH_TAG_IDS || "").split(",").filter(Boolean).map(Number),
+};
+
+function generatePushToken() {
+  const chars = "abcdefghijkmnpqrstuvwxyz23456789";
+  let token = "";
+  const bytes = crypto.getRandomValues(new Uint8Array(12));
+  for (let i = 0; i < 12; i++) {
+    token += chars[bytes[i] % chars.length];
+  }
+  return token;
+}
+
+async function getWxAccessToken() {
+  if (!wxWorkConfig.corpId || !wxWorkConfig.secret) {
+    throw new Error("WX_WORK_CORP_ID or WX_WORK_SECRET not configured");
+  }
+
+  const cached = await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT('access_token', access_token, 'expires_at', expires_at)
+    ), JSON_ARRAY())
+    FROM yimin_wx_token_cache ORDER BY id DESC LIMIT 1
+  `);
+  if (cached && cached.length > 0) {
+    const row = cached[0];
+    const expiresAt = new Date(row.expires_at || row.expiresAt);
+    if (expiresAt.getTime() > Date.now() + 300_000) {
+      return row.access_token || row.accessToken;
+    }
+  }
+
+  const url = `https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=${wxWorkConfig.corpId}&corpsecret=${wxWorkConfig.secret}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if (data.errcode !== 0) {
+    throw new Error(`WeChat Work gettoken failed: ${data.errcode} ${data.errmsg}`);
+  }
+
+  const expiresIn = Number(data.expires_in || 7200);
+  const expiresAt = new Date(Date.now() + expiresIn * 1000);
+
+  await mysqlExec(`
+    INSERT INTO yimin_wx_token_cache (access_token, expires_at)
+    VALUES (${sqlString(data.access_token)}, ${sqlDate(expiresAt.toISOString())})
+  `);
+
+  return data.access_token;
+}
+
+async function getWxDepartmentUsers(accessToken, deptId) {
+  const url = `https://qyapi.weixin.qq.com/cgi-bin/user/simplelist?access_token=${accessToken}&department_id=${deptId}&fetch_child=1`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if (data.errcode !== 0) {
+    throw new Error(`WeChat Work user list failed (dept ${deptId}): ${data.errcode} ${data.errmsg}`);
+  }
+  return (data.userlist || []).map((u) => ({
+    userid: String(u.userid || ""),
+    name: String(u.name || ""),
+  }));
+}
+
+async function getWxAllPushUsers(accessToken) {
+  const seen = new Set();
+  const users = [];
+  const deptIds = wxWorkConfig.pushDeptIds.length > 0
+    ? wxWorkConfig.pushDeptIds
+    : [1];
+
+  for (const deptId of deptIds) {
+    const deptUsers = await getWxDepartmentUsers(accessToken, deptId);
+    for (const u of deptUsers) {
+      if (u.userid && !seen.has(u.userid)) {
+        seen.add(u.userid);
+        users.push(u);
+      }
+    }
+  }
+  return users;
+}
+
+async function sendWxTextCard(accessToken, userIds, title, description, url) {
+  const toUser = userIds.join("|");
+  if (!toUser) return { errcode: 0, errmsg: "no users" };
+
+  const res = await fetch(`https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${accessToken}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      touser: toUser,
+      msgtype: "textcard",
+      agentid: wxWorkConfig.agentId,
+      textcard: { title, description, url, btntxt: "查看日报" },
+    }),
+  });
+  return res.json();
+}
+
+// ── Push task logic ──────────────────────────────────────────────────
+
+async function createPushTask(dailyDate, users) {
+  const pushDate = getShanghaiDate();
+  await mysqlExec(`
+    INSERT INTO yimin_push_tasks (push_date, daily_date, status, total_count)
+    VALUES (${sqlString(pushDate)}, ${sqlString(dailyDate)}, 'pending', ${sqlNumber(users.length)})
+    ON DUPLICATE KEY UPDATE
+      daily_date = VALUES(daily_date),
+      status = 'pending',
+      total_count = VALUES(total_count),
+      sent_count = 0,
+      failed_count = 0,
+      visited_count = 0,
+      error = NULL,
+      started_at = NULL,
+      finished_at = NULL
+  `);
+
+  const rows = await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT('id', id)), JSON_ARRAY())
+    FROM yimin_push_tasks WHERE push_date = ${sqlString(pushDate)}
+  `);
+  const taskId = rows && rows.length > 0 ? rows[0].id : null;
+  if (!taskId) throw new Error("Failed to create push task: insert ok but select returned nothing");
+
+  await mysqlExec(`
+    DELETE FROM yimin_push_logs WHERE task_id = ${sqlNumber(taskId)}
+  `);
+
+  const values = users.map((u) =>
+    `(${sqlNumber(taskId)}, ${sqlString(u.userid)}, ${sqlString(u.name)}, ${sqlString(generatePushToken())}, 'pending')`
+  );
+
+  const batchSize = 50;
+  for (let i = 0; i < values.length; i += batchSize) {
+    const batch = values.slice(i, i + batchSize);
+    await mysqlExec(`
+      INSERT INTO yimin_push_logs (task_id, userid, username, token, send_status)
+      VALUES ${batch.join(",")}
+    `);
+  }
+
+  return taskId;
+}
+
+async function executePushTask(taskId) {
+  await initDb();
+
+  await mysqlExec(`
+    UPDATE yimin_push_tasks SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ${sqlNumber(taskId)}
+  `);
+
+  const task = await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT('id', id, 'dailyDate', daily_date)
+    ), JSON_ARRAY())
+    FROM yimin_push_tasks WHERE id = ${sqlNumber(taskId)}
+  `);
+  if (!task || task.length === 0) throw new Error(`Push task ${taskId} not found`);
+
+  const dailyDate = task[0].dailyDate;
+  const baseUrl = process.env.PUBLIC_BASE_URL || `http://127.0.0.1:4173`;
+
+  const accessToken = await getWxAccessToken();
+
+  const logs = await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT('id', id, 'userid', userid, 'username', username, 'token', token, 'sendStatus', send_status)
+    ), JSON_ARRAY())
+    FROM yimin_push_logs
+    WHERE task_id = ${sqlNumber(taskId)} AND send_status = 'pending'
+    ORDER BY id
+  `);
+
+  const allLogs = logs || [];
+  let sentCount = 0;
+  let failedCount = 0;
+  const batchSize = 100;
+
+  for (let i = 0; i < allLogs.length; i += batchSize) {
+    const batch = allLogs.slice(i, i + batchSize);
+    const userIds = batch.map((l) => l.userid);
+
+    const dailyUrl = `${baseUrl}/d/${batch[0].token}`;
+    const title = "移民热点日报";
+    const description = `${dailyDate} 移民政策日报已生成，点击查看今日动态。`;
+
+    try {
+      const result = await sendWxTextCard(accessToken, userIds, title, description, dailyUrl);
+
+      if (result.errcode === 0) {
+        const ids = batch.map((l) => l.id);
+        await mysqlExec(`
+          UPDATE yimin_push_logs
+          SET send_status = 'sent', sent_at = CURRENT_TIMESTAMP
+          WHERE id IN (${ids.map((id) => sqlNumber(id)).join(",")})
+        `);
+        sentCount += batch.length;
+      } else {
+        const ids = batch.map((l) => l.id);
+        await mysqlExec(`
+          UPDATE yimin_push_logs
+          SET send_status = 'failed', error = ${sqlString(`${result.errcode}: ${result.errmsg}`)}
+          WHERE id IN (${ids.map((id) => sqlNumber(id)).join(",")})
+        `);
+        failedCount += batch.length;
+      }
+    } catch (err) {
+      const ids = batch.map((l) => l.id);
+      await mysqlExec(`
+        UPDATE yimin_push_logs
+        SET send_status = 'failed', error = ${sqlString(err.message)}
+        WHERE id IN (${ids.map((id) => sqlNumber(id)).join(",")})
+      `);
+      failedCount += batch.length;
+    }
+  }
+
+  const finalStatus = failedCount === 0 ? "completed" : sentCount > 0 ? "partial_failed" : "failed";
+  await mysqlExec(`
+    UPDATE yimin_push_tasks
+    SET status = ${sqlString(finalStatus)},
+        sent_count = ${sqlNumber(sentCount)},
+        failed_count = ${sqlNumber(failedCount)},
+        finished_at = CURRENT_TIMESTAMP
+    WHERE id = ${sqlNumber(taskId)}
+  `);
+
+  return { taskId, sentCount, failedCount, status: finalStatus };
+}
+
+async function recordPushVisit(token, ip) {
+  await initDb();
+
+  const row = await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT('id', id, 'taskId', task_id, 'userid', userid, 'username', username, 'visitAt', visit_at)
+    ), JSON_ARRAY())
+    FROM yimin_push_logs WHERE token = ${sqlString(token)}
+  `);
+
+  if (!row || row.length === 0) return null;
+
+  const log = row[0];
+  if (!log.visitAt) {
+    await mysqlExec(`
+      UPDATE yimin_push_logs
+      SET visit_at = CURRENT_TIMESTAMP, visit_ip = ${sqlString(ip || "")}
+      WHERE id = ${sqlNumber(log.id)}
+    `);
+
+    await mysqlExec(`
+      UPDATE yimin_push_tasks
+      SET visited_count = visited_count + 1
+      WHERE id = ${sqlNumber(log.task_id || log.taskId)}
+    `);
+  }
+
+  return { taskId: log.task_id || log.taskId, userid: log.userid, username: log.username };
+}
+
+async function listPushTasks(limit = 30) {
+  return (
+    (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(
+        JSON_OBJECT(
+          'id', id,
+          'pushDate', DATE_FORMAT(push_date, '%Y-%m-%d'),
+          'dailyDate', DATE_FORMAT(daily_date, '%Y-%m-%d'),
+          'status', status,
+          'totalCount', total_count,
+          'sentCount', sent_count,
+          'failedCount', failed_count,
+          'visitedCount', visited_count,
+          'startedAt', DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%s.000Z'),
+          'finishedAt', DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%s.000Z')
+        )
+      ), JSON_ARRAY())
+      FROM (
+        SELECT * FROM yimin_push_tasks ORDER BY id DESC LIMIT ${sqlNumber(limit)}
+      ) t;
+    `)) || []
+  );
+}
+
+async function getPushTaskLogs(taskId, { status = null, limit = 100 } = {}) {
+  const where = [`task_id = ${sqlNumber(taskId)}`];
+  if (status) where.push(`send_status = ${sqlString(status)}`);
+
+  return (
+    (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(
+        JSON_OBJECT(
+          'id', id,
+          'userid', userid,
+          'username', username,
+          'token', token,
+          'sendStatus', send_status,
+          'sentAt', DATE_FORMAT(sent_at, '%Y-%m-%dT%H:%i:%s.000Z'),
+          'visitAt', DATE_FORMAT(visit_at, '%Y-%m-%dT%H:%i:%s.000Z'),
+          'visitIp', visit_ip,
+          'error', error
+        )
+      ), JSON_ARRAY())
+      FROM (
+        SELECT * FROM yimin_push_logs
+        WHERE ${where.join(" AND ")}
+        ORDER BY id
+        LIMIT ${sqlNumber(limit)}
+      ) l;
+    `)) || []
+  );
+}
+
+async function retryFailedPushes(taskId) {
+  await mysqlExec(`
+    UPDATE yimin_push_logs SET send_status = 'pending', error = NULL
+    WHERE task_id = ${sqlNumber(taskId)} AND send_status = 'failed'
+  `);
+  return executePushTask(taskId);
 }
 
 async function saveSourceSubmission(data) {
@@ -3177,6 +3548,82 @@ const server = createServer(async (req, res) => {
       sendJson(res, 201, {
         ok: true,
       });
+      return;
+    }
+
+    // ── Push visit tracking: /d/:token ──
+    if (url.pathname.startsWith("/d/") && req.method === "GET") {
+      const token = url.pathname.replace("/d/", "").split("/")[0];
+      if (token && /^[a-kmnp-z2-9]{12}$/i.test(token)) {
+        const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "";
+        const result = await recordPushVisit(token, ip);
+        if (result) {
+          res.writeHead(302, { Location: "/#daily" });
+          res.end();
+          return;
+        }
+      }
+      res.writeHead(302, { Location: "/" });
+      res.end();
+      return;
+    }
+
+    // ── Push task management APIs ──
+    if (url.pathname === "/api/push/tasks" && req.method === "GET") {
+      if (!requireAuth(req)) {
+        sendJson(res, 401, { ok: false, error: "请先登录" });
+        return;
+      }
+      const tasks = await listPushTasks();
+      sendJson(res, 200, { ok: true, tasks });
+      return;
+    }
+
+    if (url.pathname === "/api/push/daily" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const dailyDate = body?.date || getShanghaiDate();
+
+      if (!wxWorkConfig.corpId || !wxWorkConfig.secret) {
+        sendJson(res, 400, { ok: false, error: "企业微信未配置（WX_WORK_CORP_ID / WX_WORK_SECRET）" });
+        return;
+      }
+
+      const accessToken = await getWxAccessToken();
+      const users = await getWxAllPushUsers(accessToken);
+
+      if (users.length === 0) {
+        sendJson(res, 400, { ok: false, error: "未找到推送目标用户，请检查 WX_WORK_PUSH_DEPT_IDS" });
+        return;
+      }
+
+      const taskId = await createPushTask(dailyDate, users);
+      const result = await executePushTask(taskId);
+
+      sendJson(res, 200, { ok: true, ...result });
+      return;
+    }
+
+    if (url.pathname === "/api/push/retry" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const taskId = Number(body?.taskId);
+      if (!taskId) {
+        sendJson(res, 400, { ok: false, error: "taskId required" });
+        return;
+      }
+      const result = await retryFailedPushes(taskId);
+      sendJson(res, 200, { ok: true, ...result });
+      return;
+    }
+
+    if (url.pathname.startsWith("/api/push/tasks/") && req.method === "GET") {
+      if (!requireAuth(req)) {
+        sendJson(res, 401, { ok: false, error: "请先登录" });
+        return;
+      }
+      const taskId = Number(url.pathname.replace("/api/push/tasks/", ""));
+      const status = url.searchParams.get("status") || null;
+      const logs = await getPushTaskLogs(taskId, { status });
+      sendJson(res, 200, { ok: true, logs });
       return;
     }
 
