@@ -1387,6 +1387,43 @@ async function getWxAccessToken() {
   return data.access_token;
 }
 
+async function getWxJsapiTicket(accessToken) {
+  const cached = await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT('ticket', ticket, 'expiresAt', expires_at)
+    ), JSON_ARRAY())
+    FROM yimin_wx_token_cache
+    WHERE expires_at > NOW() AND ticket IS NOT NULL AND ticket != ''
+    ORDER BY id DESC LIMIT 1
+  `);
+  if (cached && cached.length > 0 && cached[0].ticket) {
+    return cached[0].ticket;
+  }
+
+  const res = await fetch(`https://qyapi.weixin.qq.com/cgi-bin/get_jsapi_ticket?access_token=${accessToken}`);
+  const data = await res.json();
+  if (data.errcode !== 0) {
+    throw new Error(`WeChat Work get_jsapi_ticket failed: ${data.errcode} ${data.errmsg}`);
+  }
+
+  const expiresIn = Number(data.expires_in || 7200);
+  const expiresAt = new Date(Date.now() + expiresIn * 1000);
+  await mysqlExec(`
+    INSERT INTO yimin_wx_token_cache (access_token, expires_at, ticket)
+    VALUES ('', ${sqlDate(expiresAt.toISOString())}, ${sqlString(data.ticket)})
+  `);
+
+  return data.ticket;
+}
+
+function buildWxJsConfig(jsapiTicket, url) {
+  const nonceStr = Math.random().toString(36).slice(2, 15);
+  const timestamp = Math.floor(Date.now() / 1000);
+  const string1 = `jsapi_ticket=${jsapiTicket}&noncestr=${nonceStr}&timestamp=${timestamp}&url=${url}`;
+  const signature = createHash("sha1").update(string1).digest("hex");
+  return { nonceStr, timestamp, signature };
+}
+
 async function getWxDepartmentUsers(accessToken, deptId) {
   const url = `https://qyapi.weixin.qq.com/cgi-bin/user/simplelist?access_token=${accessToken}&department_id=${deptId}&fetch_child=1`;
   const res = await fetch(url);
@@ -3556,6 +3593,19 @@ const server = createServer(async (req, res) => {
         const ua = (req.headers["user-agent"] || "").toLowerCase();
 
         if (ua.includes("wxwork")) {
+          const currentUrl = `${process.env.PUBLIC_BASE_URL || ""}/d/${token}`;
+          let jsConfig = null;
+          try {
+            const accessToken = await getWxAccessToken();
+            const ticket = await getWxJsapiTicket(accessToken);
+            jsConfig = buildWxJsConfig(ticket, currentUrl);
+          } catch {}
+
+          const corpId = wxWorkConfig.corpId;
+          const nonceStr = jsConfig ? jsConfig.nonceStr : "";
+          const timestamp = jsConfig ? jsConfig.timestamp : "";
+          const signature = jsConfig ? jsConfig.signature : "";
+
           res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
           res.end(`<!DOCTYPE html>
 <html lang="zh-CN">
@@ -3569,16 +3619,42 @@ body{background:#0d0d1a;color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFo
 </style>
 </head>
 <body>
-<div class="wrap"><p>正在打开日报...</p></div>
+<div class="wrap">
+<p>正在打开日报...</p>
+<p id="dbg" style="font-size:11px;color:#6b7280;margin-top:12px;word-break:break-all"></p>
+</div>
 <script>
+var targetUrl = '${targetUrl}';
+var dbg = document.getElementById('dbg');
+function log(msg) { dbg.textContent += msg + '\\n'; }
+log('corpId=${corpId} hasSign=${signature ? "1" : "0"}');
 try {
-  wx.invoke('openDefaultBrowser', { url: '${targetUrl}' }, function(res) {
-    if (res.err_msg !== 'openDefaultBrowser:ok') {
-      window.location.href = '${targetUrl}';
-    }
+  wx.config({
+    beta: true,
+    debug: true,
+    appId: '${corpId}',
+    timestamp: ${timestamp},
+    nonceStr: '${nonceStr}',
+    signature: '${signature}',
+    jsApiList: ['openDefaultBrowser']
+  });
+  log('config called');
+  wx.ready(function() {
+    log('ready');
+    wx.invoke('openDefaultBrowser', { url: targetUrl }, function(res) {
+      log('invoke: ' + (res.err_msg || JSON.stringify(res)));
+      if (res.err_msg !== 'openDefaultBrowser:ok') {
+        window.location.href = targetUrl;
+      }
+    });
+  });
+  wx.error(function(res) {
+    log('error: ' + JSON.stringify(res));
+    setTimeout(function() { window.location.href = targetUrl; }, 3000);
   });
 } catch(e) {
-  window.location.href = '${targetUrl}';
+  log('catch: ' + e.message);
+  window.location.href = targetUrl;
 }
 </script>
 </body></html>`);
@@ -3591,6 +3667,31 @@ try {
       }
       res.writeHead(302, { Location: "/" });
       res.end();
+      return;
+    }
+
+    // ── WeChat Work JS-SDK signature ──
+    if (url.pathname === "/api/wx/jsconfig" && req.method === "GET") {
+      const callbackUrl = url.searchParams.get("url") || "";
+      if (!callbackUrl) {
+        sendJson(res, 400, { ok: false, error: "url param required" });
+        return;
+      }
+      try {
+        const accessToken = await getWxAccessToken();
+        const ticket = await getWxJsapiTicket(accessToken);
+        const config = buildWxJsConfig(ticket, callbackUrl);
+        sendJson(res, 200, {
+          ok: true,
+          corpId: wxWorkConfig.corpId,
+          agentId: wxWorkConfig.agentId,
+          nonceStr: config.nonceStr,
+          timestamp: config.timestamp,
+          signature: config.signature,
+        });
+      } catch (err) {
+        sendJson(res, 500, { ok: false, error: err.message });
+      }
       return;
     }
 
