@@ -3048,7 +3048,8 @@ ${formatDailyPromptItems(context.repeated)}
 - 不要把【延续关注】或【不建议重复】写进“今日总结”。
 - 不要编造政策、日期、费用、影响范围。
 - 如果某条信息近 7 天已经出现，只能放在“延续关注”或“不建议重复”。
-- 同一章节内如使用数字编号，必须连续递增，不要每条都写成“1.”。`;
+- 同一章节内如使用数字编号，必须连续递增，不要每条都写成”1.”。
+- 所有输出必须使用简体中文，遇到英文、希腊文或其他语言的标题和摘要必须翻译为中文，不得保留原文。`;
 }
 
 function getDailyContextItems(context) {
@@ -3130,7 +3131,7 @@ async function callDeepSeek(prompt) {
         {
           role: "system",
           content:
-            "你是移民政策日报编辑，只能基于用户提供的信息进行归纳，不能编造政策、日期、费用或结论。",
+            "你是移民政策日报编辑，只能基于用户提供的信息进行归纳，不能编造政策、日期、费用或结论。输出必须使用简体中文，遇到英文或其他语言的源材料必须翻译为中文，不要保留原文。",
         },
         {
           role: "user",
@@ -3146,10 +3147,17 @@ async function callDeepSeek(prompt) {
   }
 
   const data = await response.json();
-  const content = data.choices?.[0]?.message?.content?.trim();
+  let content = data.choices?.[0]?.message?.content?.trim();
   if (!content) {
     throw new Error("DeepSeek returned empty content");
   }
+
+  // Remove non-CJK garbage: Greek, control chars, isolated combining marks
+  content = content.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "");
+  content = content.replace(
+    /[Ͱ-Ͽᴀ-ᶿἀ-῿Ⲁ-⳿]/g,
+    "",
+  );
 
   return content;
 }
