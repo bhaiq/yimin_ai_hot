@@ -507,6 +507,7 @@ async function initDb() {
         CREATE TABLE IF NOT EXISTS yimin_wx_token_cache (
           id INT AUTO_INCREMENT PRIMARY KEY,
           access_token VARCHAR(512) NOT NULL COMMENT '企业微信 access_token',
+          ticket VARCHAR(512) NULL COMMENT '企业微信 JS-SDK ticket',
           expires_at DATETIME NOT NULL COMMENT '过期时间',
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '缓存时间'
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='企业微信令牌缓存';
@@ -591,6 +592,20 @@ async function initDb() {
           ALTER TABLE yimin_fetch_runs
           ADD COLUMN failed_source_count INT NOT NULL DEFAULT 0 COMMENT '失败来源数量'
           AFTER success_source_count;
+        `);
+      }
+
+      const wxTokenColumns = await mysqlRun(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+          AND TABLE_NAME = 'yimin_wx_token_cache'
+          AND COLUMN_NAME = 'ticket';
+      `);
+      if (!wxTokenColumns.includes("ticket")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_wx_token_cache
+          ADD COLUMN ticket VARCHAR(512) NULL COMMENT '企业微信 JS-SDK ticket'
+          AFTER access_token;
         `);
       }
 
@@ -1476,7 +1491,9 @@ async function getWxAccessToken() {
     SELECT COALESCE(JSON_ARRAYAGG(
       JSON_OBJECT('access_token', access_token, 'expires_at', expires_at)
     ), JSON_ARRAY())
-    FROM yimin_wx_token_cache ORDER BY id DESC LIMIT 1
+    FROM yimin_wx_token_cache
+    WHERE access_token IS NOT NULL AND access_token != ''
+    ORDER BY id DESC LIMIT 1
   `);
   if (cached && cached.length > 0) {
     const row = cached[0];
@@ -4037,13 +4054,23 @@ const server = createServer(async (req, res) => {
           const currentUrl = buildPublicUrl(req, `${url.pathname}${url.search}`);
           let jsConfig = null;
           let agentConfig = null;
+          let signatureError = "";
           try {
             const accessToken = await getWxAccessToken();
             const ticket = await getWxJsapiTicket(accessToken);
             jsConfig = buildWxJsConfig(ticket, currentUrl);
             const agentTicket = await getWxAgentTicket(accessToken);
             agentConfig = buildWxJsConfig(agentTicket, currentUrl);
-          } catch {}
+          } catch (err) {
+            signatureError = err instanceof Error ? err.message : String(err);
+            await recordPushOpenEvent({
+              token,
+              eventName: "server signature error",
+              eventDetail: signatureError,
+              ip,
+              userAgent: req.headers["user-agent"] || "",
+            }).catch(() => {});
+          }
 
           const corpId = wxWorkConfig.corpId;
           const agentId = wxWorkConfig.agentId;
@@ -4062,6 +4089,15 @@ const server = createServer(async (req, res) => {
           const agentNonceStrJson = JSON.stringify(agentNonceStr);
           const agentSignatureJson = JSON.stringify(agentSignature);
           const hasWxSdkConfig = Boolean(corpId && agentId && signature && agentSignature);
+          if (!hasWxSdkConfig && !signatureError) {
+            signatureError = [
+              !corpId ? "missing WX_WORK_CORP_ID" : "",
+              !agentId ? "missing WX_WORK_AGENT_ID" : "",
+              !signature ? "missing jsapi signature" : "",
+              !agentSignature ? "missing agent signature" : "",
+            ].filter(Boolean).join("; ");
+          }
+          const signatureErrorJson = JSON.stringify(signatureError);
 
           res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
           res.end(`<!DOCTYPE html>
@@ -4133,7 +4169,7 @@ function tryOpenDefaultBrowser(source) {
   }
 }
 log('1. page loaded');
-log('2. sign=${signature ? "1" : "0"} agent=${agentSignature ? "1" : "0"} current=' + currentUrl + ' target=' + targetUrl + ' ua=' + navigator.userAgent);
+log('2. sign=${signature ? "1" : "0"} agent=${agentSignature ? "1" : "0"} serverError=' + ${signatureErrorJson} + ' current=' + currentUrl + ' target=' + targetUrl + ' ua=' + navigator.userAgent);
 setTimeout(function(){ go('timeout'); }, 6000);
 </script>
 <script src="https://res.wx.qq.com/open/js/jweixin-1.2.0.js"
@@ -4144,7 +4180,7 @@ log('4. after sdk tag');
 try {
   var hasWxSdkConfig = ${hasWxSdkConfig ? "true" : "false"};
   if (!hasWxSdkConfig) {
-    log('4a. missing wx sdk signature, normal redirect');
+    log('4a. missing wx sdk signature, normal redirect: ' + ${signatureErrorJson});
     setTimeout(function(){ go('missing signature'); }, 100);
   } else if(typeof wx === 'undefined') { log('4b. wx undefined'); go('wx undefined'); } else {
   wx.config({
