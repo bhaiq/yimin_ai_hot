@@ -880,19 +880,34 @@ function renderSsoStats() {
   const daily = Array.isArray(stats.daily) ? stats.daily : [];
   const users = Array.isArray(stats.users) ? stats.users : [];
   const recent = Array.isArray(stats.recent) ? stats.recent : [];
+  const pushStats = stats.push || {};
+  const pushSummary = pushStats.summary || {};
+  const pushDaily = Array.isArray(pushStats.daily) ? pushStats.daily : [];
+  const pushTasks = Array.isArray(pushStats.tasks) ? pushStats.tasks : [];
+  const pushRecent = Array.isArray(pushStats.recent) ? pushStats.recent : [];
   const maxVisits = Math.max(1, ...daily.map((item) => Number(item.visits || 0)));
+  const maxPushVisits = Math.max(1, ...pushDaily.map((item) => Number(item.visits || 0)));
+  const pushVisitRate = Number(pushSummary.sentCount || 0) > 0
+    ? Math.round((Number(pushSummary.visitedCount || 0) / Number(pushSummary.sentCount || 0)) * 100)
+    : 0;
 
   ssoStatsReport.innerHTML = `
+    <section class="sso-panel">
+      <div class="sso-panel-head">
+        <h2>SSO 加密入口</h2>
+        <span>来自 URL 中的 sso_auth_code</span>
+      </div>
     <div class="sso-summary-grid">
       <div class="sso-stat"><span>总访问</span><strong>${escapeHtml(summary.totalVisits || 0)}</strong></div>
       <div class="sso-stat"><span>访问人数</span><strong>${escapeHtml(summary.uniqueUsers || 0)}</strong></div>
       <div class="sso-stat"><span>今日访问</span><strong>${escapeHtml(summary.todayVisits || 0)}</strong></div>
       <div class="sso-stat"><span>今日人数</span><strong>${escapeHtml(summary.todayUsers || 0)}</strong></div>
     </div>
+    </section>
 
     <section class="sso-panel">
       <div class="sso-panel-head">
-        <h2>近 14 天趋势</h2>
+        <h2>SSO 近 14 天趋势</h2>
         <span>${daily.length} 天有访问</span>
       </div>
       <div class="sso-trend-list">
@@ -909,7 +924,7 @@ function renderSsoStats() {
 
     <section class="sso-panel">
       <div class="sso-panel-head">
-        <h2>访问用户排行</h2>
+        <h2>SSO 访问用户排行</h2>
         <span>按访问次数排序</span>
       </div>
       <div class="sso-user-list">
@@ -924,7 +939,7 @@ function renderSsoStats() {
 
     <section class="sso-panel">
       <div class="sso-panel-head">
-        <h2>最近访问明细</h2>
+        <h2>SSO 最近访问明细</h2>
         <span>最近 100 条</span>
       </div>
       <div class="sso-table-wrap">
@@ -942,6 +957,95 @@ function renderSsoStats() {
                 <td title="${escapeAttr(row.userAgent || "")}">${escapeHtml(row.userAgent || "-")}</td>
               </tr>
             `).join("") : '<tr><td colspan="5">暂无访问明细。</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="sso-panel">
+      <div class="sso-panel-head">
+        <h2>日报链接点击概览</h2>
+        <span>来自企业微信日报卡片 /d/:token</span>
+      </div>
+      <div class="sso-summary-grid">
+        <div class="sso-stat"><span>推送批次</span><strong>${escapeHtml(pushSummary.taskCount || 0)}</strong></div>
+        <div class="sso-stat"><span>已发送</span><strong>${escapeHtml(pushSummary.sentCount || 0)}</strong></div>
+        <div class="sso-stat"><span>已点击</span><strong>${escapeHtml(pushSummary.visitedCount || 0)}</strong></div>
+        <div class="sso-stat"><span>点击率</span><strong>${escapeHtml(pushVisitRate)}%</strong></div>
+      </div>
+    </section>
+
+    <section class="sso-panel">
+      <div class="sso-panel-head">
+        <h2>日报链接近 14 天点击</h2>
+        <span>今日 ${escapeHtml(pushSummary.todayVisits || 0)} 次 · ${escapeHtml(pushSummary.uniqueVisitors || 0)} 人点击过</span>
+      </div>
+      <div class="sso-trend-list">
+        ${pushDaily.length ? pushDaily.map((item) => `
+          <div class="sso-trend-row">
+            <span>${escapeHtml(item.date)}</span>
+            <div class="sso-trend-track"><i style="width:${Math.max(5, Math.round((Number(item.visits || 0) / maxPushVisits) * 100))}%"></i></div>
+            <strong>${escapeHtml(item.visits || 0)} 次</strong>
+            <em>${escapeHtml(item.users || 0)} 人</em>
+          </div>
+        `).join("") : '<p class="form-note">暂无日报链接点击数据。</p>'}
+      </div>
+    </section>
+
+    <section class="sso-panel">
+      <div class="sso-panel-head">
+        <h2>最近推送批次</h2>
+        <span>最近 30 个批次</span>
+      </div>
+      <div class="sso-table-wrap">
+        <table class="sso-table">
+          <thead>
+            <tr><th>推送日</th><th>日报日</th><th>状态</th><th>目标</th><th>已发送</th><th>失败</th><th>已点击</th><th>点击率</th></tr>
+          </thead>
+          <tbody>
+            ${pushTasks.length ? pushTasks.map((task) => {
+              const taskRate = Number(task.sentCount || 0) > 0
+                ? Math.round((Number(task.visitedCount || 0) / Number(task.sentCount || 0)) * 100)
+                : 0;
+              return `
+                <tr>
+                  <td>${escapeHtml(task.pushDate || "-")}</td>
+                  <td>${escapeHtml(task.dailyDate || "-")}</td>
+                  <td>${escapeHtml(task.status || "-")}</td>
+                  <td>${escapeHtml(task.totalCount || 0)}</td>
+                  <td>${escapeHtml(task.sentCount || 0)}</td>
+                  <td>${escapeHtml(task.failedCount || 0)}</td>
+                  <td>${escapeHtml(task.visitedCount || 0)}</td>
+                  <td>${escapeHtml(taskRate)}%</td>
+                </tr>
+              `;
+            }).join("") : '<tr><td colspan="8">暂无推送批次。</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="sso-panel">
+      <div class="sso-panel-head">
+        <h2>最近日报链接点击</h2>
+        <span>最近 100 条</span>
+      </div>
+      <div class="sso-table-wrap">
+        <table class="sso-table">
+          <thead>
+            <tr><th>时间</th><th>姓名</th><th>UserID</th><th>日报日</th><th>推送日</th><th>IP</th></tr>
+          </thead>
+          <tbody>
+            ${pushRecent.length ? pushRecent.map((row) => `
+              <tr>
+                <td>${escapeHtml(row.visitAt || "-")}</td>
+                <td>${escapeHtml(row.username || "-")}</td>
+                <td>${escapeHtml(row.userid || "-")}</td>
+                <td>${escapeHtml(row.dailyDate || "-")}</td>
+                <td>${escapeHtml(row.pushDate || "-")}</td>
+                <td>${escapeHtml(row.visitIp || "-")}</td>
+              </tr>
+            `).join("") : '<tr><td colspan="6">暂无日报链接点击明细。</td></tr>'}
           </tbody>
         </table>
       </div>

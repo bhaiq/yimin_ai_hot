@@ -1884,6 +1884,109 @@ async function getSsoStats() {
     daily,
     users,
     recent,
+    push: await getDailyPushStats(),
+  };
+}
+
+async function getDailyPushStats() {
+  const summary = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+      'taskCount', task_count,
+      'totalTargets', total_targets,
+      'sentCount', sent_count,
+      'failedCount', failed_count,
+      'visitedCount', visited_count,
+      'todayVisits', today_visits,
+      'uniqueVisitors', unique_visitors
+    )), JSON_ARRAY())
+    FROM (
+      SELECT
+        (SELECT COUNT(*) FROM yimin_push_tasks) AS task_count,
+        (SELECT COALESCE(SUM(total_count), 0) FROM yimin_push_tasks) AS total_targets,
+        (SELECT COALESCE(SUM(sent_count), 0) FROM yimin_push_tasks) AS sent_count,
+        (SELECT COALESCE(SUM(failed_count), 0) FROM yimin_push_tasks) AS failed_count,
+        (SELECT COUNT(*) FROM yimin_push_logs WHERE visit_at IS NOT NULL) AS visited_count,
+        (SELECT COUNT(*) FROM yimin_push_logs WHERE DATE(visit_at) = CURDATE()) AS today_visits,
+        (SELECT COUNT(DISTINCT userid) FROM yimin_push_logs WHERE visit_at IS NOT NULL) AS unique_visitors
+    ) s;
+  `)) || [];
+
+  const daily = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'date', DATE_FORMAT(visit_day, '%Y-%m-%d'),
+        'visits', visits,
+        'users', users
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT DATE(visit_at) AS visit_day,
+             COUNT(*) AS visits,
+             COUNT(DISTINCT userid) AS users
+      FROM yimin_push_logs
+      WHERE visit_at IS NOT NULL
+        AND visit_at >= DATE_SUB(CURDATE(), INTERVAL 13 DAY)
+      GROUP BY DATE(visit_at)
+      ORDER BY visit_day
+    ) d;
+  `)) || [];
+
+  const tasks = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'id', id,
+        'pushDate', DATE_FORMAT(push_date, '%Y-%m-%d'),
+        'dailyDate', DATE_FORMAT(daily_date, '%Y-%m-%d'),
+        'status', status,
+        'totalCount', total_count,
+        'sentCount', sent_count,
+        'failedCount', failed_count,
+        'visitedCount', visited_count
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT *
+      FROM yimin_push_tasks
+      ORDER BY id DESC
+      LIMIT 30
+    ) t;
+  `)) || [];
+
+  const recent = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'id', id,
+        'pushDate', DATE_FORMAT(push_date, '%Y-%m-%d'),
+        'dailyDate', DATE_FORMAT(daily_date, '%Y-%m-%d'),
+        'userid', userid,
+        'username', username,
+        'visitAt', DATE_FORMAT(visit_at, '%Y-%m-%d %H:%i:%s'),
+        'visitIp', visit_ip
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT l.id, t.push_date, t.daily_date, l.userid, l.username, l.visit_at, l.visit_ip
+      FROM yimin_push_logs l
+      JOIN yimin_push_tasks t ON t.id = l.task_id
+      WHERE l.visit_at IS NOT NULL
+      ORDER BY l.visit_at DESC, l.id DESC
+      LIMIT 100
+    ) r;
+  `)) || [];
+
+  return {
+    summary: summary[0] || {
+      taskCount: 0,
+      totalTargets: 0,
+      sentCount: 0,
+      failedCount: 0,
+      visitedCount: 0,
+      todayVisits: 0,
+      uniqueVisitors: 0,
+    },
+    daily,
+    tasks,
+    recent,
   };
 }
 
