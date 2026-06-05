@@ -781,7 +781,8 @@ async function getTodayArticleStats() {
         'categoryCount', COUNT(DISTINCT category)
       ) AS stats
       FROM yimin_articles
-      WHERE DATE(CONVERT_TZ(fetched_at, '+00:00', '+08:00')) = ${sqlString(today)}
+      WHERE CONVERT_TZ(fetched_at, '+00:00', '+08:00') >= CONCAT(${sqlString(today)}, ' 07:00:00') - INTERVAL 24 HOUR
+        AND CONVERT_TZ(fetched_at, '+00:00', '+08:00') < CONCAT(${sqlString(today)}, ' 07:00:00')
     `);
     const r = row || {};
     return {
@@ -794,7 +795,6 @@ async function getTodayArticleStats() {
     return { total: 0, highCount: 0, countryCount: 0, categoryCount: 0 };
   }
 }
-
 async function listRecentArticlesFromDb(limit = Math.max(maxTotalItems * 2, 160)) {
   return (
     (await mysqlJson(`
