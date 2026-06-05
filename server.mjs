@@ -164,6 +164,30 @@ function getClientIp(req) {
   return req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "";
 }
 
+function getPublicOrigin(req) {
+  const configured = String(process.env.PUBLIC_BASE_URL || "").trim();
+  if (configured) {
+    try {
+      return new URL(configured).origin;
+    } catch {
+      return configured.replace(/\/+$/, "");
+    }
+  }
+
+  const proto = req.headers["x-forwarded-proto"]?.split(",")[0]?.trim()
+    || (req.socket?.encrypted ? "https" : "http");
+  const host = req.headers["x-forwarded-host"]?.split(",")[0]?.trim()
+    || req.headers.host
+    || "";
+  return host ? `${proto}://${host}` : "";
+}
+
+function buildPublicUrl(req, path = "/") {
+  const origin = getPublicOrigin(req);
+  const cleanPath = String(path || "/").startsWith("/") ? String(path || "/") : `/${path}`;
+  return origin ? `${origin}${cleanPath}` : cleanPath;
+}
+
 function getSsoKeyBuffer() {
   const source = Buffer.from(ssoConfig.secretKey, "utf8");
   if (source.length === 32) {
@@ -467,6 +491,18 @@ async function initDb() {
           INDEX idx_push_logs_userid (userid),
           CONSTRAINT fk_push_logs_task FOREIGN KEY (task_id) REFERENCES yimin_push_tasks(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='日报推送日志表';
+
+        CREATE TABLE IF NOT EXISTS yimin_push_open_events (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          token CHAR(12) NOT NULL COMMENT '日报访问令牌',
+          event_name VARCHAR(80) NOT NULL DEFAULT '' COMMENT '打开默认浏览器事件',
+          event_detail TEXT NULL COMMENT '事件详情',
+          client_ip VARCHAR(45) NULL COMMENT '访问 IP',
+          user_agent VARCHAR(600) NULL COMMENT '浏览器 UA',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '事件时间',
+          INDEX idx_push_open_events_token (token),
+          INDEX idx_push_open_events_created_at (created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='日报链接打开默认浏览器诊断事件表';
 
         CREATE TABLE IF NOT EXISTS yimin_wx_token_cache (
           id INT AUTO_INCREMENT PRIMARY KEY,
@@ -1719,6 +1755,22 @@ async function recordPushVisit(token, ip) {
   return { taskId: log.task_id || log.taskId, userid: log.userid, username: log.username };
 }
 
+async function recordPushOpenEvent({ token, eventName, eventDetail, ip, userAgent }) {
+  await initDb();
+  if (!token || !/^[a-kmnp-z2-9]{12}$/i.test(token)) return;
+
+  await mysqlExec(`
+    INSERT INTO yimin_push_open_events (token, event_name, event_detail, client_ip, user_agent)
+    VALUES (
+      ${sqlString(String(token).slice(0, 12))},
+      ${sqlString(String(eventName || "").slice(0, 80))},
+      ${sqlString(String(eventDetail || "").slice(0, 1200))},
+      ${sqlString(ip || "")},
+      ${sqlString(String(userAgent || "").slice(0, 600))}
+    );
+  `);
+}
+
 async function listPushTasks(limit = 30) {
   return (
     (await mysqlJson(`
@@ -1974,6 +2026,26 @@ async function getDailyPushStats() {
     ) r;
   `)) || [];
 
+  const recentEvents = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'id', id,
+        'token', token,
+        'eventName', event_name,
+        'eventDetail', event_detail,
+        'clientIp', client_ip,
+        'userAgent', user_agent,
+        'createdAt', DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s')
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT *
+      FROM yimin_push_open_events
+      ORDER BY created_at DESC, id DESC
+      LIMIT 120
+    ) e;
+  `)) || [];
+
   return {
     summary: summary[0] || {
       taskCount: 0,
@@ -1987,6 +2059,7 @@ async function getDailyPushStats() {
     daily,
     tasks,
     recent,
+    recentEvents,
   };
 }
 
@@ -3932,6 +4005,24 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/push/open-event" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const token = String(body.token || "");
+      if (!/^[a-kmnp-z2-9]{12}$/i.test(token)) {
+        sendJson(res, 400, { ok: false, error: "Invalid token" });
+        return;
+      }
+      await recordPushOpenEvent({
+        token,
+        eventName: body.eventName || "",
+        eventDetail: body.eventDetail || "",
+        ip: getClientIp(req),
+        userAgent: req.headers["user-agent"] || "",
+      });
+      sendJson(res, 201, { ok: true });
+      return;
+    }
+
     // ── Push visit tracking: /d/:token ──
     if (url.pathname.startsWith("/d/") && req.method === "GET") {
       const token = url.pathname.replace("/d/", "").split("/")[0];
@@ -3939,11 +4030,11 @@ const server = createServer(async (req, res) => {
         const ip = getClientIp(req);
         await recordPushVisit(token, ip);
 
-        const targetUrl = `${process.env.PUBLIC_BASE_URL || ""}/#daily`;
+        const targetUrl = buildPublicUrl(req, "/#daily");
         const ua = (req.headers["user-agent"] || "").toLowerCase();
 
         if (ua.includes("wxwork")) {
-          const currentUrl = `${process.env.PUBLIC_BASE_URL || ""}/d/${token}`;
+          const currentUrl = buildPublicUrl(req, `${url.pathname}${url.search}`);
           let jsConfig = null;
           let agentConfig = null;
           try {
@@ -3963,6 +4054,8 @@ const server = createServer(async (req, res) => {
           const agentTimestamp = agentConfig ? agentConfig.timestamp : "";
           const agentSignature = agentConfig ? agentConfig.signature : "";
           const targetUrlJson = JSON.stringify(targetUrl);
+          const tokenJson = JSON.stringify(token);
+          const currentUrlJson = JSON.stringify(currentUrl);
           const corpIdJson = JSON.stringify(corpId);
           const nonceStrJson = JSON.stringify(nonceStr);
           const signatureJson = JSON.stringify(signature);
@@ -3988,30 +4081,72 @@ body{background:#0d0d1a;color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFo
 </div>
 <script>
 var targetUrl = ${targetUrlJson};
+var token = ${tokenJson};
+var currentUrl = ${currentUrlJson};
 var dbg = document.getElementById('dbg');
+function sendEvent(name, detail) {
+  try {
+    var payload = JSON.stringify({
+      token: token,
+      eventName: String(name || '').slice(0, 80),
+      eventDetail: String(detail || '').slice(0, 1200)
+    });
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon('/api/push/open-event', new Blob([payload], { type: 'application/json' }));
+    } else {
+      fetch('/api/push/open-event', { method: 'POST', headers: { 'content-type': 'application/json' }, body: payload, keepalive: true });
+    }
+  } catch(e) {}
+}
 function log(msg) {
   try {
     console.log('[daily-open]', msg);
     if (dbg) dbg.textContent += msg + "\\n";
+    sendEvent(msg.split(':')[0].slice(0, 80), msg);
   } catch(e) {}
 }
 var done = false;
-function go() { if(!done){done=true;window.location.replace(targetUrl);} }
+var openedExternal = false;
+function go(reason) { if(!done && !openedExternal){done=true;log('fallback: ' + (reason || 'redirect'));window.location.replace(targetUrl);} }
+function closeWxWindowSoon() {
+  setTimeout(function() {
+    try {
+      if (typeof wx !== 'undefined' && wx.closeWindow) wx.closeWindow();
+    } catch(e) {}
+  }, 600);
+}
+function tryOpenDefaultBrowser(source) {
+  if (openedExternal || typeof wx === 'undefined') return;
+  log('invoke start: ' + source);
+  try {
+    wx.invoke('openDefaultBrowser', { url: targetUrl }, function(res) {
+      var msg = res && (res.err_msg || JSON.stringify(res));
+      log('invoke result: ' + source + ' ' + msg);
+      if (msg === 'openDefaultBrowser:ok') {
+        openedExternal = true;
+        done = true;
+        closeWxWindowSoon();
+      }
+    });
+  } catch(e) {
+    log('invoke error: ' + source + ' ' + e.message);
+  }
+}
 log('1. page loaded');
-log('2. sign=${signature ? "1" : "0"} agent=${agentSignature ? "1" : "0"} ua=' + navigator.userAgent);
-setTimeout(function(){ log('6. timeout fallback, redirecting...'); go(); }, 3000);
+log('2. sign=${signature ? "1" : "0"} agent=${agentSignature ? "1" : "0"} current=' + currentUrl + ' target=' + targetUrl + ' ua=' + navigator.userAgent);
+setTimeout(function(){ go('timeout'); }, 6000);
 </script>
 <script src="https://res.wx.qq.com/open/js/jweixin-1.2.0.js"
   onload="log('3. sdk loaded')"
-  onerror="log('3. sdk FAILED'); go();"></script>
+  onerror="log('3. sdk FAILED'); go('sdk failed');"></script>
 <script>
 log('4. after sdk tag');
 try {
   var hasWxSdkConfig = ${hasWxSdkConfig ? "true" : "false"};
   if (!hasWxSdkConfig) {
     log('4a. missing wx sdk signature, normal redirect');
-    setTimeout(go, 100);
-  } else if(typeof wx === 'undefined') { log('4b. wx undefined'); go(); } else {
+    setTimeout(function(){ go('missing signature'); }, 100);
+  } else if(typeof wx === 'undefined') { log('4b. wx undefined'); go('wx undefined'); } else {
   wx.config({
     beta: true,
     debug: false,
@@ -4024,6 +4159,7 @@ try {
   log('5. config called');
   wx.ready(function() {
     log('5a. ready');
+    tryOpenDefaultBrowser('config-ready');
     wx.agentConfig({
       corpid: ${corpIdJson},
       agentid: ${Number(agentId) || 0},
@@ -4033,25 +4169,21 @@ try {
       jsApiList: ['openDefaultBrowser'],
       success: function() {
         log('5b. agentConfig ok');
-        wx.invoke('openDefaultBrowser', { url: targetUrl }, function(res) {
-          log('5c. invoke: ' + (res.err_msg || JSON.stringify(res)));
-          if (res.err_msg !== 'openDefaultBrowser:ok') { go(); }
-        });
+        tryOpenDefaultBrowser('agentConfig');
       },
       fail: function(res) {
         log('5d. agentConfig fail: ' + JSON.stringify(res));
-        go();
       }
     });
   });
   wx.error(function(res) {
     log('5e. config error: ' + JSON.stringify(res));
-    go();
+    go('config error');
   });
   }
 } catch(e) {
   log('ERR: ' + e.message);
-  go();
+  go('exception');
 }
 </script>
 </body></html>`);

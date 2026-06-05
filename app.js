@@ -885,6 +885,7 @@ function renderSsoStats() {
   const pushDaily = Array.isArray(pushStats.daily) ? pushStats.daily : [];
   const pushTasks = Array.isArray(pushStats.tasks) ? pushStats.tasks : [];
   const pushRecent = Array.isArray(pushStats.recent) ? pushStats.recent : [];
+  const pushRecentEvents = Array.isArray(pushStats.recentEvents) ? pushStats.recentEvents : [];
   const maxVisits = Math.max(1, ...daily.map((item) => Number(item.visits || 0)));
   const maxPushVisits = Math.max(1, ...pushDaily.map((item) => Number(item.visits || 0)));
   const pushVisitRate = Number(pushSummary.sentCount || 0) > 0
@@ -1046,6 +1047,32 @@ function renderSsoStats() {
                 <td>${escapeHtml(row.visitIp || "-")}</td>
               </tr>
             `).join("") : '<tr><td colspan="6">暂无日报链接点击明细。</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="sso-panel">
+      <div class="sso-panel-head">
+        <h2>默认浏览器打开诊断</h2>
+        <span>最近 120 条企业微信中转页事件</span>
+      </div>
+      <div class="sso-table-wrap">
+        <table class="sso-table">
+          <thead>
+            <tr><th>时间</th><th>Token</th><th>事件</th><th>详情</th><th>IP</th><th>设备</th></tr>
+          </thead>
+          <tbody>
+            ${pushRecentEvents.length ? pushRecentEvents.map((row) => `
+              <tr>
+                <td>${escapeHtml(row.createdAt || "-")}</td>
+                <td>${escapeHtml(row.token || "-")}</td>
+                <td>${escapeHtml(row.eventName || "-")}</td>
+                <td title="${escapeAttr(row.eventDetail || "")}">${escapeHtml(row.eventDetail || "-")}</td>
+                <td>${escapeHtml(row.clientIp || "-")}</td>
+                <td title="${escapeAttr(row.userAgent || "")}">${escapeHtml(row.userAgent || "-")}</td>
+              </tr>
+            `).join("") : '<tr><td colspan="6">暂无默认浏览器打开诊断。</td></tr>'}
           </tbody>
         </table>
       </div>
