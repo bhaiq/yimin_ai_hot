@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
-import { createHash, randomBytes } from "node:crypto";
+import { createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 
 const rootDir = resolve(".");
@@ -44,6 +44,10 @@ const marketProjects = [
 const authConfig = {
   user: process.env.AUTH_USER || "admin",
   pass: process.env.AUTH_PASS || "admin123",
+};
+const ssoConfig = {
+  secretKey: process.env.SSO_SECRET_KEY || "GlobeVisa_SSO_2026_SecretKey!@#",
+  ivSeed: process.env.SSO_IV_SEED || "globevisa_sso_iv",
 };
 const firecrawlConfig = {
   apiKey: process.env.FIRECRAWL_API_KEY || "",
@@ -154,6 +158,42 @@ function sqlDate(value) {
 
 function sqlJson(value) {
   return `CAST(${sqlString(JSON.stringify(value ?? null))} AS JSON)`;
+}
+
+function getClientIp(req) {
+  return req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "";
+}
+
+function getSsoKeyBuffer() {
+  const source = Buffer.from(ssoConfig.secretKey, "utf8");
+  if (source.length === 32) {
+    return source;
+  }
+
+  const key = Buffer.alloc(32);
+  source.copy(key, 0, 0, Math.min(source.length, 32));
+  return key;
+}
+
+function base64UrlToBuffer(value) {
+  const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+  return Buffer.from(padded, "base64");
+}
+
+function decryptSsoUserName(encParam) {
+  const encrypted = base64UrlToBuffer(encParam);
+  if (!encrypted.length) {
+    throw new Error("sso_auth_code is empty");
+  }
+
+  const iv = createHash("sha256").update(ssoConfig.ivSeed).digest("hex").slice(0, 16);
+  const decipher = createDecipheriv("aes-256-cbc", getSsoKeyBuffer(), Buffer.from(iv, "utf8"));
+  const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8").trim();
+  if (!decrypted) {
+    throw new Error("decrypted user name is empty");
+  }
+  return decrypted;
 }
 
 function mysqlRun(sql, { database = true, json = false } = {}) {
@@ -434,6 +474,20 @@ async function initDb() {
           expires_at DATETIME NOT NULL COMMENT '过期时间',
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '缓存时间'
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='企业微信令牌缓存';
+
+        CREATE TABLE IF NOT EXISTS yimin_sso_login_logs (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          user_name VARCHAR(160) NOT NULL COMMENT '企业微信登录人姓名',
+          enc_hash CHAR(64) NOT NULL COMMENT '加密参数 SHA256，用于去重排查',
+          route VARCHAR(120) NOT NULL DEFAULT '' COMMENT '访问的前端路由',
+          page_url VARCHAR(1200) NULL COMMENT '前端完整地址',
+          client_ip VARCHAR(45) NULL COMMENT '访问 IP',
+          user_agent VARCHAR(600) NULL COMMENT '浏览器 UA',
+          visit_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '访问时间',
+          INDEX idx_sso_login_visit_at (visit_at),
+          INDEX idx_sso_login_user_name (user_name),
+          INDEX idx_sso_login_enc_hash (enc_hash)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='企业微信 SSO 访问登记日志表';
       `);
 
       const colCheck = await mysqlRun(`
@@ -1724,6 +1778,113 @@ async function retryFailedPushes(taskId) {
     WHERE task_id = ${sqlNumber(taskId)} AND send_status = 'failed'
   `);
   return executePushTask(taskId);
+}
+
+async function recordSsoVisit({ encParam, route, pageUrl, ip, userAgent }) {
+  await initDb();
+  const userName = decryptSsoUserName(encParam);
+  const encHash = createHash("sha256").update(String(encParam || "")).digest("hex");
+  const cleanRoute = String(route || "").slice(0, 120);
+  const cleanPageUrl = String(pageUrl || "").slice(0, 1200);
+  const cleanUa = String(userAgent || "").slice(0, 600);
+
+  await mysqlExec(`
+    INSERT INTO yimin_sso_login_logs (user_name, enc_hash, route, page_url, client_ip, user_agent)
+    VALUES (
+      ${sqlString(userName)},
+      ${sqlString(encHash)},
+      ${sqlString(cleanRoute)},
+      ${sqlString(cleanPageUrl)},
+      ${sqlString(ip || "")},
+      ${sqlString(cleanUa)}
+    );
+  `);
+
+  return { userName };
+}
+
+async function getSsoStats() {
+  await initDb();
+
+  const summary = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+      'totalVisits', total_visits,
+      'uniqueUsers', unique_users,
+      'todayVisits', today_visits,
+      'todayUsers', today_users
+    )), JSON_ARRAY())
+    FROM (
+      SELECT
+        COUNT(*) AS total_visits,
+        COUNT(DISTINCT user_name) AS unique_users,
+        SUM(DATE(visit_at) = CURDATE()) AS today_visits,
+        COUNT(DISTINCT CASE WHEN DATE(visit_at) = CURDATE() THEN user_name END) AS today_users
+      FROM yimin_sso_login_logs
+    ) s;
+  `)) || [];
+
+  const daily = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'date', visit_date,
+        'visits', visits,
+        'users', users
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT DATE_FORMAT(visit_at, '%Y-%m-%d') AS visit_date,
+             COUNT(*) AS visits,
+             COUNT(DISTINCT user_name) AS users
+      FROM yimin_sso_login_logs
+      WHERE visit_at >= DATE_SUB(CURDATE(), INTERVAL 13 DAY)
+      GROUP BY DATE(visit_at)
+      ORDER BY DATE(visit_at)
+    ) d;
+  `)) || [];
+
+  const users = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'userName', user_name,
+        'visits', visits,
+        'lastVisitAt', DATE_FORMAT(last_visit_at, '%Y-%m-%d %H:%i:%s')
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT user_name, COUNT(*) AS visits, MAX(visit_at) AS last_visit_at
+      FROM yimin_sso_login_logs
+      GROUP BY user_name
+      ORDER BY visits DESC, last_visit_at DESC
+      LIMIT 30
+    ) u;
+  `)) || [];
+
+  const recent = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'id', id,
+        'userName', user_name,
+        'route', route,
+        'pageUrl', page_url,
+        'clientIp', client_ip,
+        'userAgent', user_agent,
+        'visitAt', DATE_FORMAT(visit_at, '%Y-%m-%d %H:%i:%s')
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT *
+      FROM yimin_sso_login_logs
+      ORDER BY visit_at DESC, id DESC
+      LIMIT 100
+    ) r;
+  `)) || [];
+
+  return {
+    summary: summary[0] || { totalVisits: 0, uniqueUsers: 0, todayVisits: 0, todayUsers: 0 },
+    daily,
+    users,
+    recent,
+  };
 }
 
 async function saveSourceSubmission(data) {
@@ -3405,6 +3566,38 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/sso/visit" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      if (!body.ssoAuthCode) {
+        sendJson(res, 400, { ok: false, error: "ssoAuthCode is required" });
+        return;
+      }
+
+      try {
+        const result = await recordSsoVisit({
+          encParam: body.ssoAuthCode,
+          route: body.route || "",
+          pageUrl: body.pageUrl || "",
+          ip: getClientIp(req),
+          userAgent: req.headers["user-agent"] || "",
+        });
+        sendJson(res, 201, { ok: true, userName: result.userName });
+      } catch (err) {
+        sendJson(res, 400, { ok: false, error: err.message || "SSO 解密失败" });
+      }
+      return;
+    }
+
+    if (url.pathname === "/api/sso/stats" && req.method === "GET") {
+      if (!requireAuth(req)) {
+        sendJson(res, 401, { ok: false, error: "请先登录" });
+        return;
+      }
+      const stats = await getSsoStats();
+      sendJson(res, 200, { ok: true, stats });
+      return;
+    }
+
     if (url.pathname === "/api/health") {
       await initDb();
       sendJson(res, 200, {
@@ -3640,7 +3833,7 @@ const server = createServer(async (req, res) => {
     if (url.pathname.startsWith("/d/") && req.method === "GET") {
       const token = url.pathname.replace("/d/", "").split("/")[0];
       if (token && /^[a-kmnp-z2-9]{12}$/i.test(token)) {
-        const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "";
+        const ip = getClientIp(req);
         await recordPushVisit(token, ip);
 
         const targetUrl = `${process.env.PUBLIC_BASE_URL || ""}/#daily`;

@@ -55,6 +55,10 @@
               <span class="nav-icon">✓</span>
               <span>信源审核</span>
             </button>
+            <button class="nav-item" data-view="sso-stats" type="button">
+              <span class="nav-icon">※</span>
+              <span>访问统计</span>
+            </button>
             <button class="nav-item" data-view="about" type="button">
               <span class="nav-icon">?</span>
               <span>关于本站</span>
@@ -240,6 +244,17 @@
             </div>
           </div>
           <div id="reviewList"></div>
+        </section>
+
+        <section class="view utility-view wide-view" id="view-sso-stats" aria-labelledby="ssoStatsTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">访问登记</p>
+              <h1 id="ssoStatsTitle">企业微信登录统计</h1>
+            </div>
+            <button class="ghost-button" id="refreshSsoStats" type="button">刷新</button>
+          </div>
+          <div class="sso-report" id="ssoStatsReport"></div>
         </section>
 
         <section class="view utility-view" id="view-about" aria-labelledby="aboutTitle">

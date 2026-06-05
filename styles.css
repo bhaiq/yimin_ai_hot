@@ -1200,6 +1200,10 @@ img {
   max-width: 760px;
 }
 
+.wide-view {
+  max-width: 1120px;
+}
+
 .form-panel,
 .prose-panel,
 .source-health {
@@ -1364,6 +1368,141 @@ img {
   background: var(--panel);
   margin-bottom: 12px;
 }
+
+.sso-report {
+  display: grid;
+  gap: 18px;
+}
+
+.sso-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.sso-stat,
+.sso-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.sso-stat {
+  display: grid;
+  gap: 8px;
+  padding: 18px;
+}
+
+.sso-stat span,
+.sso-panel-head span,
+.sso-trend-row em,
+.sso-user-row span {
+  color: var(--muted);
+  font-size: 13px;
+  font-style: normal;
+}
+
+.sso-stat strong {
+  color: var(--accent-strong);
+  font-size: 28px;
+  line-height: 1;
+}
+
+.sso-panel {
+  padding: 18px;
+}
+
+.sso-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.sso-panel-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.sso-trend-list,
+.sso-user-list {
+  display: grid;
+  gap: 10px;
+}
+
+.sso-trend-row {
+  display: grid;
+  grid-template-columns: 96px minmax(120px, 1fr) 58px 48px;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.sso-trend-track {
+  height: 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #10100e;
+}
+
+.sso-trend-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.sso-user-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 0;
+  border-top: 1px solid var(--line);
+}
+
+.sso-user-row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.sso-table-wrap {
+  overflow-x: auto;
+}
+
+.sso-table {
+  width: 100%;
+  min-width: 860px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.sso-table th,
+.sso-table td {
+  padding: 10px 8px;
+  border-top: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.sso-table th {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.sso-table td {
+  max-width: 270px;
+  color: var(--text);
+}
+
+.sso-table td:last-child {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .review-card.accepted { opacity: 0.6; }
 .review-card.rejected { opacity: 0.5; }
 

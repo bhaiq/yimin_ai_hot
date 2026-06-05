@@ -84,6 +84,9 @@ const state = {
   dailyLoading: false,
   dailyHistory: [],
   dailyDate: null,
+  ssoStats: null,
+  ssoStatsLoading: false,
+  ssoStatsError: "",
   liveMeta: {
     mode: "idle",
     text: "等待真实信源数据",
@@ -92,8 +95,8 @@ const state = {
   user: null,
 };
 
-const authViews = ["market", "sources", "review", "about", "changelog", "feedback"];
-const views = ["home", "all", "daily", "market", "radar", "login", "sources", "review", "about", "changelog", "feedback"];
+const authViews = ["market", "sources", "review", "sso-stats", "about", "changelog", "feedback"];
+const views = ["home", "all", "daily", "market", "radar", "login", "sources", "review", "sso-stats", "about", "changelog", "feedback"];
 
 const filterStrip = document.querySelector("#filterStrip");
 const featuredFeed = document.querySelector("#featuredFeed");
@@ -105,6 +108,7 @@ const homeCount = document.querySelector("#homeCount");
 const allCount = document.querySelector("#allCount");
 const dailyReport = document.querySelector("#dailyReport");
 const marketReport = document.querySelector("#marketReport");
+const ssoStatsReport = document.querySelector("#ssoStatsReport");
 const monitorStatus = document.querySelector("#monitorStatus");
 const sourceHealth = document.querySelector("#sourceHealth");
 const refreshNews = document.querySelector("#refreshNews");
@@ -853,6 +857,98 @@ function renderStats(items) {
   }
 }
 
+function renderSsoStats() {
+  if (!ssoStatsReport) return;
+
+  if (state.ssoStatsLoading) {
+    ssoStatsReport.innerHTML = '<p class="form-note">正在加载访问统计...</p>';
+    return;
+  }
+
+  if (state.ssoStatsError) {
+    ssoStatsReport.innerHTML = `<p class="form-note">${escapeHtml(state.ssoStatsError)}</p>`;
+    return;
+  }
+
+  const stats = state.ssoStats;
+  if (!stats) {
+    ssoStatsReport.innerHTML = '<p class="form-note">打开后会显示企业微信访问登记。</p>';
+    return;
+  }
+
+  const summary = stats.summary || {};
+  const daily = Array.isArray(stats.daily) ? stats.daily : [];
+  const users = Array.isArray(stats.users) ? stats.users : [];
+  const recent = Array.isArray(stats.recent) ? stats.recent : [];
+  const maxVisits = Math.max(1, ...daily.map((item) => Number(item.visits || 0)));
+
+  ssoStatsReport.innerHTML = `
+    <div class="sso-summary-grid">
+      <div class="sso-stat"><span>总访问</span><strong>${escapeHtml(summary.totalVisits || 0)}</strong></div>
+      <div class="sso-stat"><span>访问人数</span><strong>${escapeHtml(summary.uniqueUsers || 0)}</strong></div>
+      <div class="sso-stat"><span>今日访问</span><strong>${escapeHtml(summary.todayVisits || 0)}</strong></div>
+      <div class="sso-stat"><span>今日人数</span><strong>${escapeHtml(summary.todayUsers || 0)}</strong></div>
+    </div>
+
+    <section class="sso-panel">
+      <div class="sso-panel-head">
+        <h2>近 14 天趋势</h2>
+        <span>${daily.length} 天有访问</span>
+      </div>
+      <div class="sso-trend-list">
+        ${daily.length ? daily.map((item) => `
+          <div class="sso-trend-row">
+            <span>${escapeHtml(item.date)}</span>
+            <div class="sso-trend-track"><i style="width:${Math.max(5, Math.round((Number(item.visits || 0) / maxVisits) * 100))}%"></i></div>
+            <strong>${escapeHtml(item.visits || 0)} 次</strong>
+            <em>${escapeHtml(item.users || 0)} 人</em>
+          </div>
+        `).join("") : '<p class="form-note">暂无趋势数据。</p>'}
+      </div>
+    </section>
+
+    <section class="sso-panel">
+      <div class="sso-panel-head">
+        <h2>访问用户排行</h2>
+        <span>按访问次数排序</span>
+      </div>
+      <div class="sso-user-list">
+        ${users.length ? users.map((user) => `
+          <div class="sso-user-row">
+            <strong>${escapeHtml(user.userName)}</strong>
+            <span>${escapeHtml(user.visits || 0)} 次 · 最近 ${escapeHtml(user.lastVisitAt || "-")}</span>
+          </div>
+        `).join("") : '<p class="form-note">暂无用户数据。</p>'}
+      </div>
+    </section>
+
+    <section class="sso-panel">
+      <div class="sso-panel-head">
+        <h2>最近访问明细</h2>
+        <span>最近 100 条</span>
+      </div>
+      <div class="sso-table-wrap">
+        <table class="sso-table">
+          <thead>
+            <tr><th>时间</th><th>姓名</th><th>入口</th><th>IP</th><th>设备</th></tr>
+          </thead>
+          <tbody>
+            ${recent.length ? recent.map((row) => `
+              <tr>
+                <td>${escapeHtml(row.visitAt || "-")}</td>
+                <td>${escapeHtml(row.userName || "-")}</td>
+                <td>${escapeHtml(row.route || "-")}</td>
+                <td>${escapeHtml(row.clientIp || "-")}</td>
+                <td title="${escapeAttr(row.userAgent || "")}">${escapeHtml(row.userAgent || "-")}</td>
+              </tr>
+            `).join("") : '<tr><td colspan="5">暂无访问明细。</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
 function renderContent() {
   const items = filteredItems();
   renderFilters();
@@ -864,6 +960,7 @@ function renderContent() {
   renderDaily();
   renderMarket();
   renderRadar();
+  renderSsoStats();
   renderCounts(items);
   renderStatus(items);
 }
@@ -1117,6 +1214,76 @@ async function loadDailyHistory() {
   } catch { /* ignore */ }
 }
 
+async function loadSsoStats() {
+  if (window.location.protocol === "file:") return;
+
+  state.ssoStatsLoading = true;
+  state.ssoStatsError = "";
+  renderContent();
+
+  try {
+    const response = await fetch("/api/sso/stats", {
+      headers: { accept: "application/json" },
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.ssoStats = data.stats || null;
+  } catch (error) {
+    state.ssoStats = null;
+    state.ssoStatsError = `访问统计加载失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    state.ssoStatsLoading = false;
+    renderContent();
+  }
+}
+
+function getHashSearchParams() {
+  return new URLSearchParams(parseHashRoute().query.replace(/^\?/, ""));
+}
+
+function removeHashParam(name) {
+  const route = parseHashRoute();
+  const params = new URLSearchParams(route.query.replace(/^\?/, ""));
+  if (!params.has(name)) return;
+  params.delete(name);
+  const nextQuery = params.toString();
+  const nextHash = `#${route.view}${nextQuery ? `?${nextQuery}` : ""}`;
+  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${nextHash}`);
+}
+
+async function recordSsoVisitFromHash() {
+  if (window.location.protocol === "file:") return;
+
+  const params = getHashSearchParams();
+  const ssoAuthCode = params.get("sso_auth_code");
+  if (!ssoAuthCode) return;
+
+  const route = parseHashRoute().view;
+  const dedupeKey = `ssoVisit.${ssoAuthCode}`;
+  try {
+    if (!sessionStorage.getItem(dedupeKey)) {
+      const response = await fetch("/api/sso/visit", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({
+          ssoAuthCode,
+          route,
+          pageUrl: window.location.href,
+        }),
+      });
+      if (response.ok) {
+        sessionStorage.setItem(dedupeKey, "1");
+      }
+    }
+  } catch {
+    /* SSO logging should not block reading the page. */
+  } finally {
+    removeHashParam("sso_auth_code");
+  }
+}
+
 function setView(routeValue) {
   const route = parseHashRoute(routeValue);
   let viewName = route.view;
@@ -1160,6 +1327,9 @@ function setView(routeValue) {
     if (!state.marketReportData && !state.marketLoading) {
       loadMarketReport();
     }
+  }
+  if (viewName === "sso-stats" && !state.ssoStatsLoading) {
+    loadSsoStats();
   }
 }
 
@@ -1355,6 +1525,10 @@ refreshNews.addEventListener("click", () => {
   loadLiveNews({ refresh: true });
 });
 
+document.querySelector("#refreshSsoStats")?.addEventListener("click", () => {
+  loadSsoStats();
+});
+
 document.querySelector("#menuToggle").addEventListener("click", () => {
   document.body.classList.toggle("menu-open");
 });
@@ -1546,14 +1720,18 @@ if (todayDate) {
   todayDate.textContent = `${y}.${m}.${d}`;
 }
 
-const initialView = window.location.hash.replace("#", "") || "home";
-restoreFilterCategory();
-renderContent();
-checkAuth().then(() => {
+async function boot() {
+  await recordSsoVisitFromHash();
+  const initialView = window.location.hash.replace("#", "") || "home";
+  restoreFilterCategory();
+  renderContent();
+  await checkAuth();
   updateAuthUI();
   setView(initialView);
-});
-loadLiveNews();
+  loadLiveNews();
+}
+
+boot();
 
 function showArticleModal(cardEl, url) {
   let overlay = document.getElementById("modalOverlay");

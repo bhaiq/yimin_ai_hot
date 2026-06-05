@@ -34,6 +34,7 @@ http://127.0.0.1:4173
 - HTML 页面抓取：通过 Jina Reader API 提取网页内容
 - 信源审核：管理员审核用户提报的信源，补充类型和国家后启用
 - 用户登录：管理员账号登录，审核等敏感操作需认证
+- 企业微信 SSO 访问登记：识别 `#daily?sso_auth_code=...`，解密登录人姓名并生成访问统计
 
 ## 市场素材
 
@@ -62,6 +63,7 @@ http://127.0.0.1:4173
 - `yimin_market_materials`：市场素材明细快照
 - `yimin_market_project_status`：重点项目当日更新状态
 - `yimin_market_feedback`：市场部对素材的采用反馈
+- `yimin_sso_login_logs`：企业微信 SSO 访问登记日志
 - `yimin_source_submissions`：用户提报的信源（status: pending/accepted/rejected）
 - `yimin_feedback`：前台反馈
 
