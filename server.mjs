@@ -1470,6 +1470,7 @@ const wxWorkConfig = {
   secret: process.env.WX_WORK_SECRET || "",
   pushDeptIds: (process.env.WX_WORK_PUSH_DEPT_IDS || "").split(",").filter(Boolean).map(Number),
   pushTagIds: (process.env.WX_WORK_PUSH_TAG_IDS || "").split(",").filter(Boolean).map(Number),
+  openDebug: ["1", "true", "yes"].includes(String(process.env.WX_WORK_OPEN_DEBUG || "").toLowerCase()),
 };
 
 function generatePushToken() {
@@ -1774,6 +1775,7 @@ async function recordPushVisit(token, ip) {
 
 async function recordPushOpenEvent({ token, eventName, eventDetail, ip, userAgent }) {
   await initDb();
+  if (!wxWorkConfig.openDebug) return;
   if (!token || !/^[a-kmnp-z2-9]{12}$/i.test(token)) return;
 
   await mysqlExec(`
@@ -4023,6 +4025,10 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/push/open-event" && req.method === "POST") {
+      if (!wxWorkConfig.openDebug) {
+        sendJson(res, 200, { ok: true, disabled: true });
+        return;
+      }
       const body = await readJsonBody(req);
       const token = String(body.token || "");
       if (!/^[a-kmnp-z2-9]{12}$/i.test(token)) {
@@ -4098,6 +4104,10 @@ const server = createServer(async (req, res) => {
             ].filter(Boolean).join("; ");
           }
           const signatureErrorJson = JSON.stringify(signatureError);
+          const openDebugJson = wxWorkConfig.openDebug ? "true" : "false";
+          const debugMarkup = wxWorkConfig.openDebug
+            ? '<p id="dbg" style="font-size:11px;color:#9ca3af;margin-top:12px;word-break:break-all;text-align:left;min-height:40px"></p>'
+            : "";
 
           res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
           res.end(`<!DOCTYPE html>
@@ -4113,14 +4123,16 @@ body{background:#0d0d1a;color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFo
 <body>
 <div class="wrap">
 <p>正在打开日报...</p>
-<p id="dbg" style="font-size:11px;color:#9ca3af;margin-top:12px;word-break:break-all;text-align:left;min-height:40px"></p>
+${debugMarkup}
 </div>
 <script>
 var targetUrl = ${targetUrlJson};
 var token = ${tokenJson};
 var currentUrl = ${currentUrlJson};
-var dbg = document.getElementById('dbg');
+var openDebug = ${openDebugJson};
+var dbg = openDebug ? document.getElementById('dbg') : null;
 function sendEvent(name, detail) {
+  if (!openDebug) return;
   try {
     var payload = JSON.stringify({
       token: token,
@@ -4135,6 +4147,7 @@ function sendEvent(name, detail) {
   } catch(e) {}
 }
 function log(msg) {
+  if (!openDebug) return;
   try {
     console.log('[daily-open]', msg);
     if (dbg) dbg.textContent += msg + "\\n";
