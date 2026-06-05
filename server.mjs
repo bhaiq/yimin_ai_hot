@@ -770,6 +770,14 @@ async function listArticlesFromDb(limit = maxTotalItems) {
   );
 }
 
+async function getTodayArticleCount() {
+  const rows = await mysqlJson(`
+    SELECT COUNT(*) AS cnt FROM yimin_articles
+    WHERE COALESCE(published_at, fetched_at) >= CURDATE()
+  `);
+  return Number(rows?.[0]?.cnt || 0);
+}
+
 async function listRecentArticlesFromDb(limit = Math.max(maxTotalItems * 2, 160)) {
   return (
     (await mysqlJson(`
@@ -2589,6 +2597,7 @@ async function getNews({ force = false, background = false } = {}) {
     fetchRun = await startBackgroundFeedRefresh();
   }
 
+  const todayArticleCount = await getTodayArticleCount();
   const generatedAt = new Date().toISOString();
   const payload = {
     ok: true,
@@ -2597,6 +2606,7 @@ async function getNews({ force = false, background = false } = {}) {
     cacheTtlMs,
     sourceCount: statuses.length,
     itemCount: items.length,
+    todayArticleCount,
     items,
     sources: statuses,
     refreshing: Boolean(fetchRun?.status === "running"),

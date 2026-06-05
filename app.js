@@ -759,7 +759,8 @@ function renderStatus(items) {
   if (isFetchRunActive()) {
     monitorStatus.textContent = formatFetchRunStatus(state.fetchRun);
   } else if (state.liveMeta.mode === "live") {
-    monitorStatus.textContent = `${items.length} 条更新 · ${healthySources}/${state.sourceStatus.length} 个信源在线`;
+    const count = state.liveMeta.todayArticleCount ?? items.length;
+    monitorStatus.textContent = `今日监测 ${count} 条更新`;
   } else if (state.liveMeta.mode === "loading") {
     monitorStatus.textContent = "正在连接实时信源...";
   } else {
@@ -978,6 +979,7 @@ async function loadLiveNews({ refresh = false } = {}) {
         mode: data.refreshing ? "refreshing" : "live",
         text: data.refreshing ? "后台抓取任务已启动，当前先展示已有数据" : "实时数据",
         itemCount: data.itemCount,
+        todayArticleCount: data.todayArticleCount,
         sourceCount: data.sourceCount,
         generatedAt: data.generatedAt,
       };
