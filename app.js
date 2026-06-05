@@ -834,17 +834,23 @@ function renderLead(items) {
 }
 
 function renderStats(items) {
-  const highCount = items.filter((i) => i.heat >= 85).length;
-  const countries = new Set(items.map((i) => i.country).filter(Boolean));
-  const cats = new Set(items.map((i) => i.category).filter(Boolean));
-
+  const stats = state.liveMeta.todayStats;
   const statHigh = document.querySelector("#statHigh");
   const statCountries = document.querySelector("#statCountries");
   const statCategories = document.querySelector("#statCategories");
 
-  if (statHigh) statHigh.textContent = highCount;
-  if (statCountries) statCountries.textContent = countries.size;
-  if (statCategories) statCategories.textContent = cats.size;
+  if (stats) {
+    if (statHigh) statHigh.textContent = stats.highCount;
+    if (statCountries) statCountries.textContent = stats.countryCount;
+    if (statCategories) statCategories.textContent = stats.categoryCount;
+  } else {
+    const highCount = items.filter((i) => i.heat >= 85).length;
+    const countries = new Set(items.map((i) => i.country).filter(Boolean));
+    const cats = new Set(items.map((i) => i.category).filter(Boolean));
+    if (statHigh) statHigh.textContent = highCount;
+    if (statCountries) statCountries.textContent = countries.size;
+    if (statCategories) statCategories.textContent = cats.size;
+  }
 }
 
 function renderContent() {
@@ -980,6 +986,7 @@ async function loadLiveNews({ refresh = false } = {}) {
         text: data.refreshing ? "后台抓取任务已启动，当前先展示已有数据" : "实时数据",
         itemCount: data.itemCount,
         todayArticleCount: data.todayArticleCount,
+        todayStats: data.todayStats || null,
         sourceCount: data.sourceCount,
         generatedAt: data.generatedAt,
       };

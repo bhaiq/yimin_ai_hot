@@ -778,6 +778,25 @@ async function getTodayArticleCount() {
   return Number(rows?.[0]?.cnt || 0);
 }
 
+async function getTodayArticleStats() {
+  const rows = await mysqlJson(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN heat >= 85 THEN 1 ELSE 0 END) AS highCount,
+      COUNT(DISTINCT country) AS countryCount,
+      COUNT(DISTINCT category) AS categoryCount
+    FROM yimin_articles
+    WHERE COALESCE(published_at, fetched_at) >= CURDATE()
+  `);
+  const r = rows?.[0] || {};
+  return {
+    total: Number(r.total || 0),
+    highCount: Number(r.highCount || 0),
+    countryCount: Number(r.countryCount || 0),
+    categoryCount: Number(r.categoryCount || 0),
+  };
+}
+
 async function listRecentArticlesFromDb(limit = Math.max(maxTotalItems * 2, 160)) {
   return (
     (await mysqlJson(`
@@ -2597,7 +2616,7 @@ async function getNews({ force = false, background = false } = {}) {
     fetchRun = await startBackgroundFeedRefresh();
   }
 
-  const todayArticleCount = await getTodayArticleCount();
+  const todayStats = await getTodayArticleStats();
   const generatedAt = new Date().toISOString();
   const payload = {
     ok: true,
@@ -2606,7 +2625,8 @@ async function getNews({ force = false, background = false } = {}) {
     cacheTtlMs,
     sourceCount: statuses.length,
     itemCount: items.length,
-    todayArticleCount,
+    todayArticleCount: todayStats.total,
+    todayStats,
     items,
     sources: statuses,
     refreshing: Boolean(fetchRun?.status === "running"),
