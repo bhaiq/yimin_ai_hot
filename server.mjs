@@ -1826,19 +1826,19 @@ async function getSsoStats() {
   const daily = (await mysqlJson(`
     SELECT COALESCE(JSON_ARRAYAGG(
       JSON_OBJECT(
-        'date', visit_date,
+        'date', DATE_FORMAT(visit_day, '%Y-%m-%d'),
         'visits', visits,
         'users', users
       )
     ), JSON_ARRAY())
     FROM (
-      SELECT DATE_FORMAT(visit_at, '%Y-%m-%d') AS visit_date,
+      SELECT DATE(visit_at) AS visit_day,
              COUNT(*) AS visits,
              COUNT(DISTINCT user_name) AS users
       FROM yimin_sso_login_logs
       WHERE visit_at >= DATE_SUB(CURDATE(), INTERVAL 13 DAY)
       GROUP BY DATE(visit_at)
-      ORDER BY DATE(visit_at)
+      ORDER BY visit_day
     ) d;
   `)) || [];
 
