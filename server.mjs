@@ -781,7 +781,7 @@ async function getTodayArticleStats() {
         'categoryCount', COUNT(DISTINCT category)
       ) AS stats
       FROM yimin_articles
-      WHERE COALESCE(published_at, fetched_at) >= ${sqlString(today)}
+      WHERE DATE(CONVERT_TZ(COALESCE(published_at, fetched_at), '+00:00', '+08:00')) >= ${sqlString(today)}
     `);
     const r = row || {};
     return {
