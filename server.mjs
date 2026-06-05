@@ -771,23 +771,28 @@ async function listArticlesFromDb(limit = maxTotalItems) {
 }
 
 async function getTodayArticleStats() {
-  const row = await mysqlJson(`
-    SELECT JSON_OBJECT(
-      'total', COUNT(*),
-      'highCount', SUM(CASE WHEN heat >= 85 THEN 1 ELSE 0 END),
-      'countryCount', COUNT(DISTINCT country),
-      'categoryCount', COUNT(DISTINCT category)
-    ) AS stats
-    FROM yimin_articles
-    WHERE COALESCE(published_at, fetched_at) >= CURDATE()
-  `);
-  const r = row || {};
-  return {
-    total: Number(r.total || 0),
-    highCount: Number(r.highCount || 0),
-    countryCount: Number(r.countryCount || 0),
-    categoryCount: Number(r.categoryCount || 0),
-  };
+  try {
+    const today = getShanghaiDate();
+    const row = await mysqlJson(`
+      SELECT JSON_OBJECT(
+        'total', COUNT(*),
+        'highCount', SUM(CASE WHEN heat >= 85 THEN 1 ELSE 0 END),
+        'countryCount', COUNT(DISTINCT country),
+        'categoryCount', COUNT(DISTINCT category)
+      ) AS stats
+      FROM yimin_articles
+      WHERE COALESCE(published_at, fetched_at) >= ${sqlString(today)}
+    `);
+    const r = row || {};
+    return {
+      total: Number(r.total || 0),
+      highCount: Number(r.highCount || 0),
+      countryCount: Number(r.countryCount || 0),
+      categoryCount: Number(r.categoryCount || 0),
+    };
+  } catch {
+    return { total: 0, highCount: 0, countryCount: 0, categoryCount: 0 };
+  }
 }
 
 async function listRecentArticlesFromDb(limit = Math.max(maxTotalItems * 2, 160)) {
