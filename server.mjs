@@ -770,25 +770,18 @@ async function listArticlesFromDb(limit = maxTotalItems) {
   );
 }
 
-async function getTodayArticleCount() {
-  const rows = await mysqlJson(`
-    SELECT COUNT(*) AS cnt FROM yimin_articles
-    WHERE COALESCE(published_at, fetched_at) >= CURDATE()
-  `);
-  return Number(rows?.[0]?.cnt || 0);
-}
-
 async function getTodayArticleStats() {
-  const rows = await mysqlJson(`
-    SELECT
-      COUNT(*) AS total,
-      SUM(CASE WHEN heat >= 85 THEN 1 ELSE 0 END) AS highCount,
-      COUNT(DISTINCT country) AS countryCount,
-      COUNT(DISTINCT category) AS categoryCount
+  const row = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'total', COUNT(*),
+      'highCount', SUM(CASE WHEN heat >= 85 THEN 1 ELSE 0 END),
+      'countryCount', COUNT(DISTINCT country),
+      'categoryCount', COUNT(DISTINCT category)
+    ) AS stats
     FROM yimin_articles
     WHERE COALESCE(published_at, fetched_at) >= CURDATE()
   `);
-  const r = rows?.[0] || {};
+  const r = row || {};
   return {
     total: Number(r.total || 0),
     highCount: Number(r.highCount || 0),
