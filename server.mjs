@@ -147,7 +147,9 @@ function sqlDate(value) {
     return "NULL";
   }
 
-  return sqlString(date.toISOString().slice(0, 19).replace("T", " "));
+  const pad = (n) => String(n).padStart(2, "0");
+  const bj = new Date(date.getTime() + 8 * 3600000 + date.getTimezoneOffset() * 60000);
+  return sqlString(`${bj.getFullYear()}-${pad(bj.getMonth() + 1)}-${pad(bj.getDate())} ${pad(bj.getHours())}:${pad(bj.getMinutes())}:${pad(bj.getSeconds())}`);
 }
 
 function sqlJson(value) {
@@ -781,8 +783,8 @@ async function getTodayArticleStats() {
         'categoryCount', COUNT(DISTINCT category)
       ) AS stats
       FROM yimin_articles
-      WHERE CONVERT_TZ(fetched_at, '+00:00', '+08:00') >= CONCAT(${sqlString(today)}, ' 07:00:00') - INTERVAL 24 HOUR
-        AND CONVERT_TZ(fetched_at, '+00:00', '+08:00') < CONCAT(${sqlString(today)}, ' 07:00:00')
+      WHERE fetched_at >= CONCAT(${sqlString(today)}, ' 07:00:00') - INTERVAL 24 HOUR
+        AND fetched_at < CONCAT(${sqlString(today)}, ' 07:00:00')
     `);
     const r = row || {};
     return {
@@ -1056,7 +1058,7 @@ function buildMarketReport(date, items, feedbackMap) {
         ...project,
         matchedCount: matched.length,
         hasFresh,
-        latest: latestDate ? latestDate.toISOString() : null,
+        latest: latestDate ? formatShanghaiDateTimeISO(latestDate) : null,
         suggestion: "今日不单独发新热点，可使用常青科普或等待新政策变化。",
       };
     })
@@ -1066,7 +1068,7 @@ function buildMarketReport(date, items, feedbackMap) {
   const report = {
     date,
     title: `市场素材日报（${date}）`,
-    generatedAt: new Date().toISOString(),
+    generatedAt: formatShanghaiDateTimeISO(new Date()),
     todayNew,
     continuing,
     noUpdateProjects,
@@ -1406,7 +1408,7 @@ async function getWxAccessToken() {
 
   await mysqlExec(`
     INSERT INTO yimin_wx_token_cache (access_token, expires_at)
-    VALUES (${sqlString(data.access_token)}, ${sqlDate(expiresAt.toISOString())})
+    VALUES (${sqlString(data.access_token)}, ${sqlDate(expiresAt)})
   `);
 
   return data.access_token;
@@ -1435,7 +1437,7 @@ async function getWxJsapiTicket(accessToken) {
   const expiresAt = new Date(Date.now() + expiresIn * 1000);
   await mysqlExec(`
     INSERT INTO yimin_wx_token_cache (access_token, expires_at, ticket)
-    VALUES ('', ${sqlDate(expiresAt.toISOString())}, ${sqlString(data.ticket)})
+    VALUES ('', ${sqlDate(expiresAt)}, ${sqlString(data.ticket)})
   `);
 
   return data.ticket;
@@ -2615,7 +2617,7 @@ async function getNews({ force = false, background = false } = {}) {
   }
 
   const todayStats = await getTodayArticleStats();
-  const generatedAt = new Date().toISOString();
+  const generatedAt = formatShanghaiDateTimeISO(new Date());
   const payload = {
     ok: true,
     live: true,
@@ -2814,6 +2816,13 @@ function formatShanghaiDateTime(date) {
   }).format(date).replace(/\//g, "-");
 }
 
+function formatShanghaiDateTimeISO(date) {
+  const d = new Date(date);
+  const pad = (n) => String(n).padStart(2, "0");
+  const bj = new Date(d.getTime() + 8 * 3600000 + d.getTimezoneOffset() * 60000);
+  return `${bj.getFullYear()}-${pad(bj.getMonth() + 1)}-${pad(bj.getDate())}T${pad(bj.getHours())}:${pad(bj.getMinutes())}:${pad(bj.getSeconds())}+08:00`;
+}
+
 function getDailyWindowLabel(window) {
   if (!window?.start || !window?.end) {
     return "";
@@ -2923,7 +2932,7 @@ async function buildDailyContext(date, { windowMode = "calendar" } = {}) {
     const isRecent = articleDate ? articleDate >= window.recentStart && articleDate < window.end : false;
     return {
       ...item,
-      articleDate: articleDate ? articleDate.toISOString() : null,
+      articleDate: articleDate ? formatShanghaiDateTimeISO(articleDate) : null,
       ageHours,
       isToday,
       isRecent,
@@ -3285,7 +3294,7 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
     windowMode: dailyContext.window.mode,
     windowStart: dailyContext.window.start.toISOString(),
     windowEnd: dailyContext.window.end.toISOString(),
-    generatedAt: new Date().toISOString(),
+    generatedAt: formatShanghaiDateTimeISO(new Date()),
   });
 }
 
