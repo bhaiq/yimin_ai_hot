@@ -4166,15 +4166,19 @@ function tryOpenDefaultBrowser(source) {
       log('invoke result: ' + source + ' ' + msg);
       if (msg === 'openDefaultBrowser:ok') {
         openedExternal = true;
+        go('opened external');
+      } else {
+        go('invoke failed');
       }
     });
   } catch(e) {
     log('invoke error: ' + source + ' ' + e.message);
+    go('invoke error');
   }
 }
 log('1. page loaded');
 log('2. sign=${signature ? "1" : "0"} agent=${agentSignature ? "1" : "0"} serverError=' + ${signatureErrorJson} + ' current=' + currentUrl + ' target=' + targetUrl + ' ua=' + navigator.userAgent);
-setTimeout(function(){ go('timeout'); }, 6000);
+setTimeout(function(){ go('timeout'); }, 1200);
 </script>
 <script src="https://res.wx.qq.com/open/js/jweixin-1.2.0.js"
   onload="log('3. sdk loaded')"
@@ -4213,6 +4217,7 @@ try {
       },
       fail: function(res) {
         log('5d. agentConfig fail: ' + JSON.stringify(res));
+        go('agentConfig fail');
       }
     });
   });
