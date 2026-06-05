@@ -4156,14 +4156,7 @@ function log(msg) {
 }
 var done = false;
 var openedExternal = false;
-function go(reason) { if(!done && !openedExternal){done=true;log('fallback: ' + (reason || 'redirect'));window.location.replace(targetUrl);} }
-function closeWxWindowSoon() {
-  setTimeout(function() {
-    try {
-      if (typeof wx !== 'undefined' && wx.closeWindow) wx.closeWindow();
-    } catch(e) {}
-  }, 600);
-}
+function go(reason) { if(!done){done=true;log('fallback: ' + (reason || 'redirect'));window.location.replace(targetUrl);} }
 function tryOpenDefaultBrowser(source) {
   if (openedExternal || typeof wx === 'undefined') return;
   log('invoke start: ' + source);
@@ -4173,8 +4166,6 @@ function tryOpenDefaultBrowser(source) {
       log('invoke result: ' + source + ' ' + msg);
       if (msg === 'openDefaultBrowser:ok') {
         openedExternal = true;
-        done = true;
-        closeWxWindowSoon();
       }
     });
   } catch(e) {
