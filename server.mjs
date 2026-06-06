@@ -265,7 +265,8 @@ function mysqlRun(sql, { database = true, json = false } = {}) {
 
       reject(new Error(stderr.trim() || `mysql exited with code ${code}`));
     });
-    child.stdin.end(sql);
+    // DATETIME columns store Beijing wall time; keep MySQL-generated times aligned with sqlDate().
+    child.stdin.end(`SET time_zone = '+08:00';\n${sql}`);
   });
 }
 
@@ -854,8 +855,8 @@ async function getFetchRunById(runId) {
       'failedSourceCount', failed_source_count,
       'itemCount', item_count,
       'error', error,
-      'startedAt', DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%s.000Z'),
-      'finishedAt', IF(finished_at IS NULL, NULL, DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%s.000Z'))
+      'startedAt', DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'finishedAt', IF(finished_at IS NULL, NULL, DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%s+08:00'))
     )
     FROM yimin_fetch_runs
     WHERE id = ${sqlNumber(runId)}
@@ -875,8 +876,8 @@ async function getLatestFetchRun() {
       'failedSourceCount', failed_source_count,
       'itemCount', item_count,
       'error', error,
-      'startedAt', DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%s.000Z'),
-      'finishedAt', IF(finished_at IS NULL, NULL, DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%s.000Z'))
+      'startedAt', DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'finishedAt', IF(finished_at IS NULL, NULL, DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%s+08:00'))
     )
     FROM yimin_fetch_runs
     ORDER BY id DESC
@@ -938,8 +939,8 @@ async function listArticlesFromDb(limit = maxTotalItems) {
           'country', country,
           'category', category,
           'time', COALESCE(DATE_FORMAT(published_at, '%H:%i'), '刚刚'),
-          'publishedAt', IF(published_at IS NULL, NULL, DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s.000Z')),
-          'fetchedAt', IF(fetched_at IS NULL, NULL, DATE_FORMAT(fetched_at, '%Y-%m-%dT%H:%i:%s.000Z')),
+          'publishedAt', IF(published_at IS NULL, NULL, DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+          'fetchedAt', IF(fetched_at IS NULL, NULL, DATE_FORMAT(fetched_at, '%Y-%m-%dT%H:%i:%s+08:00')),
           'url', url,
           'heat', heat,
           'impact', impact,
@@ -995,8 +996,8 @@ async function listRecentArticlesFromDb(limit = Math.max(maxTotalItems * 2, 160)
           'country', country,
           'category', category,
           'time', COALESCE(DATE_FORMAT(published_at, '%H:%i'), '刚刚'),
-          'publishedAt', IF(published_at IS NULL, NULL, DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s.000Z')),
-          'fetchedAt', IF(fetched_at IS NULL, NULL, DATE_FORMAT(fetched_at, '%Y-%m-%dT%H:%i:%s.000Z')),
+          'publishedAt', IF(published_at IS NULL, NULL, DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+          'fetchedAt', IF(fetched_at IS NULL, NULL, DATE_FORMAT(fetched_at, '%Y-%m-%dT%H:%i:%s+08:00')),
           'url', url,
           'heat', heat,
           'impact', impact,
@@ -1027,8 +1028,8 @@ async function listDailyCandidateArticlesFromDb(window, limit = dailyCandidateLi
           'country', country,
           'category', category,
           'time', COALESCE(DATE_FORMAT(published_at, '%H:%i'), '刚刚'),
-          'publishedAt', IF(published_at IS NULL, NULL, DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s.000Z')),
-          'fetchedAt', IF(fetched_at IS NULL, NULL, DATE_FORMAT(fetched_at, '%Y-%m-%dT%H:%i:%s.000Z')),
+          'publishedAt', IF(published_at IS NULL, NULL, DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+          'fetchedAt', IF(fetched_at IS NULL, NULL, DATE_FORMAT(fetched_at, '%Y-%m-%dT%H:%i:%s+08:00')),
           'url', url,
           'heat', heat,
           'impact', impact,
@@ -1059,7 +1060,7 @@ async function listSourceStatusesFromDb() {
           'ok', IF(last_fetch_error IS NULL, CAST(TRUE AS JSON), CAST(FALSE AS JSON)),
           'count', article_count,
           'error', last_fetch_error,
-          'lastFetchedAt', IF(last_fetched_at IS NULL, NULL, DATE_FORMAT(last_fetched_at, '%Y-%m-%dT%H:%i:%s.000Z'))
+          'lastFetchedAt', IF(last_fetched_at IS NULL, NULL, DATE_FORMAT(last_fetched_at, '%Y-%m-%dT%H:%i:%s+08:00'))
         )
       ), JSON_ARRAY())
       FROM (
@@ -1180,7 +1181,7 @@ async function getMarketFeedbackMap() {
         'action', action,
         'note', note,
         'createdBy', created_by,
-        'updatedAt', DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:%s.000Z')
+        'updatedAt', DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:%s+08:00')
       )
     ), JSON_ARRAY())
     FROM yimin_market_feedback;
@@ -1388,7 +1389,7 @@ async function listSavedMarketMaterials(reportId, section) {
                 'action', f.action,
                 'note', f.note,
                 'createdBy', f.created_by,
-                'updatedAt', DATE_FORMAT(f.updated_at, '%Y-%m-%dT%H:%i:%s.000Z')
+                'updatedAt', DATE_FORMAT(f.updated_at, '%Y-%m-%dT%H:%i:%s+08:00')
               )
             ),
             'marketScore', market_score,
@@ -1421,7 +1422,7 @@ async function listSavedMarketProjects(reportId) {
           'name', project_name,
           'country', country,
           'matchedCount', matched_count,
-          'latest', IF(latest_article_at IS NULL, NULL, DATE_FORMAT(latest_article_at, '%Y-%m-%dT%H:%i:%s.000Z')),
+          'latest', IF(latest_article_at IS NULL, NULL, DATE_FORMAT(latest_article_at, '%Y-%m-%dT%H:%i:%s+08:00')),
           'suggestion', suggestion
         ) AS project_json
         FROM yimin_market_project_status
@@ -1439,7 +1440,7 @@ async function getSavedMarketReport(date) {
       'date', DATE_FORMAT(report_date, '%Y-%m-%d'),
       'title', title,
       'summary', CAST(summary_json AS JSON),
-      'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s.000Z')
+      'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s+08:00')
     )
     FROM yimin_market_reports
     WHERE report_date = ${sqlString(date)}
@@ -1475,7 +1476,7 @@ async function listMarketHistory() {
           'usable', CAST(JSON_UNQUOTE(JSON_EXTRACT(summary_json, '$.usable')) AS UNSIGNED),
           'continuing', CAST(JSON_UNQUOTE(JSON_EXTRACT(summary_json, '$.continuing')) AS UNSIGNED),
           'notRecommended', CAST(JSON_UNQUOTE(JSON_EXTRACT(summary_json, '$.notRecommended')) AS UNSIGNED),
-          'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s.000Z')
+          'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s+08:00')
         )
       ), JSON_ARRAY())
       FROM (
@@ -1884,8 +1885,8 @@ async function listPushTasks(limit = 30) {
           'sentCount', sent_count,
           'failedCount', failed_count,
           'visitedCount', visited_count,
-          'startedAt', DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%s.000Z'),
-          'finishedAt', DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%s.000Z')
+          'startedAt', DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+          'finishedAt', DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%s+08:00')
         )
       ), JSON_ARRAY())
       FROM (
@@ -1908,8 +1909,8 @@ async function getPushTaskLogs(taskId, { status = null, limit = 100 } = {}) {
           'username', username,
           'token', token,
           'sendStatus', send_status,
-          'sentAt', DATE_FORMAT(sent_at, '%Y-%m-%dT%H:%i:%s.000Z'),
-          'visitAt', DATE_FORMAT(visit_at, '%Y-%m-%dT%H:%i:%s.000Z'),
+          'sentAt', DATE_FORMAT(sent_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+          'visitAt', DATE_FORMAT(visit_at, '%Y-%m-%dT%H:%i:%s+08:00'),
           'visitIp', visit_ip,
           'error', error
         )
@@ -3080,7 +3081,7 @@ async function startBackgroundFeedRefresh() {
     failedSourceCount: 0,
     itemCount: 0,
     error: null,
-    startedAt: new Date().toISOString(),
+    startedAt: formatShanghaiDateTimeISO(new Date()),
     finishedAt: null,
   });
 
@@ -3725,10 +3726,10 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
         'html', content_html,
         'sourceItemCount', source_item_count,
         'model', model,
-        'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s.000Z'),
+        'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s+08:00'),
         'windowMode', window_mode,
-        'windowStart', IF(window_start_at IS NULL, NULL, DATE_FORMAT(window_start_at, '%Y-%m-%dT%H:%i:%s.000Z')),
-        'windowEnd', IF(window_end_at IS NULL, NULL, DATE_FORMAT(window_end_at, '%Y-%m-%dT%H:%i:%s.000Z'))
+        'windowStart', IF(window_start_at IS NULL, NULL, DATE_FORMAT(window_start_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+        'windowEnd', IF(window_end_at IS NULL, NULL, DATE_FORMAT(window_end_at, '%Y-%m-%dT%H:%i:%s+08:00'))
       )
       FROM yimin_daily_reports
       WHERE report_date = ${sqlString(date)}
@@ -3801,8 +3802,8 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
     sourceItemCount: selectedItems.length,
     model,
     windowMode: dailyContext.window.mode,
-    windowStart: dailyContext.window.start.toISOString(),
-    windowEnd: dailyContext.window.end.toISOString(),
+    windowStart: formatShanghaiDateTimeISO(dailyContext.window.start),
+    windowEnd: formatShanghaiDateTimeISO(dailyContext.window.end),
     generatedAt: formatShanghaiDateTimeISO(new Date()),
   });
 }
@@ -3964,7 +3965,7 @@ const server = createServer(async (req, res) => {
         ok: true,
         service: "immigration-hot",
         database: dbConfig.database,
-        time: new Date().toISOString(),
+        time: formatShanghaiDateTimeISO(new Date()),
       });
       return;
     }

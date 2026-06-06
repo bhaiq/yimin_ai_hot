@@ -135,6 +135,15 @@ function escapeAttr(value) {
   return escapeHtml(value).replace(/`/g, "&#96;");
 }
 
+function getShanghaiDateString(date = new Date()) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
 function safeUrl(value) {
   if (!value) {
     return "";
@@ -440,7 +449,7 @@ function renderDaily() {
         <ul class="daily-history-list">
           ${state.dailyHistory
             .map((h) => {
-              const isCurrent = state.dailyDate === h.date || (!state.dailyDate && h.date === new Date().toISOString().slice(0, 10));
+              const isCurrent = state.dailyDate === h.date || (!state.dailyDate && h.date === getShanghaiDateString());
               return `<li>
               <button class="daily-history-item${isCurrent ? " active" : ""}" data-daily-date="${h.date}">
                 <span class="daily-history-date">${h.date}</span>
