@@ -395,8 +395,19 @@ async function initDb() {
         CREATE TABLE IF NOT EXISTS yimin_feedback (
           id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
           type VARCHAR(120) NOT NULL COMMENT '反馈类型（如建议、Bug、投诉等）',
+          module VARCHAR(120) NOT NULL DEFAULT '' COMMENT '反馈相关页面或模块',
+          priority VARCHAR(40) NOT NULL DEFAULT 'normal' COMMENT '反馈优先级',
           message TEXT NULL COMMENT '反馈内容',
-          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '反馈时间'
+          contact VARCHAR(160) NULL COMMENT '联系方式',
+          created_by VARCHAR(160) NOT NULL DEFAULT '' COMMENT '反馈人',
+          status ENUM('new','reviewed','resolved','archived') NOT NULL DEFAULT 'new' COMMENT '处理状态',
+          admin_note TEXT NULL COMMENT '管理员备注',
+          page_url VARCHAR(1200) NULL COMMENT '提交页面地址',
+          user_agent VARCHAR(600) NULL COMMENT '浏览器 UA',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '反馈时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          INDEX idx_yimin_feedback_status (status),
+          INDEX idx_yimin_feedback_created_at (created_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户反馈表';
 
         CREATE TABLE IF NOT EXISTS yimin_market_reports (
@@ -592,6 +603,76 @@ async function initDb() {
           ALTER TABLE yimin_fetch_runs
           ADD COLUMN failed_source_count INT NOT NULL DEFAULT 0 COMMENT '失败来源数量'
           AFTER success_source_count;
+        `);
+      }
+
+      const feedbackColumns = await mysqlRun(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+          AND TABLE_NAME = 'yimin_feedback'
+          AND COLUMN_NAME IN ('module', 'priority', 'contact', 'created_by', 'status', 'admin_note', 'page_url', 'user_agent', 'updated_at');
+      `);
+      if (!feedbackColumns.includes("module")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_feedback
+          ADD COLUMN module VARCHAR(120) NOT NULL DEFAULT '' COMMENT '反馈相关页面或模块'
+          AFTER type;
+        `);
+      }
+      if (!feedbackColumns.includes("priority")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_feedback
+          ADD COLUMN priority VARCHAR(40) NOT NULL DEFAULT 'normal' COMMENT '反馈优先级'
+          AFTER module;
+        `);
+      }
+      if (!feedbackColumns.includes("contact")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_feedback
+          ADD COLUMN contact VARCHAR(160) NULL COMMENT '联系方式'
+          AFTER message;
+        `);
+      }
+      if (!feedbackColumns.includes("created_by")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_feedback
+          ADD COLUMN created_by VARCHAR(160) NOT NULL DEFAULT '' COMMENT '反馈人'
+          AFTER contact;
+        `);
+      }
+      if (!feedbackColumns.includes("status")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_feedback
+          ADD COLUMN status ENUM('new','reviewed','resolved','archived') NOT NULL DEFAULT 'new' COMMENT '处理状态'
+          AFTER created_by;
+        `);
+      }
+      if (!feedbackColumns.includes("admin_note")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_feedback
+          ADD COLUMN admin_note TEXT NULL COMMENT '管理员备注'
+          AFTER status;
+        `);
+      }
+      if (!feedbackColumns.includes("page_url")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_feedback
+          ADD COLUMN page_url VARCHAR(1200) NULL COMMENT '提交页面地址'
+          AFTER admin_note;
+        `);
+      }
+      if (!feedbackColumns.includes("user_agent")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_feedback
+          ADD COLUMN user_agent VARCHAR(600) NULL COMMENT '浏览器 UA'
+          AFTER page_url;
+        `);
+      }
+      if (!feedbackColumns.includes("updated_at")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_feedback
+          ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'
+          AFTER created_at;
         `);
       }
 
@@ -2106,11 +2187,83 @@ async function saveSourceSubmission(data) {
   );
 }
 
-async function saveFeedback(data) {
+function normalizeFeedbackStatus(value) {
+  return ["new", "reviewed", "resolved", "archived"].includes(value) ? value : "new";
+}
+
+async function saveFeedback(data, { session = null, req = null } = {}) {
   await initDb();
+  const cookies = req ? parseCookies(req) : {};
+  let cookieName = "";
+  try {
+    cookieName = decodeURIComponent(cookies.feedback_name || "");
+  } catch {
+    cookieName = cookies.feedback_name || "";
+  }
+  const createdBy = String(session?.username || cookieName || data.createdBy || data.created_by || "").trim();
+  const userAgent = String(req?.headers?.["user-agent"] || data.userAgent || "").slice(0, 600);
+
   await mysqlExec(`
-    INSERT INTO yimin_feedback (type, message)
-    VALUES (${sqlString(data.type || "页面反馈")}, ${sqlString(data.message || "")});
+    INSERT INTO yimin_feedback (
+      type, module, priority, message, contact, created_by, page_url, user_agent
+    )
+    VALUES (
+      ${sqlString(data.type || "页面反馈")},
+      ${sqlString(data.module || "")},
+      ${sqlString(data.priority || "normal")},
+      ${sqlString(data.message || "")},
+      ${sqlString(data.contact || "")},
+      ${sqlString(createdBy)},
+      ${sqlString(data.pageUrl || data.page_url || "")},
+      ${sqlString(userAgent)}
+    );
+  `);
+}
+
+async function listFeedback({ limit = 200, status = "" } = {}) {
+  await initDb();
+  const where = status ? `WHERE status = ${sqlString(normalizeFeedbackStatus(status))}` : "";
+  return (
+    (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(
+        JSON_OBJECT(
+          'id', id,
+          'type', type,
+          'module', module,
+          'priority', priority,
+          'message', message,
+          'contact', contact,
+          'createdBy', created_by,
+          'status', status,
+          'adminNote', admin_note,
+          'pageUrl', page_url,
+          'userAgent', user_agent,
+          'createdAt', DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s'),
+          'updatedAt', DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s')
+        )
+      ), JSON_ARRAY())
+      FROM (
+        SELECT *
+        FROM yimin_feedback
+        ${where}
+        ORDER BY FIELD(status, 'new', 'reviewed', 'resolved', 'archived'), created_at DESC, id DESC
+        LIMIT ${sqlNumber(limit, 200)}
+      ) f;
+    `)) || []
+  );
+}
+
+async function updateFeedback(id, data) {
+  await initDb();
+  const feedbackId = Number(id);
+  if (!feedbackId) throw new Error("Invalid feedback id");
+  const status = normalizeFeedbackStatus(data.status || "reviewed");
+
+  await mysqlExec(`
+    UPDATE yimin_feedback
+    SET status = ${sqlString(status)},
+        admin_note = ${sqlString(data.adminNote || data.admin_note || "")}
+    WHERE id = ${sqlNumber(feedbackId)};
   `);
 }
 
@@ -3687,6 +3840,12 @@ function parseCookies(req) {
   return cookies;
 }
 
+function buildFeedbackNameCookie(name) {
+  const cleanName = String(name || "").trim();
+  if (!cleanName) return "";
+  return `feedback_name=${encodeURIComponent(cleanName)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 3600}`;
+}
+
 function requireAuth(req) {
   const cookies = parseCookies(req);
   const token = cookies.token;
@@ -3776,7 +3935,13 @@ const server = createServer(async (req, res) => {
           ip: getClientIp(req),
           userAgent: req.headers["user-agent"] || "",
         });
-        sendJson(res, 201, { ok: true, userName: result.userName });
+        const payload = JSON.stringify({ ok: true, userName: result.userName }, null, 2);
+        res.writeHead(201, {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "no-store",
+          ...(result.userName ? { "set-cookie": buildFeedbackNameCookie(result.userName) } : {}),
+        });
+        res.end(payload);
       } catch (err) {
         sendJson(res, 400, { ok: false, error: err.message || "SSO 解密失败" });
       }
@@ -4011,14 +4176,38 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (url.pathname === "/api/feedback" && req.method === "POST") {
+    if (url.pathname === "/api/feedback") {
+      if (req.method === "GET") {
+        if (!requireAuth(req)) {
+          sendJson(res, 401, { ok: false, error: "请先登录" });
+          return;
+        }
+        const feedback = await listFeedback({
+          status: url.searchParams.get("status") || "",
+        });
+        sendJson(res, 200, { ok: true, feedback });
+        return;
+      }
+
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        await saveFeedback(body, { session: requireAuth(req), req });
+        sendJson(res, 201, {
+          ok: true,
+        });
+        return;
+      }
+    }
+
+    if (url.pathname.startsWith("/api/feedback/") && req.method === "PUT") {
       if (!requireAuth(req)) {
         sendJson(res, 401, { ok: false, error: "请先登录" });
         return;
       }
+      const feedbackId = Number(url.pathname.replace("/api/feedback/", "").split("/")[0]);
       const body = await readJsonBody(req);
-      await saveFeedback(body);
-      sendJson(res, 201, {
+      await updateFeedback(feedbackId, body);
+      sendJson(res, 200, {
         ok: true,
       });
       return;
@@ -4051,7 +4240,8 @@ const server = createServer(async (req, res) => {
       const token = url.pathname.replace("/d/", "").split("/")[0];
       if (token && /^[a-kmnp-z2-9]{12}$/i.test(token)) {
         const ip = getClientIp(req);
-        await recordPushVisit(token, ip);
+        const visitInfo = await recordPushVisit(token, ip);
+        const feedbackNameCookie = buildFeedbackNameCookie(visitInfo?.username);
 
         const targetUrl = buildPublicUrl(req, "/#daily");
         const ua = (req.headers["user-agent"] || "").toLowerCase();
@@ -4109,7 +4299,10 @@ const server = createServer(async (req, res) => {
             ? '<p id="dbg" style="font-size:11px;color:#9ca3af;margin-top:12px;word-break:break-all;text-align:left;min-height:40px"></p>'
             : "";
 
-          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+          res.writeHead(200, {
+            "Content-Type": "text/html; charset=utf-8",
+            ...(feedbackNameCookie ? { "set-cookie": feedbackNameCookie } : {}),
+          });
           res.end(`<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -4236,7 +4429,10 @@ try {
           return;
         }
 
-        res.writeHead(302, { Location: targetUrl });
+        res.writeHead(302, {
+          Location: targetUrl,
+          ...(feedbackNameCookie ? { "set-cookie": feedbackNameCookie } : {}),
+        });
         res.end();
         return;
       }

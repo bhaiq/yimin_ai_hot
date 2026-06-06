@@ -38,6 +38,10 @@
             <span class="nav-icon">◎</span>
             <span>政策雷达</span>
           </button>
+          <button class="nav-item" data-view="feedback" type="button">
+            <span class="nav-icon">✎</span>
+            <span>反馈建议</span>
+          </button>
         </nav>
 
         <div class="sidebar-section" data-auth>
@@ -59,6 +63,10 @@
               <span class="nav-icon">※</span>
               <span>访问统计</span>
             </button>
+            <button class="nav-item" data-view="feedback-review" type="button">
+              <span class="nav-icon">☷</span>
+              <span>反馈意见查看</span>
+            </button>
             <button class="nav-item" data-view="about" type="button">
               <span class="nav-icon">?</span>
               <span>关于本站</span>
@@ -66,10 +74,6 @@
             <button class="nav-item" data-view="changelog" type="button">
               <span class="nav-icon">↻</span>
               <span>更新日志</span>
-            </button>
-            <button class="nav-item" data-view="feedback" type="button">
-              <span class="nav-icon">✎</span>
-              <span>反馈建议</span>
             </button>
           </nav>
         </div>
@@ -304,26 +308,69 @@
           <div class="section-heading">
             <div>
               <p class="eyebrow">反馈</p>
-              <h1 id="feedbackTitle">记录团队意见</h1>
+              <h1 id="feedbackTitle">感谢您的宝贵意见</h1>
             </div>
           </div>
           <form class="form-panel" id="feedbackForm">
+            <div class="form-grid two">
+              <label>
+                <span>反馈类型</span>
+                <select name="type">
+                  <option>内容准确性</option>
+                  <option>信息源补充</option>
+                  <option>页面体验</option>
+                  <option>日报质量</option>
+                  <option>业务流程</option>
+                </select>
+              </label>
+              <label>
+                <span>相关页面</span>
+                <select name="module">
+                  <option>移民日报</option>
+                  <option>精选热点</option>
+                  <option>全部动态</option>
+                  <option>政策雷达</option>
+                  <option>市场素材</option>
+                  <option>其他</option>
+                </select>
+              </label>
+            </div>
+            <div class="form-grid two">
+              <label>
+                <span>优先级</span>
+                <select name="priority">
+                  <option value="normal">一般建议</option>
+                  <option value="high">影响工作</option>
+                  <option value="urgent">需要尽快处理</option>
+                </select>
+              </label>
+              <label>
+                <span>联系方式（选填）</span>
+                <input name="contact" placeholder="邮箱、电话或企业微信" />
+              </label>
+            </div>
             <label>
-              <span>反馈类型</span>
-              <select name="type">
-                <option>内容准确性</option>
-                <option>信息源补充</option>
-                <option>页面体验</option>
-                <option>业务流程</option>
-              </select>
+              <span>具体说明</span>
+              <textarea name="message" rows="6" placeholder="请描述遇到的问题、希望补充的信息，或你认为更好用的方式。" required></textarea>
             </label>
-            <label>
-              <span>说明</span>
-              <textarea name="message" rows="5" placeholder="写下需要调整的地方"></textarea>
-            </label>
-            <button class="primary-button" type="submit">保存反馈</button>
-            <p class="form-note" id="feedbackNote">反馈仅保存在当前浏览器。</p>
+            <div class="feedback-actions">
+              <button class="primary-button" type="submit">提交反馈</button>
+              <button class="ghost-button" type="reset">清空</button>
+            </div>
+            <p class="form-note" id="feedbackNote">提交后我们会尽快查看。</p>
           </form>
+        </section>
+
+        <section class="view utility-view wide-view" id="view-feedback-review" aria-labelledby="feedbackReviewTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">反馈意见</p>
+              <h1 id="feedbackReviewTitle">查看和处理团队反馈</h1>
+            </div>
+            <button class="ghost-button" id="refreshFeedbackReview" type="button">刷新</button>
+          </div>
+          <div class="feedback-review-toolbar" id="feedbackReviewFilters"></div>
+          <div class="feedback-review-list" id="feedbackReviewList"></div>
         </section>
 
         <section class="view utility-view" id="view-login" aria-labelledby="loginTitle">

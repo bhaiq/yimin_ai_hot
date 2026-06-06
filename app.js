@@ -87,6 +87,11 @@ const state = {
   ssoStats: null,
   ssoStatsLoading: false,
   ssoStatsError: "",
+  feedbackItems: [],
+  feedbackLoading: false,
+  feedbackError: "",
+  feedbackStatus: "all",
+  ssoUserName: sessionStorage.getItem("yiminSsoUserName") || "",
   liveMeta: {
     mode: "idle",
     text: "等待真实信源数据",
@@ -95,8 +100,8 @@ const state = {
   user: null,
 };
 
-const authViews = ["market", "sources", "review", "sso-stats", "about", "changelog", "feedback"];
-const views = ["home", "all", "daily", "market", "radar", "login", "sources", "review", "sso-stats", "about", "changelog", "feedback"];
+const authViews = ["market", "sources", "review", "sso-stats", "feedback-review", "about", "changelog"];
+const views = ["home", "all", "daily", "market", "radar", "feedback", "login", "sources", "review", "sso-stats", "feedback-review", "about", "changelog"];
 
 const filterStrip = document.querySelector("#filterStrip");
 const featuredFeed = document.querySelector("#featuredFeed");
@@ -109,6 +114,8 @@ const allCount = document.querySelector("#allCount");
 const dailyReport = document.querySelector("#dailyReport");
 const marketReport = document.querySelector("#marketReport");
 const ssoStatsReport = document.querySelector("#ssoStatsReport");
+const feedbackReviewList = document.querySelector("#feedbackReviewList");
+const feedbackReviewFilters = document.querySelector("#feedbackReviewFilters");
 const monitorStatus = document.querySelector("#monitorStatus");
 const sourceHealth = document.querySelector("#sourceHealth");
 const refreshNews = document.querySelector("#refreshNews");
@@ -1080,6 +1087,83 @@ function renderSsoStats() {
   `;
 }
 
+function feedbackStatusLabel(status) {
+  return {
+    new: "待查看",
+    reviewed: "已查看",
+    resolved: "已处理",
+    archived: "已归档",
+  }[status] || "待查看";
+}
+
+function feedbackPriorityLabel(priority) {
+  return {
+    normal: "一般建议",
+    high: "影响工作",
+    urgent: "尽快处理",
+  }[priority] || priority || "一般建议";
+}
+
+function renderFeedbackReview() {
+  if (!feedbackReviewList || !feedbackReviewFilters) return;
+
+  const statuses = [
+    { key: "all", label: "全部" },
+    { key: "new", label: "待查看" },
+    { key: "reviewed", label: "已查看" },
+    { key: "resolved", label: "已处理" },
+    { key: "archived", label: "已归档" },
+  ];
+  feedbackReviewFilters.innerHTML = statuses.map((item) => `
+    <button class="filter-chip${state.feedbackStatus === item.key ? " active" : ""}" data-feedback-status="${item.key}" type="button">
+      ${escapeHtml(item.label)}
+    </button>
+  `).join("");
+
+  if (state.feedbackLoading) {
+    feedbackReviewList.innerHTML = '<p class="form-note">正在加载反馈意见...</p>';
+    return;
+  }
+
+  if (state.feedbackError) {
+    feedbackReviewList.innerHTML = `<p class="form-note">${escapeHtml(state.feedbackError)}</p>`;
+    return;
+  }
+
+  const items = state.feedbackItems || [];
+  if (!items.length) {
+    feedbackReviewList.innerHTML = '<p class="form-note">暂无反馈意见。</p>';
+    return;
+  }
+
+  feedbackReviewList.innerHTML = items.map((item) => `
+    <article class="feedback-card ${escapeAttr(item.status || "new")}" data-feedback-id="${escapeAttr(item.id)}">
+      <div class="feedback-card-head">
+        <div>
+          <strong>${escapeHtml(item.type || "页面反馈")}</strong>
+          <span>${escapeHtml(item.module || "未指定页面")} · ${escapeHtml(feedbackPriorityLabel(item.priority))}</span>
+        </div>
+        <span class="feedback-status ${escapeAttr(item.status || "new")}">${escapeHtml(feedbackStatusLabel(item.status))}</span>
+      </div>
+      <p class="feedback-message">${escapeHtml(item.message || "")}</p>
+      <div class="feedback-meta">
+        <span>反馈人：${escapeHtml(item.createdBy || "未记录")}</span>
+        ${item.contact ? `<span>联系方式：${escapeHtml(item.contact)}</span>` : ""}
+        <span>提交时间：${escapeHtml(item.createdAt || "-")}</span>
+      </div>
+      <div class="feedback-review-actions">
+        <select data-feedback-field="status" aria-label="处理状态">
+          ${["new", "reviewed", "resolved", "archived"].map((status) => `
+            <option value="${status}"${(item.status || "new") === status ? " selected" : ""}>${feedbackStatusLabel(status)}</option>
+          `).join("")}
+        </select>
+        <input data-feedback-field="adminNote" value="${escapeAttr(item.adminNote || "")}" placeholder="处理备注" />
+        <button class="ghost-button compact" data-feedback-action="save" data-id="${escapeAttr(item.id)}" type="button">保存</button>
+      </div>
+    </article>
+  `).join("");
+}
+
 function renderContent() {
   const items = filteredItems();
   renderFilters();
@@ -1092,6 +1176,7 @@ function renderContent() {
   renderMarket();
   renderRadar();
   renderSsoStats();
+  renderFeedbackReview();
   renderCounts(items);
   renderStatus(items);
 }
@@ -1370,6 +1455,36 @@ async function loadSsoStats() {
   }
 }
 
+async function loadFeedbackReview() {
+  if (window.location.protocol === "file:") return;
+
+  state.feedbackLoading = true;
+  state.feedbackError = "";
+  renderContent();
+
+  try {
+    const params = new URLSearchParams();
+    if (state.feedbackStatus && state.feedbackStatus !== "all") {
+      params.set("status", state.feedbackStatus);
+    }
+    const qs = params.toString();
+    const response = await fetch(`/api/feedback${qs ? `?${qs}` : ""}`, {
+      headers: { accept: "application/json" },
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.feedbackItems = data.feedback || [];
+  } catch (error) {
+    state.feedbackItems = [];
+    state.feedbackError = `反馈意见加载失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    state.feedbackLoading = false;
+    renderContent();
+  }
+}
+
 function getHashSearchParams() {
   return new URLSearchParams(parseHashRoute().query.replace(/^\?/, ""));
 }
@@ -1405,6 +1520,11 @@ async function recordSsoVisitFromHash() {
         }),
       });
       if (response.ok) {
+        const data = await response.json().catch(() => ({}));
+        if (data.userName) {
+          state.ssoUserName = data.userName;
+          sessionStorage.setItem("yiminSsoUserName", data.userName);
+        }
         sessionStorage.setItem(dedupeKey, "1");
       }
     }
@@ -1461,6 +1581,9 @@ function setView(routeValue) {
   }
   if (viewName === "sso-stats" && !state.ssoStatsLoading) {
     loadSsoStats();
+  }
+  if (viewName === "feedback-review" && !state.feedbackLoading) {
+    loadFeedbackReview();
   }
 }
 
@@ -1645,6 +1768,41 @@ document.addEventListener("click", async (event) => {
     }
     return;
   }
+
+  const feedbackStatusButton = event.target.closest("[data-feedback-status]");
+  if (feedbackStatusButton) {
+    state.feedbackStatus = feedbackStatusButton.dataset.feedbackStatus || "all";
+    loadFeedbackReview();
+    return;
+  }
+
+  const feedbackAction = event.target.closest("[data-feedback-action]");
+  if (feedbackAction) {
+    const card = feedbackAction.closest("[data-feedback-id]");
+    const id = feedbackAction.dataset.id || card?.dataset.feedbackId;
+    if (!id || feedbackAction.dataset.feedbackAction !== "save") return;
+    const status = card.querySelector('[data-feedback-field="status"]')?.value || "reviewed";
+    const adminNote = card.querySelector('[data-feedback-field="adminNote"]')?.value || "";
+    feedbackAction.disabled = true;
+    try {
+      const response = await fetch(`/api/feedback/${id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status, adminNote }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || `HTTP ${response.status}`);
+      }
+      await loadFeedbackReview();
+    } catch (error) {
+      state.feedbackError = `反馈状态保存失败：${error instanceof Error ? error.message : String(error)}`;
+      renderContent();
+    } finally {
+      feedbackAction.disabled = false;
+    }
+    return;
+  }
 });
 
 searchInput.addEventListener("input", (event) => {
@@ -1658,6 +1816,10 @@ refreshNews.addEventListener("click", () => {
 
 document.querySelector("#refreshSsoStats")?.addEventListener("click", () => {
   loadSsoStats();
+});
+
+document.querySelector("#refreshFeedbackReview")?.addEventListener("click", () => {
+  loadFeedbackReview();
 });
 
 document.querySelector("#menuToggle").addEventListener("click", () => {
@@ -1724,7 +1886,11 @@ document.querySelector("#sourceForm").addEventListener("submit", async (event) =
 document.querySelector("#feedbackForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
-  const formData = Object.fromEntries(new FormData(form).entries());
+  const formData = {
+    ...Object.fromEntries(new FormData(form).entries()),
+    createdBy: state.ssoUserName || state.user?.username || sessionStorage.getItem("yiminSsoUserName") || "",
+    pageUrl: window.location.href,
+  };
 
   if (window.location.protocol !== "file:") {
     try {
@@ -1739,7 +1905,7 @@ document.querySelector("#feedbackForm").addEventListener("submit", async (event)
       }
 
       form.reset();
-      document.querySelector("#feedbackNote").textContent = "已保存到数据库。";
+      document.querySelector("#feedbackNote").textContent = "已收到，感谢您的反馈。";
       return;
     } catch (err) {
       console.error("feedback submit error:", err);

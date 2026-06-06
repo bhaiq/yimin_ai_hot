@@ -29,7 +29,7 @@ http://127.0.0.1:4173
 - 信源列表：`/api/sources`
 - DeepSeek 生成并入库的日报：`/api/daily`
 - 日报会记录引用明细，今日总结只使用近 7 天未出现过的当天新增事实
-- 信源提报与反馈入库；静态打开时回退到本地草稿
+- 信源提报与公开反馈入库；静态打开时回退到本地草稿
 - 网站源支持：通过 Firecrawl API 抓取无 RSS 的网页
 - HTML 页面抓取：通过 Jina Reader API 提取网页内容
 - 信源审核：管理员审核用户提报的信源，补充类型和国家后启用
@@ -66,7 +66,7 @@ http://127.0.0.1:4173
 - `yimin_market_feedback`：市场部对素材的采用反馈
 - `yimin_sso_login_logs`：企业微信 SSO 访问登记日志
 - `yimin_source_submissions`：用户提报的信源（status: pending/accepted/rejected）
-- `yimin_feedback`：前台反馈
+- `yimin_feedback`：前台公开反馈，记录反馈类型、页面、优先级、联系方式、反馈人和处理状态
 
 ## 数据来源
 

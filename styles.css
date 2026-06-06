@@ -1212,6 +1212,21 @@ img {
   padding: 24px;
 }
 
+.form-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.form-grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.feedback-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .source-health {
   margin-top: 18px;
   border: 1px solid var(--line);
@@ -1367,6 +1382,99 @@ img {
   border-radius: 8px;
   background: var(--panel);
   margin-bottom: 12px;
+}
+
+.feedback-review-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.feedback-review-list {
+  display: grid;
+  gap: 12px;
+}
+
+.feedback-card {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.feedback-card.new {
+  border-color: rgba(216, 157, 72, 0.46);
+}
+
+.feedback-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.feedback-card-head strong,
+.feedback-card-head span {
+  display: block;
+}
+
+.feedback-card-head span,
+.feedback-meta {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.feedback-status {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.feedback-status.new {
+  background: rgba(216, 157, 72, 0.18);
+  color: var(--accent-strong);
+}
+
+.feedback-status.resolved {
+  background: rgba(127, 200, 169, 0.18);
+  color: #9be0bf;
+}
+
+.feedback-message {
+  margin: 14px 0;
+  color: var(--text);
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.feedback-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.feedback-review-actions {
+  display: grid;
+  grid-template-columns: 140px minmax(180px, 1fr) auto;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.feedback-review-actions select,
+.feedback-review-actions input {
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #12110f;
+  color: var(--text);
 }
 
 .sso-report {
@@ -1808,4 +1916,15 @@ img {
   margin: 0 0 20px;
   font-size: 20px;
   color: var(--text);
+}
+
+@media (max-width: 680px) {
+  .form-grid.two,
+  .feedback-review-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .feedback-card-head {
+    display: grid;
+  }
 }
