@@ -15,6 +15,10 @@ const requestTimeoutMs = Number(process.env.FEED_TIMEOUT_MS || 9000);
 const maxItemsPerSource = Number(process.env.MAX_ITEMS_PER_SOURCE || 16);
 const maxTotalItems = Number(process.env.MAX_TOTAL_ITEMS || 80);
 const dailyCandidateLimit = Number(process.env.DAILY_CANDIDATE_LIMIT || Math.max(maxTotalItems * 8, 600));
+const dailyRecentLookbackHoursValue = Number(process.env.DAILY_RECENT_LOOKBACK_HOURS || 48);
+const dailyRecentLookbackHours = Number.isFinite(dailyRecentLookbackHoursValue)
+  ? Math.max(24, dailyRecentLookbackHoursValue)
+  : 48;
 const dailyDefaultWindow = ["calendar", "last24h"].includes(process.env.DAILY_DEFAULT_WINDOW)
   ? process.env.DAILY_DEFAULT_WINDOW
   : "last24h";
@@ -305,6 +309,7 @@ async function initDb() {
           enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用（1=启用 0=禁用）',
           last_fetched_at DATETIME NULL COMMENT '最后一次抓取时间',
           last_fetch_error TEXT NULL COMMENT '最后一次抓取错误信息',
+          daily_baseline_at DATETIME NULL COMMENT '日报基线抓取完成时间',
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
           UNIQUE KEY uk_sources_url (url(768)),
@@ -327,11 +332,14 @@ async function initDb() {
           impact VARCHAR(40) NOT NULL DEFAULT '中影响' COMMENT '影响力等级（高影响/中影响/低影响）',
           published_at DATETIME NULL COMMENT '文章发布时间',
           fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '抓取入库时间',
+          daily_excluded TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否排除出日报候选',
+          daily_excluded_reason VARCHAR(160) NULL COMMENT '排除出日报候选的原因',
           raw_json JSON NULL COMMENT '原始 RSS 条目 JSON 数据',
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
           UNIQUE KEY uk_articles_hash (dedupe_hash),
           INDEX idx_articles_published (published_at),
+          INDEX idx_articles_daily_candidate (daily_excluded, published_at, fetched_at),
           INDEX idx_articles_heat (heat),
           INDEX idx_articles_country (country),
           CONSTRAINT fk_articles_source FOREIGN KEY (source_id) REFERENCES yimin_sources(id) ON DELETE CASCADE
@@ -548,6 +556,65 @@ async function initDb() {
           ALTER TABLE yimin_sources
           ADD COLUMN type VARCHAR(20) NOT NULL DEFAULT 'rss' COMMENT '来源类型（rss/twitter/html/json/website）'
           AFTER priority;
+        `);
+      }
+
+      const sourceColumns = await mysqlRun(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+          AND TABLE_NAME = 'yimin_sources'
+          AND COLUMN_NAME IN ('daily_baseline_at');
+      `);
+      if (!sourceColumns.includes("daily_baseline_at")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_sources
+          ADD COLUMN daily_baseline_at DATETIME NULL COMMENT '日报基线抓取完成时间'
+          AFTER last_fetch_error;
+        `);
+      }
+
+      await mysqlExec(`
+        UPDATE yimin_sources s
+        SET daily_baseline_at = COALESCE(s.last_fetched_at, s.updated_at)
+        WHERE s.daily_baseline_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM yimin_articles a
+            WHERE a.source_id = s.id
+            LIMIT 1
+          );
+      `);
+
+      const articleColumns = await mysqlRun(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+          AND TABLE_NAME = 'yimin_articles'
+          AND COLUMN_NAME IN ('daily_excluded', 'daily_excluded_reason');
+      `);
+      if (!articleColumns.includes("daily_excluded")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_articles
+          ADD COLUMN daily_excluded TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否排除出日报候选'
+          AFTER fetched_at;
+        `);
+      }
+      if (!articleColumns.includes("daily_excluded_reason")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_articles
+          ADD COLUMN daily_excluded_reason VARCHAR(160) NULL COMMENT '排除出日报候选的原因'
+          AFTER daily_excluded;
+        `);
+      }
+
+      const articleDailyIndex = await mysqlRun(`
+        SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+          AND TABLE_NAME = 'yimin_articles'
+          AND INDEX_NAME = 'idx_articles_daily_candidate';
+      `);
+      if (!articleDailyIndex.includes("idx_articles_daily_candidate")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_articles
+          ADD INDEX idx_articles_daily_candidate (daily_excluded, published_at, fetched_at);
         `);
       }
 
@@ -793,6 +860,26 @@ async function updateSourceFetchStatus(sourceId, error = null) {
   `);
 }
 
+async function isSourceDailyBaselinePending(sourceId) {
+  const row = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'dailyBaselineAt', IF(daily_baseline_at IS NULL, NULL, DATE_FORMAT(daily_baseline_at, '%Y-%m-%dT%H:%i:%s+08:00'))
+    )
+    FROM yimin_sources
+    WHERE id = ${sqlNumber(sourceId)}
+    LIMIT 1;
+  `);
+  return !row?.dailyBaselineAt;
+}
+
+async function markSourceDailyBaselineCompleted(sourceId) {
+  await mysqlExec(`
+    UPDATE yimin_sources
+    SET daily_baseline_at = COALESCE(daily_baseline_at, CURRENT_TIMESTAMP)
+    WHERE id = ${sqlNumber(sourceId)};
+  `);
+}
+
 async function createFetchRun(sourceCount) {
   const row = await mysqlJson(`
     INSERT INTO yimin_fetch_runs (source_count)
@@ -886,14 +973,20 @@ async function getLatestFetchRun() {
   return normalizeFetchRun(run);
 }
 
-async function upsertArticle(item, sourceId) {
+function hasValidPublishedAt(item) {
+  const date = item?.publishedAt ? new Date(item.publishedAt) : null;
+  return Boolean(date && !Number.isNaN(date.getTime()));
+}
+
+async function upsertArticle(item, sourceId, { dailyExcluded = false, dailyExcludedReason = null } = {}) {
   const rawJson = JSON.stringify(item);
   const tagsJson = JSON.stringify(item.tags || []);
 
   await mysqlExec(`
     INSERT INTO yimin_articles (
       source_id, dedupe_hash, title, summary, url, country, category,
-      tags_json, image, heat, impact, published_at, raw_json
+      tags_json, image, heat, impact, published_at,
+      daily_excluded, daily_excluded_reason, raw_json
     )
     VALUES (
       ${sqlNumber(sourceId)},
@@ -908,6 +1001,8 @@ async function upsertArticle(item, sourceId) {
       ${sqlNumber(item.heat, 60)},
       ${sqlString(item.impact)},
       ${sqlDate(item.publishedAt)},
+      ${dailyExcluded ? 1 : 0},
+      ${sqlString(dailyExcludedReason)},
       CAST(${sqlString(rawJson)} AS JSON)
     )
     ON DUPLICATE KEY UPDATE
@@ -922,6 +1017,16 @@ async function upsertArticle(item, sourceId) {
       heat = VALUES(heat),
       impact = VALUES(impact),
       published_at = COALESCE(published_at, VALUES(published_at)),
+      daily_excluded = CASE
+        WHEN VALUES(published_at) IS NOT NULL THEN VALUES(daily_excluded)
+        WHEN daily_excluded = 1 THEN daily_excluded
+        ELSE VALUES(daily_excluded)
+      END,
+      daily_excluded_reason = CASE
+        WHEN VALUES(published_at) IS NOT NULL THEN VALUES(daily_excluded_reason)
+        WHEN daily_excluded = 1 THEN daily_excluded_reason
+        ELSE VALUES(daily_excluded_reason)
+      END,
       raw_json = VALUES(raw_json),
       updated_at = CURRENT_TIMESTAMP;
   `);
@@ -1041,7 +1146,8 @@ async function listDailyCandidateArticlesFromDb(window, limit = dailyCandidateLi
         SELECT a.*, s.name AS source_name, COALESCE(a.published_at, a.fetched_at) AS article_at
         FROM yimin_articles a
         JOIN yimin_sources s ON s.id = a.source_id
-        WHERE COALESCE(a.published_at, a.fetched_at) >= ${sqlDate(window.recentStart)}
+        WHERE a.daily_excluded = 0
+          AND COALESCE(a.published_at, a.fetched_at) >= ${sqlDate(window.recentStart)}
           AND COALESCE(a.published_at, a.fetched_at) < ${sqlDate(window.end)}
         ORDER BY a.heat DESC, article_at DESC, a.id DESC
         LIMIT ${sqlNumber(limit, dailyCandidateLimit)}
@@ -2903,6 +3009,8 @@ function parseJson(jsonText, source) {
 async function fetchSource(source) {
   const sourceType = source.type || "rss";
   const sourceId = await upsertSource(source, { enabled: source.enabled !== false });
+  const dailyBaselinePending = await isSourceDailyBaselinePending(sourceId);
+  const requirePublishedAtForDaily = source.requirePublishedAtForDaily === true;
 
   try {
     let fetchUrl = source.url;
@@ -2997,9 +3105,21 @@ async function fetchSource(source) {
     }
 
     for (const item of items) {
-      await upsertArticle(item, sourceId);
+      const hasPublishedAt = hasValidPublishedAt(item);
+      const dailyExcluded = !hasPublishedAt && (dailyBaselinePending || requirePublishedAtForDaily);
+      await upsertArticle(item, sourceId, {
+        dailyExcluded,
+        dailyExcludedReason: dailyExcluded
+          ? requirePublishedAtForDaily
+            ? "source_requires_published_at"
+            : "source_first_fetch_no_published_at"
+          : null,
+      });
     }
     await updateSourceFetchStatus(sourceId, null);
+    if (items.length > 0) {
+      await markSourceDailyBaselineCompleted(sourceId);
+    }
 
     return {
       source,
@@ -3379,12 +3499,19 @@ function getDailyWindowLabel(window) {
   return `${formatShanghaiDateTime(window.start)} - ${formatShanghaiDateTime(window.end)}`;
 }
 
+function getDailyRecentLookbackLabel() {
+  if (dailyRecentLookbackHours % 24 === 0) {
+    return `近 ${dailyRecentLookbackHours / 24} 天内`;
+  }
+  return `近 ${dailyRecentLookbackHours} 小时内`;
+}
+
 function getDailyDateWindow(date, mode = "calendar", now = new Date()) {
   const normalizedMode = normalizeDailyWindowMode(mode, "calendar");
   if (normalizedMode === "last24h") {
     const end = now;
     const start = new Date(end.getTime() - 24 * 36e5);
-    const recentStart = new Date(end.getTime() - 72 * 36e5);
+    const recentStart = new Date(end.getTime() - dailyRecentLookbackHours * 36e5);
     return {
       mode: "last24h",
       start,
@@ -3396,7 +3523,7 @@ function getDailyDateWindow(date, mode = "calendar", now = new Date()) {
 
   const start = new Date(`${date}T00:00:00+08:00`);
   const end = new Date(start.getTime() + 24 * 36e5);
-  const recentStart = new Date(end.getTime() - 72 * 36e5);
+  const recentStart = new Date(end.getTime() - dailyRecentLookbackHours * 36e5);
   return {
     mode: "calendar",
     start,
@@ -3417,7 +3544,7 @@ function getDailyWindowModeFromSearch(searchParams) {
 function getDailyItemScore(item, articleDate, window) {
   const heat = Number(item.heat || 0);
   const ageHours = articleDate ? Math.max(0, (window.end.getTime() - articleDate.getTime()) / 36e5) : 999;
-  const freshness = ageHours <= 24 ? 35 : ageHours <= 72 ? 18 : 0;
+  const freshness = ageHours <= 24 ? 35 : ageHours <= dailyRecentLookbackHours ? 18 : 0;
   const official = /官方|uscis|ircc|gov|government|department|home office/i.test(item.source || "") ? 12 : 0;
   const highIntent = /eb-?5|niw|eb-?1|visa bulletin|priority date|express entry|pnp|skilled worker|排期|费用|新规|配额|审理|工签/.test(
     `${item.title} ${item.summary} ${(item.tags || []).join(" ")}`.toLowerCase(),
@@ -3598,12 +3725,13 @@ function buildDailyPrompt(date, context) {
 日期：${date}
 统计窗口：${context.window?.label || date}
 窗口模式：${context.window?.mode === "last24h" ? "过去 24 小时早报" : "自然日完整日报"}
+日报可选时间范围：${getDailyWindowLabel({ start: context.window.recentStart, end: context.window.end })}
 候选资讯总数：${context.rawItems.length}
 
 【本期新增：只能这些内容进入“今日总结”】
 ${formatDailyPromptItems(context.todayNew)}
 
-【重要变化：近 72 小时内，近 7 天日报未出现，但不是本期新增】
+【重要变化：${getDailyRecentLookbackLabel()}，近 7 天日报未出现，但不是本期新增】
 ${formatDailyPromptItems(context.important)}
 
 【延续关注：可作为跟进，不得包装为本期新增】
@@ -3618,6 +3746,10 @@ ${formatDailyPromptItems(context.repeated)}
 - 无法确认是否相关、或可能间接影响移民客户/项目判断的资讯，可以保留。
 - 不要输出“已剔除内容”列表，也不要解释剔除过程。
 
+发布时间过滤：
+- 只使用“日报可选时间范围”内的资讯；发布时间早于该范围的内容不得出现在任何章节。
+- 如果没有明确发布时间，但抓取时间在“日报可选时间范围”内，可以保留。
+
 请严格使用 Markdown，包含以下六节：
 ## 一、今日总结
 只总结【本期新增】里的事实。若本期新增为空，必须明确写“本期暂无可确认的重大新增事实”，不要复述延续关注或不建议重复内容。
@@ -3626,7 +3758,7 @@ ${formatDailyPromptItems(context.repeated)}
 列出本期新增事实，明确国家、项目、影响对象，并保留原文链接。
 
 ## 三、重要变化
-列出不是本期新增、但近 72 小时内且近 7 天未写过的变化。
+列出不是本期新增、但在${getDailyRecentLookbackLabel()}且近 7 天未写过的变化。
 
 ## 四、延续关注
 列出需要跟进但不能当作今日新闻的内容，说明为什么不能重复包装。
@@ -3641,6 +3773,7 @@ ${formatDailyPromptItems(context.repeated)}
 - 不要把【延续关注】或【不建议重复】写进“今日总结”。
 - 不要编造政策、日期、费用、影响范围。
 - 明显与移民类内容不相关的信息必须剔除；无法确认是否相关的信息可以保留。
+- 发布时间早于“日报可选时间范围”的信息必须剔除；无法确认发布时间但抓取时间较新的信息可以保留。
 - 如果某条信息近 7 天已经出现，只能放在“延续关注”或“不建议重复”。
 - 同一章节内如使用数字编号，必须连续递增，不要每条都写成”1.”。
 - 所有输出必须使用简体中文，遇到英文、希腊文或其他语言的标题和摘要必须翻译为中文，不得保留原文。`;
