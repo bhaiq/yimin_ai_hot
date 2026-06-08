@@ -1825,6 +1825,36 @@ async function executePushTask(taskId) {
   return { taskId, sentCount, failedCount, status: finalStatus };
 }
 
+async function markPushTaskFailed(taskId, error) {
+  const message = error instanceof Error ? error.message : String(error);
+  await mysqlExec(`
+    UPDATE yimin_push_tasks
+    SET status = 'failed',
+        sent_count = (
+          SELECT COUNT(*) FROM yimin_push_logs
+          WHERE task_id = ${sqlNumber(taskId)} AND send_status = 'sent'
+        ),
+        failed_count = (
+          SELECT COUNT(*) FROM yimin_push_logs
+          WHERE task_id = ${sqlNumber(taskId)} AND send_status = 'failed'
+        ),
+        error = ${sqlString(message.slice(0, 1000))},
+        finished_at = CURRENT_TIMESTAMP
+    WHERE id = ${sqlNumber(taskId)}
+  `);
+}
+
+function startPushTaskInBackground(taskId) {
+  setTimeout(() => {
+    executePushTask(taskId).catch((error) => {
+      console.error(`Push task ${taskId} failed:`, error);
+      markPushTaskFailed(taskId, error).catch((markError) => {
+        console.error(`Failed to mark push task ${taskId} as failed:`, markError);
+      });
+    });
+  }, 0);
+}
+
 async function recordPushVisit(token, ip) {
   await initDb();
 
@@ -1885,6 +1915,7 @@ async function listPushTasks(limit = 30) {
           'sentCount', sent_count,
           'failedCount', failed_count,
           'visitedCount', visited_count,
+          'error', error,
           'startedAt', DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%s+08:00'),
           'finishedAt', DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%s+08:00')
         )
@@ -1930,7 +1961,6 @@ async function retryFailedPushes(taskId) {
     UPDATE yimin_push_logs SET send_status = 'pending', error = NULL
     WHERE task_id = ${sqlNumber(taskId)} AND send_status = 'failed'
   `);
-  return executePushTask(taskId);
 }
 
 async function recordSsoVisit({ encParam, route, pageUrl, ip, userAgent }) {
@@ -4525,9 +4555,15 @@ try {
       }
 
       const taskId = await createPushTask(dailyDate, users);
-      const result = await executePushTask(taskId);
+      startPushTaskInBackground(taskId);
 
-      sendJson(res, 200, { ok: true, ...result });
+      sendJson(res, 202, {
+        ok: true,
+        taskId,
+        status: "queued",
+        totalCount: users.length,
+        message: "日报推送任务已创建，正在后台发送。",
+      });
       return;
     }
 
@@ -4538,8 +4574,14 @@ try {
         sendJson(res, 400, { ok: false, error: "taskId required" });
         return;
       }
-      const result = await retryFailedPushes(taskId);
-      sendJson(res, 200, { ok: true, ...result });
+      await retryFailedPushes(taskId);
+      startPushTaskInBackground(taskId);
+      sendJson(res, 202, {
+        ok: true,
+        taskId,
+        status: "queued",
+        message: "失败推送已重新排队，正在后台重试。",
+      });
       return;
     }
 

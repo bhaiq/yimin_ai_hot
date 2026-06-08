@@ -1028,7 +1028,7 @@ function renderSsoStats() {
                 <tr>
                   <td>${escapeHtml(task.pushDate || "-")}</td>
                   <td>${escapeHtml(task.dailyDate || "-")}</td>
-                  <td>${escapeHtml(task.status || "-")}</td>
+                  <td title="${escapeAttr(task.error || "")}">${escapeHtml(task.status || "-")}</td>
                   <td>${escapeHtml(task.totalCount || 0)}</td>
                   <td>${escapeHtml(task.sentCount || 0)}</td>
                   <td>${escapeHtml(task.failedCount || 0)}</td>
