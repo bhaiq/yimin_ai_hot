@@ -2527,8 +2527,16 @@ function decodeEntities(value) {
     .replace(/&#x([a-f0-9]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)));
 }
 
+function sanitizeTextArtifacts(value) {
+  return String(value || "")
+    .replace(/雇主担(?:�{1,}|&amp;#65533;|&#65533;|\\ufffd)+/g, "雇主担保")
+    .replace(/担(?:�{1,}|&amp;#65533;|&#65533;|\\ufffd)+/g, "担保")
+    .replace(/(?:�|&amp;#65533;|&#65533;|\\ufffd)+/g, "")
+    .trim();
+}
+
 function cleanText(value) {
-  return decodeEntities(
+  return sanitizeTextArtifacts(decodeEntities(
     String(value || "")
       .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
       .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
@@ -2536,15 +2544,16 @@ function cleanText(value) {
       .replace(/<[^>]+>/g, " ")
       .replace(/\s+/g, " ")
       .trim(),
-  );
+  ));
 }
 
 function truncate(value, maxLength = 150) {
-  if (!value) {
+  const text = sanitizeTextArtifacts(value);
+  if (!text) {
     return "";
   }
 
-  return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value;
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
 
 function normalizeDate(value) {
@@ -2905,8 +2914,8 @@ async function fetchSource(source) {
       const id = createHash("sha1").update(`${result.url}|${result.title}`).digest("hex").slice(0, 12);
       items = [{
         id,
-        title: result.title,
-        summary: result.summary,
+        title: cleanText(result.title),
+        summary: truncate(result.summary, 500),
         source: source.name,
         country: source.country,
         category: source.category,
@@ -3434,21 +3443,31 @@ async function buildDailyContext(date, { windowMode = "calendar" } = {}) {
 
   const usage = await getRecentDailyUsage(date);
   const enriched = items.map((item) => {
+    const sanitizedItem = {
+      ...item,
+      title: sanitizeTextArtifacts(item.title),
+      summary: sanitizeTextArtifacts(item.summary),
+      source: sanitizeTextArtifacts(item.source),
+      country: sanitizeTextArtifacts(item.country),
+      category: sanitizeTextArtifacts(item.category),
+      impact: sanitizeTextArtifacts(item.impact),
+      tags: (item.tags || []).map((tag) => sanitizeTextArtifacts(tag)).filter(Boolean),
+    };
     const articleDate = getDailyArticleDate(item);
-    const topicKey = getDailyTopicKey(item);
+    const topicKey = getDailyTopicKey(sanitizedItem);
     const recentUsage = usage.byHash.get(item.id) || usage.byTopic.get(topicKey) || null;
     const ageHours = articleDate ? Math.max(0, (window.end.getTime() - articleDate.getTime()) / 36e5) : 999;
     const isToday = articleDate ? articleDate >= window.start && articleDate < window.end : false;
     const isRecent = articleDate ? articleDate >= window.recentStart && articleDate < window.end : false;
     return {
-      ...item,
+      ...sanitizedItem,
       articleDate: articleDate ? formatShanghaiDateTimeISO(articleDate) : null,
       ageHours,
       isToday,
       isRecent,
       topicKey,
       recentUsage,
-      dailyScore: getDailyItemScore(item, articleDate, window),
+      dailyScore: getDailyItemScore(sanitizedItem, articleDate, window),
     };
   });
 
@@ -3486,21 +3505,22 @@ function formatDailyPromptItems(items) {
   return items
     .map(
       (item, index) =>
-        `${index + 1}. 标题：${item.title}
-来源：${item.source}
-国家：${item.country}
-主题：${item.category}
+        `${index + 1}. 标题：${sanitizeTextArtifacts(item.title)}
+来源：${sanitizeTextArtifacts(item.source)}
+国家：${sanitizeTextArtifacts(item.country)}
+主题：${sanitizeTextArtifacts(item.category)}
 热度：${item.heat}
 时间：${item.articleDate || item.publishedAt || item.fetchedAt || "未知"}
 链接：${item.url || ""}
-摘要：${item.summary}
+摘要：${sanitizeTextArtifacts(item.summary)}
 ${item.recentUsage ? `历史状态：近 7 天已在 ${item.recentUsage.reportDate} 的 ${item.recentUsage.section} 中出现，不能写入今日总结。` : "历史状态：近 7 天未在日报中出现。"}`,
     )
     .join("\n\n");
 }
 
 function dailyItemLink(item) {
-  return item.url ? `[${item.title}](${item.url})` : item.title;
+  const title = sanitizeTextArtifacts(item.title);
+  return item.url ? `[${title}](${item.url})` : title;
 }
 
 function buildFallbackDailyMarkdown(date, context, reason = "") {
@@ -3562,6 +3582,12 @@ ${formatDailyPromptItems(context.continuing)}
 【不建议重复：过旧或近 7 天已出现】
 ${formatDailyPromptItems(context.repeated)}
 
+内容相关性过滤：
+- 只保留与移民、签证、永久居留、国籍、边境/入境、工签/雇主担保、留学签证、投资移民、难民/庇护、移民机构政策、移民相关就业或教育合规直接相关的资讯。
+- 如果某条资讯明显只是宏观政治、普通旅游、城市生活、房产、商业新闻、体育娱乐、科技产品、灾害事故等，且标题和摘要都看不出与移民客户、移民项目或签证政策有关，必须剔除，不得出现在任何章节。
+- 无法确认是否相关、或可能间接影响移民客户/项目判断的资讯，可以保留。
+- 不要输出“已剔除内容”列表，也不要解释剔除过程。
+
 请严格使用 Markdown，包含以下六节：
 ## 一、今日总结
 只总结【本期新增】里的事实。若本期新增为空，必须明确写“本期暂无可确认的重大新增事实”，不要复述延续关注或不建议重复内容。
@@ -3584,6 +3610,7 @@ ${formatDailyPromptItems(context.repeated)}
 硬性要求：
 - 不要把【延续关注】或【不建议重复】写进“今日总结”。
 - 不要编造政策、日期、费用、影响范围。
+- 明显与移民类内容不相关的信息必须剔除；无法确认是否相关的信息可以保留。
 - 如果某条信息近 7 天已经出现，只能放在“延续关注”或“不建议重复”。
 - 同一章节内如使用数字编号，必须连续递增，不要每条都写成”1.”。
 - 所有输出必须使用简体中文，遇到英文、希腊文或其他语言的标题和摘要必须翻译为中文，不得保留原文。`;
@@ -3601,19 +3628,19 @@ function getDailyContextItems(context) {
 function getDailyArticleSnapshot(item) {
   return {
     id: item.id,
-    title: item.title,
-    summary: item.summary,
-    source: item.source,
-    country: item.country,
-    category: item.category,
+    title: sanitizeTextArtifacts(item.title),
+    summary: sanitizeTextArtifacts(item.summary),
+    source: sanitizeTextArtifacts(item.source),
+    country: sanitizeTextArtifacts(item.country),
+    category: sanitizeTextArtifacts(item.category),
     time: item.time,
     publishedAt: item.publishedAt,
     fetchedAt: item.fetchedAt,
     articleDate: item.articleDate,
     url: item.url,
     heat: item.heat,
-    impact: item.impact,
-    tags: item.tags || [],
+    impact: sanitizeTextArtifacts(item.impact),
+    tags: (item.tags || []).map((tag) => sanitizeTextArtifacts(tag)).filter(Boolean),
     image: item.image || "",
     recentUsage: item.recentUsage || null,
   };
@@ -3696,7 +3723,7 @@ async function callDeepSeek(prompt) {
     "",
   );
 
-  return content;
+  return sanitizeTextArtifacts(content);
 }
 
 function attachDailyWindowLabel(report) {
@@ -3738,6 +3765,7 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
 
     if (existing) {
       if (existing.contentMarkdown) {
+        existing.contentMarkdown = sanitizeTextArtifacts(existing.contentMarkdown);
         existing.html = markdownToHtml(existing.contentMarkdown);
       }
       return attachDailyWindowLabel(existing);
@@ -3759,6 +3787,7 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
       error instanceof Error ? error.message : String(error),
     );
   }
+  markdown = sanitizeTextArtifacts(markdown);
 
   const title = dailyContext.window.mode === "last24h" ? `移民热点早报（${date}）` : `移民热点日报（${date}）`;
   const html = markdownToHtml(markdown);
