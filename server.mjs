@@ -1658,6 +1658,7 @@ const wxWorkConfig = {
   secret: process.env.WX_WORK_SECRET || "",
   pushDeptIds: (process.env.WX_WORK_PUSH_DEPT_IDS || "").split(",").filter(Boolean).map(Number),
   pushTagIds: (process.env.WX_WORK_PUSH_TAG_IDS || "").split(",").filter(Boolean).map(Number),
+  excludeDeptIds: (process.env.WX_WORK_PUSH_EXCLUDE_DEPT_IDS || "").split(",").filter(Boolean).map(Number),
   openDebug: ["1", "true", "yes"].includes(String(process.env.WX_WORK_OPEN_DEBUG || "").toLowerCase()),
 };
 
@@ -1785,6 +1786,20 @@ async function getWxAllPushUsers(accessToken) {
       }
     }
   }
+
+  // 排除指定部门（递归子部门）
+  const excludeIds = wxWorkConfig.excludeDeptIds;
+  if (excludeIds.length > 0) {
+    const excludedSet = new Set();
+    for (const deptId of excludeIds) {
+      const deptUsers = await getWxDepartmentUsers(accessToken, deptId);
+      for (const u of deptUsers) {
+        if (u.userid) excludedSet.add(u.userid);
+      }
+    }
+    return users.filter(u => !excludedSet.has(u.userid));
+  }
+
   return users;
 }
 
@@ -4683,7 +4698,7 @@ try {
       const users = await getWxAllPushUsers(accessToken);
 
       if (users.length === 0) {
-        sendJson(res, 400, { ok: false, error: "未找到推送目标用户，请检查 WX_WORK_PUSH_DEPT_IDS" });
+        sendJson(res, 400, { ok: false, error: "未找到推送目标用户，请检查 WX_WORK_PUSH_DEPT_IDS / WX_WORK_PUSH_EXCLUDE_DEPT_IDS" });
         return;
       }
 
