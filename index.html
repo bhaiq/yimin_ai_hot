@@ -42,6 +42,10 @@
             <span class="nav-icon">✎</span>
             <span>反馈建议</span>
           </button>
+          <button class="nav-item" data-view="changelog" type="button">
+            <span class="nav-icon">↻</span>
+            <span>更新日志</span>
+          </button>
         </nav>
 
         <div class="sidebar-section" data-auth>
@@ -70,10 +74,6 @@
             <button class="nav-item" data-view="about" type="button">
               <span class="nav-icon">?</span>
               <span>关于本站</span>
-            </button>
-            <button class="nav-item" data-view="changelog" type="button">
-              <span class="nav-icon">↻</span>
-              <span>更新日志</span>
             </button>
           </nav>
         </div>
@@ -282,26 +282,10 @@
           <div class="section-heading">
             <div>
               <p class="eyebrow">更新日志</p>
-              <h1 id="changeTitle">V2 原型记录</h1>
+              <h1 id="changeTitle">更新记录</h1>
             </div>
           </div>
-          <div class="timeline">
-            <article>
-              <time>2026.05.23</time>
-              <h2>实时 RSS 抓取</h2>
-              <p>新增本地 Node 服务、实时信源 API、前端自动刷新和信源健康状态。</p>
-            </article>
-            <article>
-              <time>2026.05.23</time>
-              <h2>第二版信息流原型</h2>
-              <p>新增热点流、全部动态、日报、政策雷达、信源提报和反馈入口。</p>
-            </article>
-            <article>
-              <time>第一版沉淀</time>
-              <h2>日报与快照框架</h2>
-              <p>保留项目化、多信源和 AI 摘要的产品方向，作为后续接入后端的基础。</p>
-            </article>
-          </div>
+          <div class="timeline" id="changelog-timeline"></div>
         </section>
 
         <section class="view utility-view" id="view-feedback" aria-labelledby="feedbackTitle">

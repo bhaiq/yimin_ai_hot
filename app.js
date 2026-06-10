@@ -100,7 +100,7 @@ const state = {
   user: null,
 };
 
-const authViews = ["market", "sources", "review", "sso-stats", "feedback-review", "about", "changelog"];
+const authViews = ["market", "sources", "review", "sso-stats", "feedback-review", "about"];
 const views = ["home", "all", "daily", "market", "radar", "feedback", "login", "sources", "review", "sso-stats", "feedback-review", "about", "changelog"];
 
 const filterStrip = document.querySelector("#filterStrip");
@@ -1439,6 +1439,34 @@ async function loadDailyHistory() {
   } catch { /* ignore */ }
 }
 
+async function loadChangelog() {
+  const container = document.getElementById("changelog-timeline");
+  if (!container || container.children.length > 0) return;
+  if (window.location.protocol === "file:") {
+    container.innerHTML = '<article><time>—</time><h2>离线模式</h2><p>需要连接服务器查看更新日志。</p></article>';
+    return;
+  }
+  try {
+    const res = await fetch("/api/changelog");
+    const data = await res.json();
+    if (!data.ok || !data.items || data.items.length === 0) {
+      container.innerHTML = '<article><time>—</time><h2>暂无记录</h2><p>暂无更新日志。</p></article>';
+      return;
+    }
+    let html = "";
+    for (const item of data.items) {
+      html += `<article>
+        <time>${escapeHtml(item.log_date)}</time>
+        <h2>${escapeHtml(item.title)}</h2>
+        ${item.description ? `<p>${escapeHtml(item.description)}</p>` : ""}
+      </article>`;
+    }
+    container.innerHTML = html;
+  } catch {
+    container.innerHTML = '<article><time>—</time><h2>加载失败</h2><p>无法获取更新日志。</p></article>';
+  }
+}
+
 async function loadSsoStats() {
   if (window.location.protocol === "file:") return;
 
@@ -1593,6 +1621,9 @@ function setView(routeValue) {
   }
   if (viewName === "feedback-review" && !state.feedbackLoading) {
     loadFeedbackReview();
+  }
+  if (viewName === "changelog") {
+    loadChangelog();
   }
 }
 

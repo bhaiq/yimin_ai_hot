@@ -477,6 +477,15 @@ async function initDb() {
           INDEX idx_yimin_market_feedback_action (action)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='市场素材反馈表';
 
+        CREATE TABLE IF NOT EXISTS yimin_changelog (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          log_date VARCHAR(40) NOT NULL COMMENT '显示日期',
+          title VARCHAR(200) NOT NULL COMMENT '更新标题',
+          description TEXT NULL COMMENT '更新描述',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          INDEX idx_yimin_changelog_created (created_at DESC)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='更新日志表';
+
         CREATE TABLE IF NOT EXISTS yimin_push_tasks (
           id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
           push_date DATE NOT NULL COMMENT '推送日期',
@@ -4184,6 +4193,20 @@ const server = createServer(async (req, res) => {
         database: dbConfig.database,
         time: formatShanghaiDateTimeISO(new Date()),
       });
+      return;
+    }
+
+    if (url.pathname === "/api/changelog") {
+      await initDb();
+      try {
+        const rows = await mysqlJson(
+          `SELECT JSON_ARRAYAGG(JSON_OBJECT('id', id, 'log_date', log_date, 'title', title, 'description', description))
+           FROM (SELECT * FROM yimin_changelog ORDER BY created_at DESC LIMIT 100) t`
+        );
+        sendJson(res, 200, { ok: true, items: rows || [] });
+      } catch (e) {
+        sendJson(res, 200, { ok: true, items: [] });
+      }
       return;
     }
 
