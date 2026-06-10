@@ -34,8 +34,10 @@ http://127.0.0.1:4173
 - HTML 页面抓取：通过 Jina Reader API 提取网页内容
 - 信源审核：管理员审核用户提报的信源，补充类型和国家后启用
 - 用户登录：管理员账号登录，审核等敏感操作需认证
-- 企业微信 SSO 访问登记：识别 `#daily?sso_auth_code=...`，解密登录人姓名并生成访问统计
+- 企业微信 SSO 访问登记：识别 `#daily?sso_auth_code=...&sso_user_id=...`，解密登录人姓名和 UserID（拼音名）并生成访问统计
 - 日报链接点击统计：通过 `/d/:token` 打开的日报会记录首次点击人、时间和 IP，并在访问统计中展示
+- 企业微信日报推送：后台异步发送 textcard 消息，支持重试失败推送，推送状态和错误信息在管理后台可查看
+- 日报候选过滤：无发布日期的首次抓取文章标记为 `daily_excluded`，不进入日报候选；回看时间窗口可配置
 
 ## 市场素材
 
@@ -67,6 +69,10 @@ http://127.0.0.1:4173
 - `yimin_sso_login_logs`：企业微信 SSO 访问登记日志
 - `yimin_source_submissions`：用户提报的信源（status: pending/accepted/rejected）
 - `yimin_feedback`：前台公开反馈，记录反馈类型、页面、优先级、联系方式、反馈人和处理状态
+- `yimin_push_tasks`：企业微信日报推送任务
+- `yimin_push_logs`：推送发送记录（含用户、token、发送状态）
+- `yimin_push_open_events`：推送中转页 SDK 调试事件（需 `WX_WORK_OPEN_DEBUG=1`）
+- `yimin_wx_token_cache`：企业微信 access_token 缓存
 
 ## 数据来源
 
@@ -89,4 +95,4 @@ http://127.0.0.1:4173
 - ~~给后台增加信源审核开关，把 `source_submissions` 里的有效源转为启用源~~（已完成）
 - 将政策雷达从静态规则升级为基于文章主题和 AI 分类的数据库视图
 - 增加定时任务，按小时执行 `/api/news?refresh=1` 启动后台抓取；每天 7 点执行 `/api/daily?refresh=1` 生成过去 24 小时早报。若需要自然日完整日报，可调用 `/api/daily?refresh=1&window=calendar&date=YYYY-MM-DD`
-- 为 Jina Reader 配置代理支持，解决服务器网络环境连通性
+- ~~为 Jina Reader 配置代理支持，解决服务器网络环境连通性~~（待配置 `HTTPS_PROXY` 环境变量）

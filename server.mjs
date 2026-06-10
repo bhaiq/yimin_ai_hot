@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
-import { createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 
 const rootDir = resolve(".");
@@ -209,19 +209,27 @@ function base64UrlToBuffer(value) {
   return Buffer.from(padded, "base64");
 }
 
-function decryptSsoUserName(encParam) {
+function decryptSsoValue(encParam, fieldName) {
   const encrypted = base64UrlToBuffer(encParam);
   if (!encrypted.length) {
-    throw new Error("sso_auth_code is empty");
+    throw new Error(`${fieldName} is empty`);
   }
 
   const iv = createHash("sha256").update(ssoConfig.ivSeed).digest("hex").slice(0, 16);
   const decipher = createDecipheriv("aes-256-cbc", getSsoKeyBuffer(), Buffer.from(iv, "utf8"));
   const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8").trim();
   if (!decrypted) {
-    throw new Error("decrypted user name is empty");
+    throw new Error(`decrypted ${fieldName} is empty`);
   }
   return decrypted;
+}
+
+function decryptSsoUserName(encParam) {
+  return decryptSsoValue(encParam, "user name");
+}
+
+function decryptSsoUserId(encParam) {
+  return decryptSsoValue(encParam, "user id");
 }
 
 function mysqlRun(sql, { database = true, json = false } = {}) {
@@ -544,7 +552,9 @@ async function initDb() {
         CREATE TABLE IF NOT EXISTS yimin_sso_login_logs (
           id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
           user_name VARCHAR(160) NOT NULL COMMENT '企业微信登录人姓名',
+          user_id VARCHAR(128) NULL COMMENT '企业微信登录人 UserID（拼音名）',
           enc_hash CHAR(64) NOT NULL COMMENT '加密参数 SHA256，用于去重排查',
+          user_id_enc_hash CHAR(64) NULL COMMENT '加密 UserID 参数 SHA256，用于去重排查',
           route VARCHAR(120) NOT NULL DEFAULT '' COMMENT '访问的前端路由',
           page_url VARCHAR(1200) NULL COMMENT '前端完整地址',
           client_ip VARCHAR(45) NULL COMMENT '访问 IP',
@@ -552,6 +562,7 @@ async function initDb() {
           visit_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '访问时间',
           INDEX idx_sso_login_visit_at (visit_at),
           INDEX idx_sso_login_user_name (user_name),
+          INDEX idx_sso_login_user_id (user_id),
           INDEX idx_sso_login_enc_hash (enc_hash)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='企业微信 SSO 访问登记日志表';
       `);
@@ -680,6 +691,28 @@ async function initDb() {
           ALTER TABLE yimin_fetch_runs
           ADD COLUMN failed_source_count INT NOT NULL DEFAULT 0 COMMENT '失败来源数量'
           AFTER success_source_count;
+        `);
+      }
+
+      const ssoLogColumns = await mysqlRun(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+          AND TABLE_NAME = 'yimin_sso_login_logs'
+          AND COLUMN_NAME IN ('user_id', 'user_id_enc_hash');
+      `);
+      if (!ssoLogColumns.includes("user_id")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_sso_login_logs
+          ADD COLUMN user_id VARCHAR(128) NULL COMMENT '企业微信登录人 UserID（拼音名）'
+          AFTER user_name,
+          ADD INDEX idx_sso_login_user_id (user_id);
+        `);
+      }
+      if (!ssoLogColumns.includes("user_id_enc_hash")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_sso_login_logs
+          ADD COLUMN user_id_enc_hash CHAR(64) NULL COMMENT '加密 UserID 参数 SHA256，用于去重排查'
+          AFTER enc_hash;
         `);
       }
 
@@ -2103,19 +2136,27 @@ async function retryFailedPushes(taskId) {
   `);
 }
 
-async function recordSsoVisit({ encParam, route, pageUrl, ip, userAgent }) {
+async function recordSsoVisit({ encParam, encUserId, route, pageUrl, ip, userAgent }) {
   await initDb();
   const userName = decryptSsoUserName(encParam);
+  const userId = encUserId ? decryptSsoUserId(encUserId).slice(0, 128) : "";
   const encHash = createHash("sha256").update(String(encParam || "")).digest("hex");
+  const userIdEncHash = encUserId
+    ? createHash("sha256").update(String(encUserId)).digest("hex")
+    : null;
   const cleanRoute = String(route || "").slice(0, 120);
   const cleanPageUrl = String(pageUrl || "").slice(0, 1200);
   const cleanUa = String(userAgent || "").slice(0, 600);
 
   await mysqlExec(`
-    INSERT INTO yimin_sso_login_logs (user_name, enc_hash, route, page_url, client_ip, user_agent)
+    INSERT INTO yimin_sso_login_logs (
+      user_name, user_id, enc_hash, user_id_enc_hash, route, page_url, client_ip, user_agent
+    )
     VALUES (
       ${sqlString(userName)},
+      ${sqlString(userId || null)},
       ${sqlString(encHash)},
+      ${sqlString(userIdEncHash)},
       ${sqlString(cleanRoute)},
       ${sqlString(cleanPageUrl)},
       ${sqlString(ip || "")},
@@ -2123,7 +2164,7 @@ async function recordSsoVisit({ encParam, route, pageUrl, ip, userAgent }) {
     );
   `);
 
-  return { userName };
+  return { userName, userId };
 }
 
 async function getSsoStats() {
@@ -2139,9 +2180,11 @@ async function getSsoStats() {
     FROM (
       SELECT
         COUNT(*) AS total_visits,
-        COUNT(DISTINCT user_name) AS unique_users,
+        COUNT(DISTINCT COALESCE(NULLIF(user_id, ''), user_name)) AS unique_users,
         SUM(DATE(visit_at) = CURDATE()) AS today_visits,
-        COUNT(DISTINCT CASE WHEN DATE(visit_at) = CURDATE() THEN user_name END) AS today_users
+        COUNT(DISTINCT CASE
+          WHEN DATE(visit_at) = CURDATE() THEN COALESCE(NULLIF(user_id, ''), user_name)
+        END) AS today_users
       FROM yimin_sso_login_logs
     ) s;
   `)) || [];
@@ -2157,7 +2200,7 @@ async function getSsoStats() {
     FROM (
       SELECT DATE(visit_at) AS visit_day,
              COUNT(*) AS visits,
-             COUNT(DISTINCT user_name) AS users
+             COUNT(DISTINCT COALESCE(NULLIF(user_id, ''), user_name)) AS users
       FROM yimin_sso_login_logs
       WHERE visit_at >= DATE_SUB(CURDATE(), INTERVAL 13 DAY)
       GROUP BY DATE(visit_at)
@@ -2169,14 +2212,19 @@ async function getSsoStats() {
     SELECT COALESCE(JSON_ARRAYAGG(
       JSON_OBJECT(
         'userName', user_name,
+        'userId', user_id,
         'visits', visits,
         'lastVisitAt', DATE_FORMAT(last_visit_at, '%Y-%m-%d %H:%i:%s')
       )
     ), JSON_ARRAY())
     FROM (
-      SELECT user_name, COUNT(*) AS visits, MAX(visit_at) AS last_visit_at
+      SELECT
+        MAX(user_name) AS user_name,
+        MAX(NULLIF(user_id, '')) AS user_id,
+        COUNT(*) AS visits,
+        MAX(visit_at) AS last_visit_at
       FROM yimin_sso_login_logs
-      GROUP BY user_name
+      GROUP BY COALESCE(NULLIF(user_id, ''), user_name)
       ORDER BY visits DESC, last_visit_at DESC
       LIMIT 30
     ) u;
@@ -2187,6 +2235,7 @@ async function getSsoStats() {
       JSON_OBJECT(
         'id', id,
         'userName', user_name,
+        'userId', user_id,
         'route', route,
         'pageUrl', page_url,
         'clientIp', client_ip,
@@ -4073,6 +4122,46 @@ function buildFeedbackNameCookie(name) {
   return `feedback_name=${encodeURIComponent(cleanName)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 3600}`;
 }
 
+function buildSsoUserIdCookie(userId) {
+  const cleanUserId = String(userId || "").trim();
+  if (!cleanUserId) return "";
+  return `sso_user_id=${encodeURIComponent(cleanUserId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 3600}`;
+}
+
+function signSsoIdentity(userName, userId) {
+  return createHmac("sha256", getSsoKeyBuffer())
+    .update(`${String(userName || "").trim()}\n${String(userId || "").trim()}`)
+    .digest("base64url");
+}
+
+function buildSsoIdentitySignatureCookie(userName, userId) {
+  if (!userName && !userId) return "";
+  return `sso_identity_sig=${signSsoIdentity(userName, userId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 3600}`;
+}
+
+function buildIdentityCookies({ userName, userId }) {
+  return [
+    buildFeedbackNameCookie(userName),
+    buildSsoUserIdCookie(userId),
+    buildSsoIdentitySignatureCookie(userName, userId),
+  ].filter(Boolean);
+}
+
+function decodeCookieValue(value) {
+  try {
+    return decodeURIComponent(String(value || ""));
+  } catch {
+    return String(value || "");
+  }
+}
+
+function hasValidSsoIdentitySignature(userName, userId, signature) {
+  if (!signature || (!userName && !userId)) return false;
+  const expected = Buffer.from(signSsoIdentity(userName, userId));
+  const actual = Buffer.from(String(signature));
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
 function requireAuth(req) {
   const cookies = parseCookies(req);
   const token = cookies.token;
@@ -4147,6 +4236,24 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/sso/me" && req.method === "GET") {
+      const cookies = parseCookies(req);
+      const userName = decodeCookieValue(cookies.feedback_name).trim();
+      const userId = decodeCookieValue(cookies.sso_user_id).trim();
+      const identified = hasValidSsoIdentitySignature(
+        userName,
+        userId,
+        cookies.sso_identity_sig,
+      );
+      sendJson(res, 200, {
+        ok: true,
+        identified,
+        userName: identified ? userName : "",
+        userId: identified ? userId : "",
+      });
+      return;
+    }
+
     if (url.pathname === "/api/sso/visit" && req.method === "POST") {
       const body = await readJsonBody(req);
       if (!body.ssoAuthCode) {
@@ -4157,16 +4264,22 @@ const server = createServer(async (req, res) => {
       try {
         const result = await recordSsoVisit({
           encParam: body.ssoAuthCode,
+          encUserId: body.ssoUserId || "",
           route: body.route || "",
           pageUrl: body.pageUrl || "",
           ip: getClientIp(req),
           userAgent: req.headers["user-agent"] || "",
         });
-        const payload = JSON.stringify({ ok: true, userName: result.userName }, null, 2);
+        const payload = JSON.stringify({
+          ok: true,
+          userName: result.userName,
+          userId: result.userId || "",
+        }, null, 2);
+        const identityCookies = buildIdentityCookies(result);
         res.writeHead(201, {
           "content-type": "application/json; charset=utf-8",
           "cache-control": "no-store",
-          ...(result.userName ? { "set-cookie": buildFeedbackNameCookie(result.userName) } : {}),
+          ...(identityCookies.length ? { "set-cookie": identityCookies } : {}),
         });
         res.end(payload);
       } catch (err) {
@@ -4482,7 +4595,10 @@ const server = createServer(async (req, res) => {
       if (token && /^[a-kmnp-z2-9]{12}$/i.test(token)) {
         const ip = getClientIp(req);
         const visitInfo = await recordPushVisit(token, ip);
-        const feedbackNameCookie = buildFeedbackNameCookie(visitInfo?.username);
+        const identityCookies = buildIdentityCookies({
+          userName: visitInfo?.username,
+          userId: visitInfo?.userid,
+        });
 
         const targetUrl = buildPublicUrl(req, "/#daily");
         const ua = (req.headers["user-agent"] || "").toLowerCase();
@@ -4542,7 +4658,7 @@ const server = createServer(async (req, res) => {
 
           res.writeHead(200, {
             "Content-Type": "text/html; charset=utf-8",
-            ...(feedbackNameCookie ? { "set-cookie": feedbackNameCookie } : {}),
+            ...(identityCookies.length ? { "set-cookie": identityCookies } : {}),
           });
           res.end(`<!DOCTYPE html>
 <html lang="zh-CN">
@@ -4672,7 +4788,7 @@ try {
 
         res.writeHead(302, {
           Location: targetUrl,
-          ...(feedbackNameCookie ? { "set-cookie": feedbackNameCookie } : {}),
+          ...(identityCookies.length ? { "set-cookie": identityCookies } : {}),
         });
         res.end();
         return;

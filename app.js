@@ -92,6 +92,7 @@ const state = {
   feedbackError: "",
   feedbackStatus: "all",
   ssoUserName: sessionStorage.getItem("yiminSsoUserName") || "",
+  ssoUserId: sessionStorage.getItem("yiminSsoUserId") || "",
   liveMeta: {
     mode: "idle",
     text: "等待真实信源数据",
@@ -948,7 +949,7 @@ function renderSsoStats() {
         ${users.length ? users.map((user) => `
           <div class="sso-user-row">
             <strong>${escapeHtml(user.userName)}</strong>
-            <span>${escapeHtml(user.visits || 0)} 次 · 最近 ${escapeHtml(user.lastVisitAt || "-")}</span>
+            <span>${user.userId ? `${escapeHtml(user.userId)} · ` : ""}${escapeHtml(user.visits || 0)} 次 · 最近 ${escapeHtml(user.lastVisitAt || "-")}</span>
           </div>
         `).join("") : '<p class="form-note">暂无用户数据。</p>'}
       </div>
@@ -962,18 +963,19 @@ function renderSsoStats() {
       <div class="sso-table-wrap">
         <table class="sso-table">
           <thead>
-            <tr><th>时间</th><th>姓名</th><th>入口</th><th>IP</th><th>设备</th></tr>
+            <tr><th>时间</th><th>姓名</th><th>UserID</th><th>入口</th><th>IP</th><th>设备</th></tr>
           </thead>
           <tbody>
             ${recent.length ? recent.map((row) => `
               <tr>
                 <td>${escapeHtml(row.visitAt || "-")}</td>
                 <td>${escapeHtml(row.userName || "-")}</td>
+                <td>${escapeHtml(row.userId || "-")}</td>
                 <td>${escapeHtml(row.route || "-")}</td>
                 <td>${escapeHtml(row.clientIp || "-")}</td>
                 <td title="${escapeAttr(row.userAgent || "")}">${escapeHtml(row.userAgent || "-")}</td>
               </tr>
-            `).join("") : '<tr><td colspan="5">暂无访问明细。</td></tr>'}
+            `).join("") : '<tr><td colspan="6">暂无访问明细。</td></tr>'}
           </tbody>
         </table>
       </div>
@@ -1541,10 +1543,11 @@ async function recordSsoVisitFromHash() {
 
   const params = getHashSearchParams();
   const ssoAuthCode = params.get("sso_auth_code");
+  const ssoUserId = params.get("sso_user_id");
   if (!ssoAuthCode) return;
 
   const route = parseHashRoute().view;
-  const dedupeKey = `ssoVisit.${ssoAuthCode}`;
+  const dedupeKey = `ssoVisit.${ssoAuthCode}.${ssoUserId || ""}`;
   try {
     if (!sessionStorage.getItem(dedupeKey)) {
       const response = await fetch("/api/sso/visit", {
@@ -1552,6 +1555,7 @@ async function recordSsoVisitFromHash() {
         headers: { "content-type": "application/json", accept: "application/json" },
         body: JSON.stringify({
           ssoAuthCode,
+          ssoUserId,
           route,
           pageUrl: window.location.href,
         }),
@@ -1562,6 +1566,10 @@ async function recordSsoVisitFromHash() {
           state.ssoUserName = data.userName;
           sessionStorage.setItem("yiminSsoUserName", data.userName);
         }
+        if (data.userId) {
+          state.ssoUserId = data.userId;
+          sessionStorage.setItem("yiminSsoUserId", data.userId);
+        }
         sessionStorage.setItem(dedupeKey, "1");
       }
     }
@@ -1569,6 +1577,28 @@ async function recordSsoVisitFromHash() {
     /* SSO logging should not block reading the page. */
   } finally {
     removeHashParam("sso_auth_code");
+    removeHashParam("sso_user_id");
+  }
+}
+
+async function loadSsoIdentity() {
+  if (window.location.protocol === "file:") return;
+  try {
+    const response = await fetch("/api/sso/me", {
+      headers: { accept: "application/json" },
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) return;
+    if (data.userName) {
+      state.ssoUserName = data.userName;
+      sessionStorage.setItem("yiminSsoUserName", data.userName);
+    }
+    if (data.userId) {
+      state.ssoUserId = data.userId;
+      sessionStorage.setItem("yiminSsoUserId", data.userId);
+    }
+  } catch {
+    /* Identity recovery should not block page rendering. */
   }
 }
 
@@ -2059,6 +2089,7 @@ if (todayDate) {
 
 async function boot() {
   await recordSsoVisitFromHash();
+  await loadSsoIdentity();
   const initialView = window.location.hash.replace("#", "") || "home";
   restoreFilterCategory();
   renderContent();
