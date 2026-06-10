@@ -3712,19 +3712,16 @@ async function buildDailyContext(date, { windowMode = "calendar" } = {}) {
   });
 
   const uniqueItems = uniqueDailyItemsByTopic(enriched);
-  const todayNew = uniqueItems.filter((item) => item.isToday && !item.recentUsage).slice(0, 12);
+  const todayNew = uniqueItems.filter((item) => item.isToday && !item.recentUsage);
   const todayKeys = new Set(todayNew.map((item) => item.id));
   const important = uniqueItems
-    .filter((item) => item.isRecent && !item.isToday && !item.recentUsage && !todayKeys.has(item.id))
-    .slice(0, 8);
+    .filter((item) => item.isRecent && !item.isToday && !item.recentUsage && !todayKeys.has(item.id));
   const selectedKeys = new Set([...todayNew, ...important].map((item) => item.id));
   const continuing = uniqueItems
-    .filter((item) => item.isRecent && !selectedKeys.has(item.id))
-    .slice(0, 8);
+    .filter((item) => item.isRecent && !selectedKeys.has(item.id));
   const continuingKeys = new Set(continuing.map((item) => item.id));
   const repeated = uniqueItems
-    .filter((item) => (item.recentUsage || !item.isRecent) && !selectedKeys.has(item.id) && !continuingKeys.has(item.id))
-    .slice(0, 8);
+    .filter((item) => (item.recentUsage || !item.isRecent) && !selectedKeys.has(item.id) && !continuingKeys.has(item.id));
 
   return {
     date,
