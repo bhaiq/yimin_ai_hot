@@ -1658,7 +1658,7 @@ const wxWorkConfig = {
   secret: process.env.WX_WORK_SECRET || "",
   pushDeptIds: (process.env.WX_WORK_PUSH_DEPT_IDS || "").split(",").filter(Boolean).map(Number),
   pushTagIds: (process.env.WX_WORK_PUSH_TAG_IDS || "").split(",").filter(Boolean).map(Number),
-  excludeDeptIds: (process.env.WX_WORK_PUSH_EXCLUDE_DEPT_IDS || "").split(",").filter(Boolean).map(Number),
+  excludeDeptUrl: process.env.WX_WORK_PUSH_EXCLUDE_DEPT_URL || "https://restful.globevisa.cn/Km/YiminHot/getMainland",
   openDebug: ["1", "true", "yes"].includes(String(process.env.WX_WORK_OPEN_DEBUG || "").toLowerCase()),
 };
 
@@ -1787,8 +1787,18 @@ async function getWxAllPushUsers(accessToken) {
     }
   }
 
-  // 排除指定部门（递归子部门）
-  const excludeIds = wxWorkConfig.excludeDeptIds;
+  // 从接口获取排除部门，递归子部门后差集过滤
+  let excludeIds = [];
+  try {
+    const exclRes = await fetch(wxWorkConfig.excludeDeptUrl, { signal: AbortSignal.timeout(10000) });
+    const exclJson = await exclRes.json();
+    if (exclJson.ret === 200 && exclJson.code === 0 && typeof exclJson.data === "string") {
+      excludeIds = exclJson.data.split(",").filter(Boolean).map(Number);
+    }
+  } catch (e) {
+    console.error("[push] 获取排除部门列表失败:", e.message);
+  }
+
   if (excludeIds.length > 0) {
     const excludedSet = new Set();
     for (const deptId of excludeIds) {
