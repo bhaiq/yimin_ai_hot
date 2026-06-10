@@ -465,12 +465,15 @@ function renderDaily() {
 
   if (state.dailyReport?.html) {
     const windowText = state.dailyReport.windowLabel ? ` · ${escapeHtml(state.dailyReport.windowLabel)}` : "";
+    const analyzedMeta = Number(state.dailyReport.eventCount || 0) > 0
+      ? ` · 相关 ${escapeHtml(state.dailyReport.relevantItemCount || 0)} 条 · 聚合 ${escapeHtml(state.dailyReport.eventCount || 0)} 个事件`
+      : "";
     dailyReport.innerHTML = `
       <div class="daily-layout">
         <div class="daily-main">
           <div class="daily-meta">
             <strong>${escapeHtml(state.dailyReport.title || "移民热点日报")}</strong>
-            <span>${escapeHtml(state.dailyReport.model || "AI")} · ${escapeHtml(state.dailyReport.sourceItemCount || 0)} 条资讯${windowText}</span>
+            <span>${escapeHtml(state.dailyReport.model || "AI")} · 全量 ${escapeHtml(state.dailyReport.sourceItemCount || 0)} 条${analyzedMeta}${windowText}</span>
           </div>
           ${state.dailyReport.html}
         </div>
@@ -1420,7 +1423,7 @@ async function loadDailyReport({ refresh = false, date } = {}) {
 
     const data = await response.json();
     state.dailyReport = data.report || null;
-    state.dailyDate = date || null;
+    state.dailyDate = data.report?.date || date || null;
   } catch {
     state.dailyReport = null;
   } finally {

@@ -14,7 +14,11 @@ const cacheTtlMs = Number(process.env.CACHE_TTL_MS || 10 * 60 * 1000);
 const requestTimeoutMs = Number(process.env.FEED_TIMEOUT_MS || 9000);
 const maxItemsPerSource = Number(process.env.MAX_ITEMS_PER_SOURCE || 16);
 const maxTotalItems = Number(process.env.MAX_TOTAL_ITEMS || 80);
-const dailyCandidateLimit = Number(process.env.DAILY_CANDIDATE_LIMIT || Math.max(maxTotalItems * 8, 600));
+const dailyCandidatePageSize = Math.max(50, Number(process.env.DAILY_CANDIDATE_PAGE_SIZE || 200));
+const dailyAnalysisBatchSize = Math.max(10, Number(process.env.DAILY_ANALYSIS_BATCH_SIZE || 30));
+const dailyAnalysisConcurrency = Math.max(1, Number(process.env.DAILY_ANALYSIS_CONCURRENCY || 3));
+const dailyFinalPromptMaxChars = Math.max(20000, Number(process.env.DAILY_FINAL_PROMPT_MAX_CHARS || 80000));
+const dailyAnalysisVersion = "daily-analysis-v1";
 const dailyRecentLookbackHoursValue = Number(process.env.DAILY_RECENT_LOOKBACK_HOURS || 48);
 const dailyRecentLookbackHours = Number.isFinite(dailyRecentLookbackHoursValue)
   ? Math.max(24, dailyRecentLookbackHoursValue)
@@ -376,6 +380,8 @@ async function initDb() {
           content_markdown LONGTEXT NOT NULL COMMENT '报告 Markdown 原文',
           content_html LONGTEXT NOT NULL COMMENT '报告 HTML 内容',
           source_item_count INT NOT NULL DEFAULT 0 COMMENT '本日报引用的文章数量',
+          relevant_item_count INT NOT NULL DEFAULT 0 COMMENT '与移民主题相关的文章数量',
+          event_count INT NOT NULL DEFAULT 0 COMMENT '聚合后的事件数量',
           model VARCHAR(120) NULL COMMENT '生成报告所用的 AI 模型名称',
           generated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '报告生成时间',
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -388,16 +394,58 @@ async function initDb() {
           report_id BIGINT NOT NULL COMMENT '日报 ID',
           article_hash CHAR(40) NOT NULL COMMENT '文章去重哈希',
           topic_key VARCHAR(160) NOT NULL COMMENT '归一化主题 Key',
+          event_key VARCHAR(160) NOT NULL DEFAULT '' COMMENT '聚合事件 Key',
           section VARCHAR(40) NOT NULL COMMENT '日报分组（today_new/important/continuing/repeated）',
+          relevant TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否与日报主题相关',
+          importance INT NOT NULL DEFAULT 0 COMMENT '文章重要度 0-100',
           article_date DATETIME NULL COMMENT '文章发布时间或抓取时间',
           article_snapshot JSON NOT NULL COMMENT '文章快照',
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
           UNIQUE KEY uk_daily_report_item (report_id, article_hash, section),
           INDEX idx_daily_report_items_hash (article_hash),
           INDEX idx_daily_report_items_topic (topic_key),
+          INDEX idx_daily_report_items_event (event_key),
           INDEX idx_daily_report_items_section (section),
           CONSTRAINT fk_daily_report_items_report FOREIGN KEY (report_id) REFERENCES yimin_daily_reports(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='日报引用文章明细表';
+
+        CREATE TABLE IF NOT EXISTS yimin_article_daily_analysis (
+          article_hash CHAR(40) PRIMARY KEY COMMENT '文章去重哈希',
+          content_hash CHAR(64) NOT NULL COMMENT '参与分析的内容哈希',
+          analysis_version VARCHAR(40) NOT NULL COMMENT '分析逻辑版本',
+          relevant TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否与移民主题相关',
+          importance INT NOT NULL DEFAULT 0 COMMENT '重要度 0-100',
+          canonical_topic VARCHAR(300) NOT NULL COMMENT '规范化事件主题',
+          summary_zh TEXT NULL COMMENT '中文结构化摘要',
+          country VARCHAR(80) NULL COMMENT 'AI 识别国家/地区',
+          category VARCHAR(120) NULL COMMENT 'AI 识别分类',
+          impact VARCHAR(80) NULL COMMENT 'AI 识别影响等级',
+          model VARCHAR(120) NULL COMMENT '分析模型',
+          analyzed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '分析时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          INDEX idx_article_daily_analysis_relevant (relevant, importance),
+          INDEX idx_article_daily_analysis_version (analysis_version)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文章级日报分析缓存';
+
+        CREATE TABLE IF NOT EXISTS yimin_daily_report_events (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          report_id BIGINT NOT NULL COMMENT '日报 ID',
+          event_key VARCHAR(160) NOT NULL COMMENT '聚合事件 Key',
+          section VARCHAR(40) NOT NULL COMMENT '日报分组',
+          title VARCHAR(600) NOT NULL COMMENT '事件标题',
+          summary TEXT NULL COMMENT '事件摘要',
+          country VARCHAR(80) NULL COMMENT '国家/地区',
+          category VARCHAR(120) NULL COMMENT '分类',
+          importance INT NOT NULL DEFAULT 0 COMMENT '事件重要度',
+          article_count INT NOT NULL DEFAULT 0 COMMENT '包含文章数量',
+          source_count INT NOT NULL DEFAULT 0 COMMENT '包含信源数量',
+          representative_url VARCHAR(1400) NULL COMMENT '代表文章链接',
+          article_hashes_json JSON NOT NULL COMMENT '关联文章哈希',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          UNIQUE KEY uk_daily_report_event (report_id, event_key),
+          INDEX idx_daily_report_events_section (report_id, section, importance),
+          CONSTRAINT fk_daily_report_events_report FOREIGN KEY (report_id) REFERENCES yimin_daily_reports(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='日报聚合事件';
 
         CREATE TABLE IF NOT EXISTS yimin_source_submissions (
           id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
@@ -663,6 +711,56 @@ async function initDb() {
           ALTER TABLE yimin_daily_reports
           ADD COLUMN window_mode VARCHAR(20) NOT NULL DEFAULT 'calendar' COMMENT '日报统计窗口模式（calendar/last24h）'
           AFTER window_end_at;
+        `);
+      }
+
+      const dailyReportMetricColumns = await mysqlRun(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+          AND TABLE_NAME = 'yimin_daily_reports'
+          AND COLUMN_NAME IN ('relevant_item_count', 'event_count');
+      `);
+      if (!dailyReportMetricColumns.includes("relevant_item_count")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_daily_reports
+          ADD COLUMN relevant_item_count INT NOT NULL DEFAULT 0 COMMENT '与移民主题相关的文章数量'
+          AFTER source_item_count;
+        `);
+      }
+      if (!dailyReportMetricColumns.includes("event_count")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_daily_reports
+          ADD COLUMN event_count INT NOT NULL DEFAULT 0 COMMENT '聚合后的事件数量'
+          AFTER relevant_item_count;
+        `);
+      }
+
+      const dailyItemColumns = await mysqlRun(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+          AND TABLE_NAME = 'yimin_daily_report_items'
+          AND COLUMN_NAME IN ('event_key', 'relevant', 'importance');
+      `);
+      if (!dailyItemColumns.includes("event_key")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_daily_report_items
+          ADD COLUMN event_key VARCHAR(160) NOT NULL DEFAULT '' COMMENT '聚合事件 Key'
+          AFTER topic_key,
+          ADD INDEX idx_daily_report_items_event (event_key);
+        `);
+      }
+      if (!dailyItemColumns.includes("relevant")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_daily_report_items
+          ADD COLUMN relevant TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否与日报主题相关'
+          AFTER section;
+        `);
+      }
+      if (!dailyItemColumns.includes("importance")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_daily_report_items
+          ADD COLUMN importance INT NOT NULL DEFAULT 0 COMMENT '文章重要度 0-100'
+          AFTER relevant;
         `);
       }
 
@@ -1163,12 +1261,13 @@ async function listRecentArticlesFromDb(limit = Math.max(maxTotalItems * 2, 160)
   );
 }
 
-async function listDailyCandidateArticlesFromDb(window, limit = dailyCandidateLimit) {
+async function listDailyCandidateArticlePageFromDb(window, offset, limit = dailyCandidatePageSize) {
   return (
     (await mysqlJson(`
       SELECT COALESCE(JSON_ARRAYAGG(
         JSON_OBJECT(
           'id', dedupe_hash,
+          'sourceId', source_id,
           'title', title,
           'summary', COALESCE(summary, ''),
           'source', source_name,
@@ -1192,10 +1291,21 @@ async function listDailyCandidateArticlesFromDb(window, limit = dailyCandidateLi
           AND COALESCE(a.published_at, a.fetched_at) >= ${sqlDate(window.recentStart)}
           AND COALESCE(a.published_at, a.fetched_at) < ${sqlDate(window.end)}
         ORDER BY a.heat DESC, article_at DESC, a.id DESC
-        LIMIT ${sqlNumber(limit, dailyCandidateLimit)}
+        LIMIT ${sqlNumber(limit, dailyCandidatePageSize)}
+        OFFSET ${sqlNumber(offset)}
       ) ranked;
     `)) || []
   );
+}
+
+async function listDailyCandidateArticlesFromDb(window) {
+  const items = [];
+  for (let offset = 0; ; offset += dailyCandidatePageSize) {
+    const page = await listDailyCandidateArticlePageFromDb(window, offset, dailyCandidatePageSize);
+    items.push(...page);
+    if (page.length < dailyCandidatePageSize) break;
+  }
+  return items;
 }
 
 async function listSourceStatusesFromDb() {
@@ -3650,7 +3760,8 @@ async function getRecentDailyUsage(date, lookbackDays = 7) {
     FROM yimin_daily_report_items i
     JOIN yimin_daily_reports r ON r.id = i.report_id
     WHERE r.report_date < ${sqlString(date)}
-      AND r.report_date >= DATE_SUB(${sqlString(date)}, INTERVAL ${sqlNumber(lookbackDays, 7)} DAY);
+      AND r.report_date >= DATE_SUB(${sqlString(date)}, INTERVAL ${sqlNumber(lookbackDays, 7)} DAY)
+      AND i.relevant = 1;
   `);
 
   const byHash = new Map();
@@ -3662,15 +3773,292 @@ async function getRecentDailyUsage(date, lookbackDays = 7) {
   return { rows: rows || [], byHash, byTopic };
 }
 
-function uniqueDailyItemsByTopic(items) {
-  const usedTopics = new Set();
-  return items
-    .sort((a, b) => b.dailyScore - a.dailyScore)
-    .filter((item) => {
-      if (usedTopics.has(item.topicKey)) return false;
-      usedTopics.add(item.topicKey);
-      return true;
-    });
+function clampDailyImportance(value, fallback = 50) {
+  const number = Number(value);
+  return Math.max(0, Math.min(100, Number.isFinite(number) ? Math.round(number) : fallback));
+}
+
+function normalizeDailyRelevant(value, fallback = true) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["false", "0", "no", "否", "不相关"].includes(normalized)) return false;
+    if (["true", "1", "yes", "是", "相关"].includes(normalized)) return true;
+  }
+  return fallback;
+}
+
+function getDailyAnalysisContentHash(item) {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      title: sanitizeTextArtifacts(item.title),
+      summary: sanitizeTextArtifacts(item.summary),
+      source: sanitizeTextArtifacts(item.source),
+      country: sanitizeTextArtifacts(item.country),
+      category: sanitizeTextArtifacts(item.category),
+      tags: item.tags || [],
+      publishedAt: item.publishedAt || null,
+    }))
+    .digest("hex");
+}
+
+function buildFallbackDailyAnalysis(item) {
+  const canonicalTopic = sanitizeTextArtifacts(item.title) || `${item.country} ${item.category}`;
+  return {
+    articleHash: item.id,
+    contentHash: getDailyAnalysisContentHash(item),
+    relevant: true,
+    importance: clampDailyImportance(item.dailyScore, 50),
+    canonicalTopic,
+    summaryZh: truncate(item.summary || item.title, 500),
+    country: sanitizeTextArtifacts(item.country),
+    category: sanitizeTextArtifacts(item.category),
+    impact: sanitizeTextArtifacts(item.impact),
+    model: "rules",
+  };
+}
+
+function parseDeepSeekJsonArray(content) {
+  const text = String(content || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const start = text.indexOf("[");
+  const end = text.lastIndexOf("]");
+  if (start === -1 || end <= start) {
+    throw new Error("DeepSeek analysis did not return a JSON array");
+  }
+  const parsed = JSON.parse(text.slice(start, end + 1));
+  if (!Array.isArray(parsed)) {
+    throw new Error("DeepSeek analysis JSON is not an array");
+  }
+  return parsed;
+}
+
+function buildDailyAnalysisPrompt(items) {
+  const payload = items.map((item) => ({
+    id: item.id,
+    title: sanitizeTextArtifacts(item.title),
+    summary: truncate(item.summary, 650),
+    source: sanitizeTextArtifacts(item.source),
+    country: sanitizeTextArtifacts(item.country),
+    category: sanitizeTextArtifacts(item.category),
+    tags: (item.tags || []).slice(0, 12),
+    publishedAt: item.publishedAt || item.fetchedAt || null,
+    heat: Number(item.heat || 0),
+  }));
+
+  return `请逐条分析以下移民资讯，只返回 JSON 数组，不要 Markdown，不要解释。
+
+每个输入 id 必须恰好返回一次，字段格式：
+{"id":"原 id","relevant":true,"importance":0-100,"canonicalTopic":"用于合并同一事件的简短中文主题，不含媒体名","summaryZh":"不超过120字的中文事实摘要","country":"国家或地区","category":"政策分类","impact":"高影响/中影响/低影响"}
+
+规则：
+- 与移民、签证、居留、国籍、边境、工签、雇主担保、留学签证、投资移民、难民庇护直接相关时 relevant=true。
+- 普通旅游、房产、娱乐、体育、一般商业或科技新闻且没有移民影响时 relevant=false。
+- canonicalTopic 对同一政策或同一事件的不同媒体报道应尽量使用相同表述。
+- 不得编造原文没有的政策、日期、费用或影响。
+- 外文内容翻译成简体中文。
+
+输入：
+${JSON.stringify(payload)}`;
+}
+
+async function analyzeDailyArticleBatch(items) {
+  const fallbackById = new Map(items.map((item) => [item.id, buildFallbackDailyAnalysis(item)]));
+  try {
+    const content = await callDeepSeek(buildDailyAnalysisPrompt(items));
+    const parsed = parseDeepSeekJsonArray(content);
+    for (const result of parsed) {
+      const fallback = fallbackById.get(String(result?.id || ""));
+      if (!fallback) continue;
+      fallbackById.set(fallback.articleHash, {
+        ...fallback,
+        relevant: normalizeDailyRelevant(result.relevant, fallback.relevant),
+        importance: clampDailyImportance(result.importance, fallback.importance),
+        canonicalTopic: truncate(result.canonicalTopic || fallback.canonicalTopic, 300),
+        summaryZh: truncate(result.summaryZh || fallback.summaryZh, 600),
+        country: truncate(result.country || fallback.country, 80),
+        category: truncate(result.category || fallback.category, 120),
+        impact: truncate(result.impact || fallback.impact, 80),
+        model: deepseekConfig.model,
+      });
+    }
+  } catch (error) {
+    console.error("Daily article analysis batch fallback:", error instanceof Error ? error.message : String(error));
+  }
+  return [...fallbackById.values()];
+}
+
+async function loadCachedDailyAnalyses(items) {
+  const byHash = new Map();
+  const chunkSize = 150;
+  for (let index = 0; index < items.length; index += chunkSize) {
+    const chunk = items.slice(index, index + chunkSize);
+    const hashes = chunk.map((item) => sqlString(item.id)).join(",");
+    if (!hashes) continue;
+    const rows = (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+        'articleHash', article_hash,
+        'contentHash', content_hash,
+        'relevant', relevant,
+        'importance', importance,
+        'canonicalTopic', canonical_topic,
+        'summaryZh', summary_zh,
+        'country', country,
+        'category', category,
+        'impact', impact,
+        'model', model
+      )), JSON_ARRAY())
+      FROM yimin_article_daily_analysis
+      WHERE analysis_version = ${sqlString(dailyAnalysisVersion)}
+        AND article_hash IN (${hashes});
+    `)) || [];
+    for (const row of rows) byHash.set(row.articleHash, row);
+  }
+  return byHash;
+}
+
+async function saveDailyAnalyses(analyses) {
+  const batchSize = 100;
+  for (let index = 0; index < analyses.length; index += batchSize) {
+    const values = analyses.slice(index, index + batchSize).map((analysis) => `(
+      ${sqlString(analysis.articleHash)},
+      ${sqlString(analysis.contentHash)},
+      ${sqlString(dailyAnalysisVersion)},
+      ${analysis.relevant ? 1 : 0},
+      ${sqlNumber(analysis.importance)},
+      ${sqlString(analysis.canonicalTopic)},
+      ${sqlString(analysis.summaryZh)},
+      ${sqlString(analysis.country)},
+      ${sqlString(analysis.category)},
+      ${sqlString(analysis.impact)},
+      ${sqlString(analysis.model)}
+    )`);
+    if (!values.length) continue;
+    await mysqlExec(`
+      INSERT INTO yimin_article_daily_analysis (
+        article_hash, content_hash, analysis_version, relevant, importance,
+        canonical_topic, summary_zh, country, category, impact, model
+      )
+      VALUES ${values.join(",")}
+      ON DUPLICATE KEY UPDATE
+        content_hash = VALUES(content_hash),
+        analysis_version = VALUES(analysis_version),
+        relevant = VALUES(relevant),
+        importance = VALUES(importance),
+        canonical_topic = VALUES(canonical_topic),
+        summary_zh = VALUES(summary_zh),
+        country = VALUES(country),
+        category = VALUES(category),
+        impact = VALUES(impact),
+        model = VALUES(model),
+        analyzed_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP;
+    `);
+  }
+}
+
+async function getDailyArticleAnalyses(items) {
+  const cached = await loadCachedDailyAnalyses(items);
+  const analyses = new Map();
+  const missing = [];
+  for (const item of items) {
+    const contentHash = getDailyAnalysisContentHash(item);
+    const existing = cached.get(item.id);
+    if (existing?.contentHash === contentHash) {
+      analyses.set(item.id, {
+        ...existing,
+        relevant: Boolean(Number(existing.relevant)),
+        importance: clampDailyImportance(existing.importance),
+      });
+    } else {
+      missing.push(item);
+    }
+  }
+
+  const batches = [];
+  for (let index = 0; index < missing.length; index += dailyAnalysisBatchSize) {
+    batches.push(missing.slice(index, index + dailyAnalysisBatchSize));
+  }
+  if (batches.length) {
+    const results = await runWithConcurrency(
+      batches,
+      dailyAnalysisConcurrency,
+      (batch) => analyzeDailyArticleBatch(batch),
+    );
+    const fresh = results.flat();
+    await saveDailyAnalyses(fresh);
+    for (const analysis of fresh) analyses.set(analysis.articleHash, analysis);
+  }
+
+  return analyses;
+}
+
+function getDailyEventKey(item, analysis) {
+  const normalized = normalizeDailyTopicText(
+    `${analysis.country || item.country} ${analysis.category || item.category} ${analysis.canonicalTopic || item.title}`,
+  );
+  return createHash("sha1")
+    .update(normalized || item.topicKey || item.id)
+    .digest("hex")
+    .slice(0, 32);
+}
+
+function buildDailyEvents(items, usage) {
+  const groups = new Map();
+  for (const item of items.filter((candidate) => candidate.analysis.relevant)) {
+    const eventKey = getDailyEventKey(item, item.analysis);
+    const recentUsage = usage.byHash.get(item.id)
+      || usage.byTopic.get(eventKey)
+      || usage.byTopic.get(item.topicKey)
+      || null;
+    const enriched = { ...item, eventKey, recentUsage };
+    if (!groups.has(eventKey)) groups.set(eventKey, []);
+    groups.get(eventKey).push(enriched);
+  }
+
+  const events = [];
+  for (const [eventKey, members] of groups) {
+    members.sort((a, b) =>
+      (b.analysis.importance + b.dailyScore) - (a.analysis.importance + a.dailyScore)
+    );
+    const representative = members[0];
+    const hasTodayNew = members.some((item) => item.isToday && !item.recentUsage);
+    const hasRecentUnused = members.some((item) => item.isRecent && !item.isToday && !item.recentUsage);
+    const hasRecent = members.some((item) => item.isRecent);
+    const section = hasTodayNew
+      ? "today_new"
+      : hasRecentUnused
+        ? "important"
+        : hasRecent
+          ? "continuing"
+          : "repeated";
+    const sources = [...new Set(members.map((item) => item.source).filter(Boolean))];
+    const event = {
+      eventKey,
+      dailySection: section,
+      title: representative.analysis.canonicalTopic || representative.title,
+      summary: representative.analysis.summaryZh || representative.summary,
+      country: representative.analysis.country || representative.country,
+      category: representative.analysis.category || representative.category,
+      impact: representative.analysis.impact || representative.impact,
+      importance: Math.max(...members.map((item) => item.analysis.importance)),
+      articleCount: members.length,
+      sourceCount: sources.length,
+      sources,
+      articleHashes: members.map((item) => item.id),
+      representativeUrl: representative.url || "",
+      url: representative.url || "",
+      articleDate: representative.articleDate,
+      recentUsage: members.find((item) => item.recentUsage)?.recentUsage || null,
+      members,
+    };
+    for (const member of members) {
+      member.eventKey = eventKey;
+      member.dailySection = section;
+    }
+    events.push(event);
+  }
+  return events.sort((a, b) => b.importance - a.importance || b.articleCount - a.articleCount);
 }
 
 async function buildDailyContext(date, { windowMode = "calendar" } = {}) {
@@ -3681,7 +4069,6 @@ async function buildDailyContext(date, { windowMode = "calendar" } = {}) {
     items = await listDailyCandidateArticlesFromDb(window);
   }
 
-  const usage = await getRecentDailyUsage(date);
   const enriched = items.map((item) => {
     const sanitizedItem = {
       ...item,
@@ -3695,7 +4082,6 @@ async function buildDailyContext(date, { windowMode = "calendar" } = {}) {
     };
     const articleDate = getDailyArticleDate(item);
     const topicKey = getDailyTopicKey(sanitizedItem);
-    const recentUsage = usage.byHash.get(item.id) || usage.byTopic.get(topicKey) || null;
     const ageHours = articleDate ? Math.max(0, (window.end.getTime() - articleDate.getTime()) / 36e5) : 999;
     const isToday = articleDate ? articleDate >= window.start && articleDate < window.end : false;
     const isRecent = articleDate ? articleDate >= window.recentStart && articleDate < window.end : false;
@@ -3706,53 +4092,123 @@ async function buildDailyContext(date, { windowMode = "calendar" } = {}) {
       isToday,
       isRecent,
       topicKey,
-      recentUsage,
       dailyScore: getDailyItemScore(sanitizedItem, articleDate, window),
     };
   });
 
-  const uniqueItems = uniqueDailyItemsByTopic(enriched);
-  const todayNew = uniqueItems.filter((item) => item.isToday && !item.recentUsage);
-  const todayKeys = new Set(todayNew.map((item) => item.id));
-  const important = uniqueItems
-    .filter((item) => item.isRecent && !item.isToday && !item.recentUsage && !todayKeys.has(item.id));
-  const selectedKeys = new Set([...todayNew, ...important].map((item) => item.id));
-  const continuing = uniqueItems
-    .filter((item) => item.isRecent && !selectedKeys.has(item.id));
-  const continuingKeys = new Set(continuing.map((item) => item.id));
-  const repeated = uniqueItems
-    .filter((item) => (item.recentUsage || !item.isRecent) && !selectedKeys.has(item.id) && !continuingKeys.has(item.id));
+  const analyses = await getDailyArticleAnalyses(enriched);
+  const analyzedItems = enriched.map((item) => ({
+    ...item,
+    analysis: analyses.get(item.id) || buildFallbackDailyAnalysis(item),
+  }));
+  const usage = await getRecentDailyUsage(date);
+  const events = buildDailyEvents(analyzedItems, usage);
+  const eventMembers = new Map(events.flatMap((event) => event.members.map((item) => [item.id, item])));
+  const allItems = analyzedItems.map((item) => {
+    const member = eventMembers.get(item.id);
+    if (member) return member;
+    return {
+      ...item,
+      eventKey: getDailyEventKey(item, item.analysis),
+      dailySection: "excluded",
+      recentUsage: usage.byHash.get(item.id) || usage.byTopic.get(item.topicKey) || null,
+    };
+  });
 
   return {
     date,
     window,
     rawItems: items,
-    todayNew: todayNew.map((item) => ({ ...item, dailySection: "today_new" })),
-    important: important.map((item) => ({ ...item, dailySection: "important" })),
-    continuing: continuing.map((item) => ({ ...item, dailySection: "continuing" })),
-    repeated: repeated.map((item) => ({ ...item, dailySection: "repeated" })),
+    allItems,
+    relevantItems: allItems.filter((item) => item.analysis.relevant),
+    events,
+    todayNew: events.filter((event) => event.dailySection === "today_new"),
+    important: events.filter((event) => event.dailySection === "important"),
+    continuing: events.filter((event) => event.dailySection === "continuing"),
+    repeated: events.filter((event) => event.dailySection === "repeated"),
   };
 }
 
-function formatDailyPromptItems(items) {
-  if (!items.length) {
+function formatDailyPromptEvents(events) {
+  if (!events.length) {
     return "暂无。";
   }
 
-  return items
-    .map(
-      (item, index) =>
-        `${index + 1}. 标题：${sanitizeTextArtifacts(item.title)}
-来源：${sanitizeTextArtifacts(item.source)}
-国家：${sanitizeTextArtifacts(item.country)}
-主题：${sanitizeTextArtifacts(item.category)}
-热度：${item.heat}
-时间：${item.articleDate || item.publishedAt || item.fetchedAt || "未知"}
-链接：${item.url || ""}
-摘要：${sanitizeTextArtifacts(item.summary)}
-${item.recentUsage ? `历史状态：近 7 天已在 ${item.recentUsage.reportDate} 的 ${item.recentUsage.section} 中出现，不能写入今日总结。` : "历史状态：近 7 天未在日报中出现。"}`,
-    )
+  return events
+    .map((event, index) => [
+      `${index + 1}. [${event.dailySection}] ${sanitizeTextArtifacts(event.title)}`,
+      `国家/分类：${sanitizeTextArtifacts(event.country)} / ${sanitizeTextArtifacts(event.category)}`,
+      `重要度：${event.importance}；文章数：${event.articleCount}；信源数：${event.sourceCount}`,
+      `摘要：${truncate(event.summary, 260)}`,
+      `代表链接：${event.representativeUrl || ""}`,
+      event.recentUsage
+        ? `历史状态：近 7 天已在 ${event.recentUsage.reportDate} 出现，只能作为延续关注或不建议重复。`
+        : "历史状态：近 7 天未出现。",
+    ].join("\n"))
     .join("\n\n");
+}
+
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+async function reduceDailyEventChunk(events) {
+  const prompt = `请把以下日报聚合事件压缩成简洁的中文分析素材，供另一个模型生成最终日报。
+
+要求：
+- 保留每条高重要度事件的事实、国家、影响对象、分组标记和代表链接。
+- 同类低重要度事件可以合并概括，但不得把 today_new 写成 continuing，也不得编造事实。
+- 使用紧凑 Markdown，每条最多两行。
+
+${formatDailyPromptEvents(events)}`;
+  try {
+    return await callDeepSeek(prompt);
+  } catch (error) {
+    console.error("Daily event digest fallback:", error instanceof Error ? error.message : String(error));
+    return formatDailyPromptEvents(events);
+  }
+}
+
+async function reduceDailyDigestDocuments(documents) {
+  const prompt = `请继续压缩以下多批日报分析素材。
+
+要求：
+- 必须保留所有高重要度政策变化、数字、日期、影响对象及代表链接。
+- 保留 today_new / important / continuing / repeated 分组含义。
+- 同类低重要度内容可按国家和主题合并，不得编造。
+- 输出紧凑 Markdown，供最终日报模型使用。
+
+${documents.join("\n\n--- 批次分隔 ---\n\n")}`;
+  try {
+    return await callDeepSeek(prompt);
+  } catch (error) {
+    console.error("Daily digest reduction fallback:", error instanceof Error ? error.message : String(error));
+    return documents.join("\n\n");
+  }
+}
+
+async function buildDailyEventMaterial(events) {
+  const direct = formatDailyPromptEvents(events);
+  if (direct.length <= dailyFinalPromptMaxChars) return direct;
+
+  let documents = await runWithConcurrency(
+    chunkArray(events, 40),
+    dailyAnalysisConcurrency,
+    (chunk) => reduceDailyEventChunk(chunk),
+  );
+
+  while (documents.join("\n\n").length > dailyFinalPromptMaxChars && documents.length > 1) {
+    documents = await runWithConcurrency(
+      chunkArray(documents, 6),
+      dailyAnalysisConcurrency,
+      (group) => reduceDailyDigestDocuments(group),
+    );
+  }
+  return documents.join("\n\n");
 }
 
 function dailyItemLink(item) {
@@ -3799,7 +4255,8 @@ ${repeated.length ? repeated.map((item) => `- ${item.title}：已过新鲜期或
 - 延续关注内容可做 FAQ、客户答疑或内部跟进，不要包装为新政策。`;
 }
 
-function buildDailyPrompt(date, context) {
+async function buildDailyPrompt(date, context) {
+  const eventMaterial = await buildDailyEventMaterial(context.events || []);
   return `你是一位资深移民行业信息分析师。请基于以下抓取到的移民资讯，生成中文移民热点日报。
 
 日期：${date}
@@ -3807,18 +4264,12 @@ function buildDailyPrompt(date, context) {
 窗口模式：${context.window?.mode === "last24h" ? "过去 24 小时早报" : "自然日完整日报"}
 日报可选时间范围：${getDailyWindowLabel({ start: context.window.recentStart, end: context.window.end })}
 候选资讯总数：${context.rawItems.length}
+相关资讯总数：${context.relevantItems.length}
+聚合事件总数：${context.events.length}
 
-【本期新增：只能这些内容进入“今日总结”】
-${formatDailyPromptItems(context.todayNew)}
-
-【重要变化：${getDailyRecentLookbackLabel()}，近 7 天日报未出现，但不是本期新增】
-${formatDailyPromptItems(context.important)}
-
-【延续关注：可作为跟进，不得包装为本期新增】
-${formatDailyPromptItems(context.continuing)}
-
-【不建议重复：过旧或近 7 天已出现】
-${formatDailyPromptItems(context.repeated)}
+【全量聚合事件分析素材】
+每条事件带有 today_new / important / continuing / repeated 分组标记。生成日报时必须遵守分组。
+${eventMaterial}
 
 内容相关性过滤：
 - 只保留与移民、签证、永久居留、国籍、边境/入境、工签/雇主担保、留学签证、投资移民、难民/庇护、移民机构政策、移民相关就业或教育合规直接相关的资讯。
@@ -3860,12 +4311,7 @@ ${formatDailyPromptItems(context.repeated)}
 }
 
 function getDailyContextItems(context) {
-  return [
-    ...(context.todayNew || []),
-    ...(context.important || []),
-    ...(context.continuing || []),
-    ...(context.repeated || []),
-  ];
+  return context.allItems || [];
 }
 
 function getDailyArticleSnapshot(item) {
@@ -3886,6 +4332,12 @@ function getDailyArticleSnapshot(item) {
     tags: (item.tags || []).map((tag) => sanitizeTextArtifacts(tag)).filter(Boolean),
     image: item.image || "",
     recentUsage: item.recentUsage || null,
+    eventKey: item.eventKey || "",
+    relevant: item.analysis?.relevant !== false,
+    importance: item.analysis?.importance || 0,
+    canonicalTopic: item.analysis?.canonicalTopic || "",
+    analysisSummary: item.analysis?.summaryZh || "",
+    analysisModel: item.analysis?.model || "",
   };
 }
 
@@ -3901,21 +4353,54 @@ async function saveDailyReportItems(reportDate, context) {
 
   await mysqlExec(`
     DELETE FROM yimin_daily_report_items WHERE report_id = ${sqlNumber(reportId)};
+    DELETE FROM yimin_daily_report_events WHERE report_id = ${sqlNumber(reportId)};
   `);
 
-  for (const item of getDailyContextItems(context)) {
+  const items = getDailyContextItems(context);
+  for (const batch of chunkArray(items, 100)) {
+    const values = batch.map((item) => `(
+      ${sqlNumber(reportId)},
+      ${sqlString(item.id)},
+      ${sqlString(item.eventKey || item.topicKey)},
+      ${sqlString(item.eventKey || "")},
+      ${sqlString(item.dailySection || "excluded")},
+      ${item.analysis?.relevant === false ? 0 : 1},
+      ${sqlNumber(item.analysis?.importance || 0)},
+      ${sqlDate(item.articleDate)},
+      ${sqlJson(getDailyArticleSnapshot(item))}
+    )`);
+    if (!values.length) continue;
     await mysqlExec(`
       INSERT INTO yimin_daily_report_items (
-        report_id, article_hash, topic_key, section, article_date, article_snapshot
+        report_id, article_hash, topic_key, event_key, section,
+        relevant, importance, article_date, article_snapshot
       )
-      VALUES (
-        ${sqlNumber(reportId)},
-        ${sqlString(item.id)},
-        ${sqlString(item.topicKey)},
-        ${sqlString(item.dailySection)},
-        ${sqlDate(item.articleDate)},
-        ${sqlJson(getDailyArticleSnapshot(item))}
-      );
+      VALUES ${values.join(",")};
+    `);
+  }
+
+  for (const batch of chunkArray(context.events || [], 100)) {
+    const values = batch.map((event) => `(
+      ${sqlNumber(reportId)},
+      ${sqlString(event.eventKey)},
+      ${sqlString(event.dailySection)},
+      ${sqlString(event.title)},
+      ${sqlString(event.summary)},
+      ${sqlString(event.country)},
+      ${sqlString(event.category)},
+      ${sqlNumber(event.importance)},
+      ${sqlNumber(event.articleCount)},
+      ${sqlNumber(event.sourceCount)},
+      ${sqlString(event.representativeUrl)},
+      ${sqlJson(event.articleHashes)}
+    )`);
+    if (!values.length) continue;
+    await mysqlExec(`
+      INSERT INTO yimin_daily_report_events (
+        report_id, event_key, section, title, summary, country, category,
+        importance, article_count, source_count, representative_url, article_hashes_json
+      )
+      VALUES ${values.join(",")};
     `);
   }
 }
@@ -3995,6 +4480,8 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
         'contentMarkdown', content_markdown,
         'html', content_html,
         'sourceItemCount', source_item_count,
+        'relevantItemCount', relevant_item_count,
+        'eventCount', event_count,
         'model', model,
         'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s+08:00'),
         'windowMode', window_mode,
@@ -4017,11 +4504,13 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
 
   const dailyContext = await buildDailyContext(date, { windowMode });
   const selectedItems = getDailyContextItems(dailyContext);
+  const relevantItemCount = dailyContext.relevantItems.length;
+  const eventCount = dailyContext.events.length;
 
   let markdown;
   let model = deepseekConfig.model;
   try {
-    markdown = await callDeepSeek(buildDailyPrompt(date, dailyContext));
+    markdown = await callDeepSeek(await buildDailyPrompt(date, dailyContext));
   } catch (error) {
     model = "fallback";
     markdown = buildFallbackDailyMarkdown(
@@ -4038,7 +4527,8 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
   await mysqlExec(`
     INSERT INTO yimin_daily_reports (
       report_date, window_start_at, window_end_at, window_mode,
-      title, content_markdown, content_html, source_item_count, model, generated_at
+      title, content_markdown, content_html, source_item_count,
+      relevant_item_count, event_count, model, generated_at
     )
     VALUES (
       ${sqlString(date)},
@@ -4049,6 +4539,8 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
       ${sqlString(markdown)},
       ${sqlString(html)},
       ${sqlNumber(selectedItems.length)},
+      ${sqlNumber(relevantItemCount)},
+      ${sqlNumber(eventCount)},
       ${sqlString(model)},
       CURRENT_TIMESTAMP
     )
@@ -4060,6 +4552,8 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
       content_markdown = VALUES(content_markdown),
       content_html = VALUES(content_html),
       source_item_count = VALUES(source_item_count),
+      relevant_item_count = VALUES(relevant_item_count),
+      event_count = VALUES(event_count),
       model = VALUES(model),
       generated_at = CURRENT_TIMESTAMP,
       updated_at = CURRENT_TIMESTAMP;
@@ -4072,6 +4566,8 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
     contentMarkdown: markdown,
     html,
     sourceItemCount: selectedItems.length,
+    relevantItemCount,
+    eventCount,
     model,
     windowMode: dailyContext.window.mode,
     windowStart: formatShanghaiDateTimeISO(dailyContext.window.start),
