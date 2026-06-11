@@ -2013,6 +2013,30 @@ window.addEventListener("keydown", (event) => {
   }
 });
 
+// ── Theme switch ──────────────────────────────────────────
+function initThemeSwitch() {
+  const saved = localStorage.getItem("theme") || "dark";
+  const html = document.documentElement;
+  html.dataset.theme = saved;
+
+  const radios = document.querySelectorAll("[data-theme-switch] input[name='theme']");
+  radios.forEach(r => r.checked = r.value === saved);
+
+  const apply = (value) => {
+    html.dataset.theme = value;
+    localStorage.setItem("theme", value);
+  };
+
+  radios.forEach(r => r.addEventListener("change", () => apply(r.value)));
+
+  // Respond to OS preference changes when in system mode
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    if (localStorage.getItem("theme") === "system") apply("system");
+  });
+}
+
+initThemeSwitch();
+
 function updateAuthUI() {
   const authSection = document.querySelector("[data-auth]");
   const loginBtn = document.querySelector("#sidebarAuth");

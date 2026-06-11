@@ -27,7 +27,8 @@ http://127.0.0.1:4173
 - 实时 RSS 抓取 API：`/api/news`
 - 后台抓取队列：`/api/news?refresh=1` 会立即返回已有文章和 `fetchRun`，实际抓取按 `FEED_FETCH_CONCURRENCY` 限制并发，进度可查 `/api/fetch-runs/latest`
 - 信源列表：`/api/sources`
-- DeepSeek 生成并入库的日报：`/api/daily`
+- DeepSeek 分批分析、事件聚合后生成并入库的日报：`/api/daily`
+- 日报完整资讯附录：`/api/daily/items`，分页追溯全部候选文章
 - 日报会记录引用明细，今日总结只使用近 7 天未出现过的当天新增事实
 - 信源提报与公开反馈入库；静态打开时回退到本地草稿
 - 网站源支持：通过 Firecrawl API 抓取无 RSS 的网页
@@ -39,6 +40,7 @@ http://127.0.0.1:4173
 - 企业微信日报推送：后台异步发送 textcard 消息，支持重试失败推送，推送状态和错误信息在管理后台可查看
 - 日报候选过滤：无发布日期的首次抓取文章标记为 `daily_excluded`，不进入日报候选；回看时间窗口可配置
 - 日报完整分类：主题去重后不再按 12/8/8/8 条截断，全部候选都会进入日报分析与明细
+- 日报长期流水线：候选分页全量读取，新增文章分批分析，按事件聚合后生成正文；低相关和重复文章仍保留在完整资讯附录
 
 ## 市场素材
 
@@ -63,6 +65,8 @@ http://127.0.0.1:4173
 - `yimin_fetch_runs`：每次抓取记录
 - `yimin_daily_reports`：DeepSeek 生成的日报
 - `yimin_daily_report_items`：日报引用文章明细，用于近 7 天去重和旧信息降级
+- `yimin_article_daily_analysis`：文章级日报分析缓存，内容未变化时不重复调用 AI
+- `yimin_daily_report_events`：日报事件聚合结果，一项事件可关联多篇来源文章
 - `yimin_market_reports`：市场素材日报主表
 - `yimin_market_materials`：市场素材明细快照
 - `yimin_market_project_status`：重点项目当日更新状态
