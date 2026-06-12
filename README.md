@@ -106,7 +106,8 @@ http://127.0.0.1:4173
 - 将政策雷达从静态规则升级为基于文章主题和 AI 分类的数据库视图
 - 增加定时任务，按小时执行 `/api/news?refresh=1` 启动后台抓取；每天 7 点执行 `/api/daily?refresh=1` 生成过去 24 小时早报。若需要自然日完整日报，可调用 `/api/daily?refresh=1&window=calendar&date=YYYY-MM-DD`
 - ~~同步企业微信部门，增加部门默认订阅与个人覆盖规则~~（已完成）
-- 个性化日报下一阶段：确认使用率后，按订阅组合生成一次 AI 专属摘要，并缓存相同订阅组合的生成结果
+- ~~按直属部门生成 AI 部门重点，并按部门、日期、信源配置和文章集合缓存~~（已完成）
+- 个性化日报下一阶段：根据使用反馈完善部门提示词、负责人确认和重新生成管理能力
 - ~~为 Jina Reader 配置代理支持，解决服务器网络环境连通性~~（待配置 `HTTPS_PROXY` 环境变量）
 
 ## 本地测试企业微信身份
@@ -117,12 +118,13 @@ http://127.0.0.1:4173
 LOCAL_TEST_SSO_ENABLED=1
 LOCAL_TEST_SSO_USER_ID=niujinlong
 LOCAL_TEST_SSO_USER_NAME=牛金龙
-LOCAL_TEST_SSO_DEPARTMENT_IDS=900000001
+LOCAL_TEST_SSO_DEPARTMENT_NAME=IOD
+LOCAL_TEST_SSO_DEPARTMENT_IDS=
 ```
 
 该身份只在非生产环境，并且请求来自 `localhost`、`127.0.0.1` 或 `::1` 时生效。真实签名 SSO 身份优先于本地测试身份。线上必须保持 `LOCAL_TEST_SSO_ENABLED=0`。
 
-`LOCAL_TEST_SSO_DEPARTMENT_IDS` 用逗号分隔，可在本地模拟部门继承。管理员登录后进入“部门关注”，为测试部门配置默认信源；个人取消部门默认或增加其他信源时，系统只保存差异项。
+`LOCAL_TEST_SSO_DEPARTMENT_NAME` 会从已同步的企业微信部门中匹配一个真实直属部门，依次尝试完整名称、名称前缀和名称包含。未配置名称时，也可以用逗号分隔的 `LOCAL_TEST_SSO_DEPARTMENT_IDS` 直接指定部门 ID。管理员登录后进入“部门关注”，为测试部门配置默认信源；个人取消部门默认或增加其他信源时，系统只保存差异项。
 
 ## 企业微信通讯录同步
 
@@ -135,3 +137,30 @@ curl -X POST https://你的域名/api/wx/sync-contacts
 接口不需要 Token 或登录态。它会获取企业微信 `department/list`，再按部门调用 `user/simplelist?fetch_child=0`，更新 `yimin_wx_departments` 和 `yimin_wx_users.departments_json`，并返回部门数、用户数和部门成员关系数。
 
 `POST /api/push/daily` 不再执行或写入通讯录同步，只负责获取本次推送目标并发送日报。建议每天在日报生成和推送前独立执行一次通讯录同步。
+
+## 直属部门重点
+
+日报页按照当前用户 `yimin_wx_users.departments_json` 中的直属部门，展示公共日报之后、个人关注之前的部门重点：
+
+- 部门 ID 和名称只读取企业微信同步后的 `yimin_wx_departments`，不根据信源推断部门
+- 第一版不继承父部门关注，也不合并不同部门
+- 使用 `yimin_department_source_subscriptions` 中的部门默认信源筛选当日文章
+- 有匹配文章时调用 AI 生成“今日重点、业务影响、建议动作、参考原文”
+- 没有关注信源或当日无匹配文章时不调用 AI
+- 结果保存到 `yimin_department_daily_reports`；部门关注配置或输入文章未变化时不重复生成
+- AI 失败时降级为规则整理，不影响公共日报和个人关注
+
+部门日报提供独立批量生成接口，不需要用户身份或登录 Token：
+
+```bash
+curl -X POST https://你的域名/api/daily/departments/generate
+```
+
+接口只处理已经配置默认关注信源的真实部门，并发生成数量为 2。公共日报尚未生成时返回 `409`；部分部门失败时返回 `207` 和逐部门结果，其他部门仍会继续生成。需要强制重新生成时可请求 `?refresh=1`。
+
+建议每日定时任务顺序：
+
+1. `7:00` 请求 `/api/wx/sync-contacts`
+2. `8:00` 请求 `/api/daily?refresh=1` 生成公共日报
+3. 公共日报成功后请求 `/api/daily/departments/generate`
+4. `8:50` 请求 `/api/push/daily`

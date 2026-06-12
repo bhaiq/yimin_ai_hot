@@ -68,6 +68,18 @@ function buildRadarItems(items) {
   });
 }
 
+const dailyPerspectiveStorageKey = "yiminDailyPerspective";
+const dailyPerspectives = new Set(["public", "department", "personal"]);
+
+function getSavedDailyPerspective() {
+  try {
+    const saved = localStorage.getItem(dailyPerspectiveStorageKey);
+    return dailyPerspectives.has(saved) ? saved : "public";
+  } catch {
+    return "public";
+  }
+}
+
 const state = {
   view: "home",
   category: "全部",
@@ -84,6 +96,12 @@ const state = {
   dailyLoading: false,
   dailyHistory: [],
   dailyDate: null,
+  dailyPerspective: getSavedDailyPerspective(),
+  departmentDailyReports: [],
+  departmentDailyLoading: false,
+  departmentDailyLoaded: false,
+  departmentDailyMissingSync: false,
+  departmentDailyError: "",
   personalDaily: null,
   personalDailyLoading: false,
   personalDailyError: "",
@@ -472,6 +490,108 @@ function renderSnapshots() {
     .join("");
 }
 
+function renderDepartmentDaily() {
+  if (!state.ssoUserId) {
+    return `
+      <section class="department-daily">
+        <div class="department-daily-head">
+          <div>
+            <p class="eyebrow">直属部门重点</p>
+            <h2>尚未识别企业微信身份</h2>
+          </div>
+        </div>
+        <div class="department-daily-empty">从企业微信日报链接进入后，系统会按你的直属部门展示对应重点。</div>
+      </section>
+    `;
+  }
+
+  if (state.departmentDailyLoading) {
+    return `
+      <section class="department-daily">
+        <div class="department-daily-head">
+          <div>
+            <p class="eyebrow">直属部门重点</p>
+            <h2>正在生成部门视角摘要...</h2>
+          </div>
+        </div>
+        <div class="department-daily-empty">系统正在结合部门关注信源和公共日报整理重点。</div>
+      </section>
+    `;
+  }
+
+  if (state.departmentDailyError) {
+    return `
+      <section class="department-daily">
+        <div class="department-daily-head">
+          <div>
+            <p class="eyebrow">直属部门重点</p>
+            <h2>部门重点暂时不可用</h2>
+          </div>
+        </div>
+        <div class="department-daily-empty">${escapeHtml(state.departmentDailyError)}</div>
+      </section>
+    `;
+  }
+
+  if (state.departmentDailyMissingSync) {
+    return `
+      <section class="department-daily">
+        <div class="department-daily-head">
+          <div>
+            <p class="eyebrow">直属部门重点</p>
+            <h2>尚未识别直属部门</h2>
+          </div>
+        </div>
+        <div class="department-daily-empty">请先同步企业微信通讯录。部门名称和归属只使用数据库中的企业微信部门信息。</div>
+      </section>
+    `;
+  }
+
+  const reports = Array.isArray(state.departmentDailyReports)
+    ? state.departmentDailyReports
+    : [];
+  if (!reports.length) {
+    return `
+      <section class="department-daily">
+        <div class="department-daily-head">
+          <div>
+            <p class="eyebrow">直属部门重点</p>
+            <h2>暂无部门日报</h2>
+          </div>
+        </div>
+        <div class="department-daily-empty">当前直属部门尚未配置默认关注，或所选日期没有可展示的部门重点。</div>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="department-daily">
+      <div class="department-daily-head">
+        <div>
+          <p class="eyebrow">直属部门重点</p>
+          <h2>与你所在部门相关的今日解读</h2>
+          <p>基于部门默认关注生成，不继承父部门配置。</p>
+        </div>
+      </div>
+      <div class="department-daily-list">
+        ${reports.map((report) => `
+          <article class="department-daily-card${report.status === "empty" ? " empty-card" : ""}">
+            <div class="department-daily-card-head">
+              <div>
+                <span class="department-name">${escapeHtml(report.departmentName || "未命名部门")}</span>
+                <span>${escapeHtml(report.articleCount || 0)} 条动态 · ${escapeHtml(report.sourceCount || 0)} 个部门信源</span>
+              </div>
+              <span class="department-ai-badge">${report.status === "generated" ? "AI 部门解读" : report.status === "fallback" ? "规则降级" : "今日暂无"}</span>
+            </div>
+            <div class="department-daily-content">${report.html || ""}</div>
+            ${report.status !== "empty" ? '<p class="department-daily-disclaimer">内部辅助信息，请结合官方原文和业务负责人确认后再用于客户沟通。</p>' : ""}
+          </article>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
 function renderPersonalDaily() {
   if (!state.ssoUserId) {
     return `
@@ -719,7 +839,7 @@ function renderDepartmentSubscriptions() {
 
   if (state.departmentSubscriptionLoading) {
     departmentSubscriptionList.innerHTML = '<div class="empty">正在加载部门与信源...</div>';
-    departmentSubscriptionNote.textContent = "首次推送时会自动同步企业微信部门和成员关系。";
+    departmentSubscriptionNote.textContent = "部门和成员关系由独立的企业微信通讯录同步接口更新。";
     return;
   }
   if (state.departmentSubscriptionError) {
@@ -730,7 +850,7 @@ function renderDepartmentSubscriptions() {
   }
   if (!departments.length) {
     departmentSubscriptionList.innerHTML =
-      '<div class="empty">尚未发现部门。执行一次企业微信推送后会自动同步；本地可通过环境变量配置测试部门。</div>';
+      '<div class="empty">尚未发现部门。请先调用企业微信通讯录同步接口；本地可通过环境变量配置测试部门。</div>';
     departmentSubscriptionNote.textContent = "需要先同步企业微信部门数据。";
     return;
   }
@@ -787,6 +907,28 @@ function renderDaily() {
     const analyzedMeta = Number(state.dailyReport.eventCount || 0) > 0
       ? ` · 相关 ${escapeHtml(state.dailyReport.relevantItemCount || 0)} 条 · 聚合 ${escapeHtml(state.dailyReport.eventCount || 0)} 个事件`
       : "";
+    const reports = Array.isArray(state.departmentDailyReports)
+      ? state.departmentDailyReports
+      : [];
+    const departmentNames = reports
+      .map((report) => String(report.departmentName || "").trim())
+      .filter(Boolean);
+    const departmentLabel = departmentNames.length === 1
+      ? `${departmentNames[0]} 部门重点`
+      : "部门日报";
+    const departmentCount = reports.reduce(
+      (total, report) => total + Number(report.articleCount || 0),
+      0,
+    );
+    const personalCount = Number(state.personalDaily?.matchedCount || 0);
+    const activePerspective = dailyPerspectives.has(state.dailyPerspective)
+      ? state.dailyPerspective
+      : "public";
+    const perspectiveContent = activePerspective === "department"
+      ? renderDepartmentDaily()
+      : activePerspective === "personal"
+        ? renderPersonalDaily()
+        : state.dailyReport.html;
     dailyReport.innerHTML = `
       <div class="daily-layout">
         <div class="daily-main">
@@ -794,13 +936,28 @@ function renderDaily() {
             <strong>${escapeHtml(state.dailyReport.title || "移民热点日报")}</strong>
             <span>${escapeHtml(state.dailyReport.model || "AI")} · 全量 ${escapeHtml(state.dailyReport.sourceItemCount || 0)} 条${analyzedMeta}${windowText}</span>
           </div>
-          ${state.dailyReport.html}
-          ${renderPersonalDaily()}
+          <div class="daily-perspective-nav" role="tablist" aria-label="日报视角">
+            <button class="daily-perspective-tab${activePerspective === "public" ? " active" : ""}" type="button" role="tab" aria-selected="${activePerspective === "public"}" data-daily-perspective="public">
+              <span>公共日报</span>
+              <small>${escapeHtml(state.dailyReport.relevantItemCount || state.dailyReport.sourceItemCount || 0)}</small>
+            </button>
+            <button class="daily-perspective-tab${activePerspective === "department" ? " active" : ""}" type="button" role="tab" aria-selected="${activePerspective === "department"}" data-daily-perspective="department" title="${escapeAttr(departmentLabel)}">
+              <span>${escapeHtml(departmentLabel)}</span>
+              <small>${state.departmentDailyLoading ? "…" : escapeHtml(departmentCount)}</small>
+            </button>
+            <button class="daily-perspective-tab${activePerspective === "personal" ? " active" : ""}" type="button" role="tab" aria-selected="${activePerspective === "personal"}" data-daily-perspective="personal">
+              <span>我的关注</span>
+              <small>${state.personalDailyLoading ? "…" : escapeHtml(personalCount)}</small>
+            </button>
+          </div>
+          <div class="daily-perspective-panel" role="tabpanel" data-active-perspective="${activePerspective}">
+            ${perspectiveContent}
+          </div>
         </div>
         ${historyHtml}
       </div>
     `;
-    linkifyPlainUrls(dailyReport.querySelector(".daily-main"));
+    linkifyPlainUrls(dailyReport.querySelector(".daily-perspective-panel"));
     return;
   }
 
@@ -1728,6 +1885,10 @@ async function loadDailyReport({ refresh = false, date } = {}) {
   }
 
   state.dailyLoading = true;
+  state.departmentDailyReports = [];
+  state.departmentDailyLoaded = false;
+  state.departmentDailyMissingSync = false;
+  state.departmentDailyError = "";
   state.personalDaily = null;
   state.personalDailyError = "";
   renderContent();
@@ -1756,7 +1917,49 @@ async function loadDailyReport({ refresh = false, date } = {}) {
   }
 
   if (state.ssoUserId && state.dailyReport) {
+    loadDepartmentDaily({ date: state.dailyDate || date });
     loadPersonalDaily({ date: state.dailyDate || date });
+  }
+}
+
+async function loadDepartmentDaily({ date, refresh = false } = {}) {
+  if (window.location.protocol === "file:" || !state.ssoUserId) {
+    state.departmentDailyReports = [];
+    state.departmentDailyLoaded = false;
+    state.departmentDailyMissingSync = false;
+    state.departmentDailyError = "";
+    renderContent();
+    return;
+  }
+
+  state.departmentDailyLoading = true;
+  state.departmentDailyError = "";
+  renderContent();
+
+  try {
+    const params = new URLSearchParams();
+    if (date) params.set("date", date);
+    if (refresh) params.set("refresh", "1");
+    const qs = params.toString();
+    const response = await fetch(`/api/daily/department${qs ? `?${qs}` : ""}`, {
+      headers: { accept: "application/json" },
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.departmentDailyReports = Array.isArray(data.departments) ? data.departments : [];
+    state.departmentDailyMissingSync = Boolean(data.missingDepartmentSync);
+    state.departmentDailyLoaded = true;
+  } catch (error) {
+    state.departmentDailyReports = [];
+    state.departmentDailyMissingSync = false;
+    state.departmentDailyLoaded = false;
+    state.departmentDailyError =
+      `部门重点加载失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    state.departmentDailyLoading = false;
+    renderContent();
   }
 }
 
@@ -1946,6 +2149,8 @@ async function saveDepartmentSubscriptions() {
     departmentSubscriptionNote.textContent =
       `已保存 ${state.departmentSubscriptionSelectedSourceIds.size} 个部门默认关注。`;
     state.subscriptionLoaded = false;
+    state.departmentDailyReports = [];
+    state.departmentDailyLoaded = false;
     state.personalDaily = null;
   } catch (error) {
     state.departmentSubscriptionError =
@@ -2168,8 +2373,13 @@ function setView(routeValue) {
     loadDailyHistory();
     if (!state.dailyReport && !state.dailyLoading) {
       loadDailyReport();
-    } else if (state.ssoUserId && !state.personalDaily && !state.personalDailyLoading) {
-      loadPersonalDaily({ date: state.dailyDate || undefined });
+    } else if (state.ssoUserId) {
+      if (!state.departmentDailyLoaded && !state.departmentDailyLoading) {
+        loadDepartmentDaily({ date: state.dailyDate || undefined });
+      }
+      if (!state.personalDaily && !state.personalDailyLoading) {
+        loadPersonalDaily({ date: state.dailyDate || undefined });
+      }
     }
   }
   if (viewName === "subscriptions" && !state.subscriptionLoaded && !state.subscriptionLoading) {
@@ -2321,6 +2531,20 @@ document.addEventListener("click", async (event) => {
   if (historyBtn) {
     const date = historyBtn.dataset.dailyDate;
     loadDailyReport({ date });
+    return;
+  }
+
+  const perspectiveButton = event.target.closest("[data-daily-perspective]");
+  if (perspectiveButton) {
+    const perspective = perspectiveButton.dataset.dailyPerspective;
+    if (!dailyPerspectives.has(perspective)) return;
+    state.dailyPerspective = perspective;
+    try {
+      localStorage.setItem(dailyPerspectiveStorageKey, perspective);
+    } catch {
+      // Storage availability should not block switching views.
+    }
+    renderDaily();
     return;
   }
 
@@ -2499,7 +2723,8 @@ document.querySelector("#menuToggle").addEventListener("click", () => {
 });
 
 document.querySelector("#copyDaily").addEventListener("click", async () => {
-  const text = dailyReport.innerText.trim();
+  const text = dailyReport.querySelector(".daily-perspective-panel")?.innerText.trim()
+    || dailyReport.innerText.trim();
   try {
     await navigator.clipboard.writeText(text);
     document.querySelector("#copyDaily").textContent = "已复制";

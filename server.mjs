@@ -63,6 +63,7 @@ const localTestSsoConfig = {
     && process.env.NODE_ENV !== "production",
   userId: String(process.env.LOCAL_TEST_SSO_USER_ID || "").trim().slice(0, 128),
   userName: String(process.env.LOCAL_TEST_SSO_USER_NAME || "").trim().slice(0, 160),
+  departmentName: String(process.env.LOCAL_TEST_SSO_DEPARTMENT_NAME || "").trim().slice(0, 160),
   departmentIds: String(process.env.LOCAL_TEST_SSO_DEPARTMENT_IDS || "")
     .split(",")
     .map((value) => Number(value.trim()))
@@ -90,6 +91,7 @@ const mimeTypes = {
 let cache = null;
 let dbReadyPromise = null;
 let activeFetchRun = null;
+const departmentDailyGenerationPromises = new Map();
 
 async function loadEnv() {
   const envPath = join(rootDir, ".env");
@@ -671,6 +673,27 @@ async function initDb() {
           INDEX idx_department_subscription_source (source_id),
           CONSTRAINT fk_department_subscription_source FOREIGN KEY (source_id) REFERENCES yimin_sources(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='部门默认信源关注配置表';
+
+        CREATE TABLE IF NOT EXISTS yimin_department_daily_reports (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          report_date DATE NOT NULL COMMENT '报告日期',
+          department_id BIGINT NOT NULL COMMENT '企业微信直属部门 ID',
+          department_name_snapshot VARCHAR(160) NOT NULL COMMENT '生成时的部门名称快照',
+          source_config_hash CHAR(64) NOT NULL COMMENT '部门关注信源集合哈希',
+          input_hash CHAR(64) NOT NULL COMMENT '输入文章和公共日报内容哈希',
+          content_markdown LONGTEXT NOT NULL COMMENT '部门重点 Markdown',
+          content_html LONGTEXT NOT NULL COMMENT '部门重点 HTML',
+          source_count INT NOT NULL DEFAULT 0 COMMENT '部门关注信源数量',
+          article_count INT NOT NULL DEFAULT 0 COMMENT '参与生成的文章数量',
+          model VARCHAR(120) NULL COMMENT '生成模型',
+          status ENUM('generated','fallback','empty') NOT NULL DEFAULT 'generated' COMMENT '生成状态',
+          error TEXT NULL COMMENT '降级或失败原因',
+          generated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '生成时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_department_daily_report (report_date, department_id),
+          INDEX idx_department_daily_department (department_id, report_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='部门每日重点报告表';
       `);
 
       const colCheck = await mysqlRun(`
@@ -5014,16 +5037,63 @@ function getSsoIdentityFromRequest(req) {
   return null;
 }
 
-async function upsertWxUser({ userId, userName = "", departmentIds }) {
+function normalizeDepartmentIds(value) {
+  const raw = Array.isArray(value) ? value : [];
+  return [...new Set(
+    raw
+      .map(Number)
+      .filter((departmentId) => Number.isSafeInteger(departmentId) && departmentId > 0),
+  )];
+}
+
+async function resolveLocalTestDepartmentIds(fallbackIds) {
+  const departmentName = localTestSsoConfig.departmentName;
+  if (!departmentName) return normalizeDepartmentIds(fallbackIds);
+
+  const departments = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT('id', department_id, 'name', department_name)
+    ), JSON_ARRAY())
+    FROM (
+      SELECT department_id, department_name
+      FROM yimin_wx_departments
+      ORDER BY department_name, department_id
+    ) department_rows;
+  `)) || [];
+  const target = departmentName.toLocaleLowerCase("zh-CN");
+  const candidates = departments
+    .map((department) => ({
+      id: Number(department.id),
+      name: String(department.name || "").trim(),
+    }))
+    .filter((department) => Number.isSafeInteger(department.id) && department.id > 0);
+  const exact = candidates.find(
+    (department) => department.name.toLocaleLowerCase("zh-CN") === target,
+  );
+  const prefix = candidates.find(
+    (department) => department.name.toLocaleLowerCase("zh-CN").startsWith(target),
+  );
+  const partial = candidates.find(
+    (department) => department.name.toLocaleLowerCase("zh-CN").includes(target),
+  );
+  const matched = exact || prefix || partial;
+  return matched ? [matched.id] : normalizeDepartmentIds(fallbackIds);
+}
+
+async function upsertWxUser({
+  userId,
+  userName = "",
+  departmentIds,
+  source = "",
+}) {
   const cleanUserId = String(userId || "").trim().slice(0, 128);
   if (!cleanUserId) return;
   const cleanUserName = String(userName || "").trim().slice(0, 160);
-  const cleanDepartmentIds = Array.isArray(departmentIds)
-    ? [...new Set(
-      departmentIds
-        .map(Number)
-        .filter((value) => Number.isSafeInteger(value) && value > 0),
-    )]
+  const resolvedDepartmentIds = source === "local-test"
+    ? await resolveLocalTestDepartmentIds(departmentIds)
+    : departmentIds;
+  const cleanDepartmentIds = Array.isArray(resolvedDepartmentIds)
+    ? normalizeDepartmentIds(resolvedDepartmentIds)
     : null;
   const departmentsInsert = cleanDepartmentIds === null
     ? "NULL"
@@ -5048,15 +5118,6 @@ async function upsertWxUser({ userId, userName = "", departmentIds }) {
       last_seen_at = CURRENT_TIMESTAMP,
       updated_at = CURRENT_TIMESTAMP;
   `);
-}
-
-function normalizeDepartmentIds(value) {
-  const raw = Array.isArray(value) ? value : [];
-  return [...new Set(
-    raw
-      .map(Number)
-      .filter((departmentId) => Number.isSafeInteger(departmentId) && departmentId > 0),
-  )];
 }
 
 async function getUserSubscriptionContext(userId) {
@@ -5491,6 +5552,481 @@ async function getMyDailySupplement(identity, date = getShanghaiDate()) {
   };
 }
 
+async function getDirectUserDepartments(identity) {
+  await initDb();
+  await upsertWxUser(identity);
+  const user = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'departmentIds', COALESCE(departments_json, JSON_ARRAY())
+    )
+    FROM yimin_wx_users
+    WHERE userid = ${sqlString(identity.userId)}
+    LIMIT 1;
+  `);
+  const departmentIds = normalizeDepartmentIds(user?.departmentIds);
+  if (!departmentIds.length) return [];
+
+  const departments = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'id', department_id,
+        'name', department_name
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT department_id, department_name
+      FROM yimin_wx_departments
+      WHERE department_id IN (${departmentIds.map(sqlNumber).join(",")})
+      ORDER BY department_name, department_id
+    ) direct_departments;
+  `)) || [];
+  return departments.map((department) => ({
+    id: Number(department.id),
+    name: String(department.name || "").trim(),
+  })).filter((department) => department.id > 0 && department.name);
+}
+
+function buildDepartmentDailyFallbackMarkdown(department, items, reason = "") {
+  const focusItems = items.slice(0, 8);
+  return `## 今日重点
+
+${focusItems.length
+    ? focusItems.map((item) => `- **${item.title}**：${truncate(item.summary || "请查看原文了解详情。", 180)}${item.url ? ` [查看原文](${item.url})` : ""}`).join("\n")
+    : "- 今日暂无匹配的部门关注动态。"}
+
+## 业务影响
+
+- 当前内容由系统按「${department.name}」配置的直属部门关注信源整理。${reason ? "AI 部门分析暂不可用，请由业务负责人结合原文判断具体影响。" : "请结合在办客户和项目情况判断具体影响。"}
+
+## 建议动作
+
+- 优先核对上述原文中的适用对象、生效日期和材料要求。
+- 如需调整客户沟通或项目方案，请先由业务负责人确认。
+
+## 参考原文
+
+${focusItems.length
+    ? focusItems.map((item) => `- ${item.url ? `[${item.title}](${item.url})` : item.title}（${item.source || "未知信源"}）`).join("\n")
+    : "- 暂无。"}
+
+${reason ? `> 降级原因：${reason}` : ""}`;
+}
+
+function buildDepartmentDailyPrompt({
+  date,
+  department,
+  sources,
+  items,
+  publicMarkdown,
+}) {
+  const articleMaterial = items.map((item, index) => [
+    `${index + 1}. ${item.title}`,
+    `信源：${item.source}；国家/分类：${item.country || "未知"} / ${item.category || "未分类"}；重要度：${item.importance || 0}`,
+    `摘要：${truncate(item.summary || "", 320)}`,
+    `原文：${item.url || "无"}`,
+  ].join("\n")).join("\n\n");
+
+  return `你正在为企业微信中的直属部门「${department.name}」生成 ${date} 的部门重点板块。
+
+部门名称来自企业微信通讯录数据库，不得改写、推断或根据关注信源重新命名。
+部门默认关注信源：${sources.map((source) => source.name).join("、")}
+
+【公共日报背景】
+${truncate(publicMarkdown || "暂无公共日报正文。", 6000)}
+
+【本部门关注信源的当日文章】
+${articleMaterial || "暂无。"}
+
+请严格输出以下 Markdown 结构：
+## 今日重点
+提炼 1-5 项最值得本部门关注的事实，保留原文链接。
+
+## 业务影响
+只基于输入材料，说明可能影响的客户、项目、材料、时间安排或内部协作。不能确认时明确写“需结合官方原文和具体案例确认”。
+
+## 建议动作
+给出 1-4 条内部跟进建议。不得直接生成对客承诺、确定性法律结论或输入中不存在的日期、金额、适用范围。
+
+## 参考原文
+列出实际使用过的文章标题、信源和链接。
+
+硬性要求：
+- 部门重点可以重新解释公共日报已覆盖的文章，不要仅因为公共日报出现过就删除。
+- 只能使用上述文章中的事实，不得补充模型记忆中的政策信息。
+- 重大政策判断使用审慎措辞，并提醒以官方原文和业务负责人确认为准。
+- 全部使用简体中文。`;
+}
+
+async function getDepartmentDailyInput(department, date) {
+  const report = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'date', DATE_FORMAT(report_date, '%Y-%m-%d'),
+      'contentMarkdown', content_markdown
+    )
+    FROM yimin_daily_reports
+    WHERE report_date = ${sqlString(date)}
+    LIMIT 1;
+  `);
+  if (!report) return null;
+
+  const sources = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT('id', id, 'name', name)
+    ), JSON_ARRAY())
+    FROM (
+      SELECT s.id, s.name
+      FROM yimin_department_source_subscriptions ds
+      JOIN yimin_sources s ON s.id = ds.source_id AND s.enabled = 1
+      WHERE ds.department_id = ${sqlNumber(department.id)}
+      ORDER BY s.id
+    ) department_sources;
+  `)) || [];
+  const sourceIds = sources.map((source) => Number(source.id)).filter(Number.isFinite);
+  if (!sourceIds.length) {
+    return {
+      report,
+      sources,
+      items: [],
+      sourceConfigHash: createHash("sha256").update("").digest("hex"),
+      inputHash: createHash("sha256").update(String(report.contentMarkdown || "")).digest("hex"),
+    };
+  }
+
+  const items = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'id', article_hash,
+        'sourceId', source_id,
+        'source', source_name,
+        'country', country,
+        'category', category,
+        'title', title,
+        'summary', summary,
+        'url', url,
+        'articleDate', article_date,
+        'section', section,
+        'importance', importance
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT
+        i.article_hash,
+        a.source_id,
+        s.name AS source_name,
+        a.country,
+        a.category,
+        a.title,
+        COALESCE(NULLIF(ad.summary_zh, ''), a.summary, '') AS summary,
+        a.url,
+        IF(i.article_date IS NULL, NULL, DATE_FORMAT(i.article_date, '%Y-%m-%dT%H:%i:%s+08:00')) AS article_date,
+        i.section,
+        i.importance
+      FROM yimin_daily_reports r
+      JOIN yimin_daily_report_items i ON i.report_id = r.id
+      JOIN yimin_articles a ON a.dedupe_hash = i.article_hash
+      JOIN yimin_sources s ON s.id = a.source_id
+      LEFT JOIN yimin_article_daily_analysis ad ON ad.article_hash = i.article_hash
+      WHERE r.report_date = ${sqlString(date)}
+        AND i.relevant = 1
+        AND a.source_id IN (${sourceIds.map(sqlNumber).join(",")})
+      ORDER BY i.importance DESC, i.article_date DESC, i.id DESC
+      LIMIT 40
+    ) department_items;
+  `)) || [];
+
+  const sourceConfigHash = createHash("sha256")
+    .update(sourceIds.sort((a, b) => a - b).join(","))
+    .digest("hex");
+  const inputHash = createHash("sha256")
+    .update(JSON.stringify({
+      publicMarkdown: report.contentMarkdown || "",
+      articles: items.map((item) => ({
+        id: item.id,
+        title: item.title,
+        summary: item.summary,
+        importance: item.importance,
+      })),
+    }))
+    .digest("hex");
+
+  return { report, sources, items, sourceConfigHash, inputHash };
+}
+
+function normalizeDepartmentDailyReport(row) {
+  if (!row) return null;
+  return {
+    departmentId: Number(row.departmentId),
+    departmentName: row.departmentName || "",
+    date: row.date,
+    contentMarkdown: row.contentMarkdown || "",
+    html: row.contentMarkdown ? markdownToHtml(row.contentMarkdown) : "",
+    sourceCount: Number(row.sourceCount || 0),
+    articleCount: Number(row.articleCount || 0),
+    model: row.model || "",
+    status: row.status || "empty",
+    error: row.error || "",
+    generatedAt: row.generatedAt || null,
+  };
+}
+
+async function readDepartmentDailyReport(date, departmentId) {
+  const row = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'departmentId', department_id,
+      'departmentName', department_name_snapshot,
+      'date', DATE_FORMAT(report_date, '%Y-%m-%d'),
+      'contentMarkdown', content_markdown,
+      'sourceCount', source_count,
+      'articleCount', article_count,
+      'model', model,
+      'status', status,
+      'error', error,
+      'sourceConfigHash', source_config_hash,
+      'inputHash', input_hash,
+      'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s+08:00')
+    )
+    FROM yimin_department_daily_reports
+    WHERE report_date = ${sqlString(date)}
+      AND department_id = ${sqlNumber(departmentId)}
+    LIMIT 1;
+  `);
+  return row || null;
+}
+
+async function saveDepartmentDailyReport({
+  date,
+  department,
+  input,
+  markdown,
+  model,
+  status,
+  error = "",
+}) {
+  const cleanMarkdown = sanitizeTextArtifacts(markdown);
+  await mysqlExec(`
+    INSERT INTO yimin_department_daily_reports (
+      report_date, department_id, department_name_snapshot,
+      source_config_hash, input_hash, content_markdown, content_html,
+      source_count, article_count, model, status, error, generated_at
+    )
+    VALUES (
+      ${sqlString(date)},
+      ${sqlNumber(department.id)},
+      ${sqlString(department.name)},
+      ${sqlString(input.sourceConfigHash)},
+      ${sqlString(input.inputHash)},
+      ${sqlString(cleanMarkdown)},
+      ${sqlString(markdownToHtml(cleanMarkdown))},
+      ${sqlNumber(input.sources.length)},
+      ${sqlNumber(input.items.length)},
+      ${sqlString(model)},
+      ${sqlString(status)},
+      ${sqlString(error)},
+      CURRENT_TIMESTAMP
+    )
+    ON DUPLICATE KEY UPDATE
+      department_name_snapshot = VALUES(department_name_snapshot),
+      source_config_hash = VALUES(source_config_hash),
+      input_hash = VALUES(input_hash),
+      content_markdown = VALUES(content_markdown),
+      content_html = VALUES(content_html),
+      source_count = VALUES(source_count),
+      article_count = VALUES(article_count),
+      model = VALUES(model),
+      status = VALUES(status),
+      error = VALUES(error),
+      generated_at = CURRENT_TIMESTAMP,
+      updated_at = CURRENT_TIMESTAMP;
+  `);
+  return normalizeDepartmentDailyReport(await readDepartmentDailyReport(date, department.id));
+}
+
+async function generateDepartmentDailyReport(department, date, { refresh = false } = {}) {
+  const generationKey = `${date}:${department.id}`;
+  if (departmentDailyGenerationPromises.has(generationKey)) {
+    return departmentDailyGenerationPromises.get(generationKey);
+  }
+
+  const generationPromise = (async () => {
+    const input = await getDepartmentDailyInput(department, date);
+    if (!input) return null;
+    const existing = await readDepartmentDailyReport(date, department.id);
+    const existingGeneratedAt = existing?.generatedAt ? new Date(existing.generatedAt) : null;
+    const fallbackCacheIsFresh = (
+      existing?.status !== "fallback"
+      || (
+        existingGeneratedAt
+        && !Number.isNaN(existingGeneratedAt.getTime())
+        && existingGeneratedAt.getTime() > Date.now() - 30 * 60 * 1000
+      )
+    );
+    if (
+      !refresh
+      && existing
+      && existing.departmentName === department.name
+      && existing.sourceConfigHash === input.sourceConfigHash
+      && existing.inputHash === input.inputHash
+      && fallbackCacheIsFresh
+    ) {
+      return normalizeDepartmentDailyReport(existing);
+    }
+
+    if (!input.sources.length || !input.items.length) {
+      const message = !input.sources.length
+        ? `## 今日重点\n\n「${department.name}」尚未配置部门默认关注信源，暂不生成部门重点。`
+        : `## 今日重点\n\n「${department.name}」关注的信源今日暂无匹配动态。`;
+      return saveDepartmentDailyReport({
+        date,
+        department,
+        input,
+        markdown: message,
+        model: "none",
+        status: "empty",
+      });
+    }
+
+    let markdown;
+    let model = deepseekConfig.model;
+    let status = "generated";
+    let errorMessage = "";
+    try {
+      markdown = await callDeepSeek(buildDepartmentDailyPrompt({
+        date,
+        department,
+        sources: input.sources,
+        items: input.items,
+        publicMarkdown: input.report.contentMarkdown,
+      }));
+    } catch (error) {
+      status = "fallback";
+      model = "fallback";
+      errorMessage = error instanceof Error ? error.message : String(error);
+      markdown = buildDepartmentDailyFallbackMarkdown(department, input.items, errorMessage);
+    }
+
+    return saveDepartmentDailyReport({
+      date,
+      department,
+      input,
+      markdown,
+      model,
+      status,
+      error: errorMessage,
+    });
+  })().finally(() => {
+    departmentDailyGenerationPromises.delete(generationKey);
+  });
+  departmentDailyGenerationPromises.set(generationKey, generationPromise);
+  return generationPromise;
+}
+
+async function getMyDepartmentDailyReports(identity, date, { refresh = false } = {}) {
+  const departments = await getDirectUserDepartments(identity);
+  if (!departments.length) {
+    return {
+      date,
+      departments: [],
+      missingDepartmentSync: true,
+    };
+  }
+  const reports = await runWithConcurrency(
+    departments,
+    2,
+    (department) => generateDepartmentDailyReport(department, date, { refresh }),
+  );
+  return {
+    date,
+    departments: reports.filter(Boolean),
+    missingDepartmentSync: false,
+  };
+}
+
+async function listConfiguredDepartmentDailyTargets() {
+  return (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'id', department_id,
+        'name', department_name
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT d.department_id, d.department_name
+      FROM yimin_wx_departments d
+      JOIN (
+        SELECT department_id
+        FROM yimin_department_source_subscriptions
+        GROUP BY department_id
+      ) configured ON configured.department_id = d.department_id
+      ORDER BY d.department_name, d.department_id
+    ) configured_departments;
+  `)) || [];
+}
+
+async function generateAllDepartmentDailyReports(date, { refresh = false } = {}) {
+  await initDb();
+  const publicReport = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'date', DATE_FORMAT(report_date, '%Y-%m-%d')
+    )
+    FROM yimin_daily_reports
+    WHERE report_date = ${sqlString(date)}
+    LIMIT 1;
+  `);
+  if (!publicReport) {
+    const error = new Error(`请先生成 ${date} 的公共日报`);
+    error.code = "PUBLIC_DAILY_REPORT_MISSING";
+    throw error;
+  }
+
+  const departments = (await listConfiguredDepartmentDailyTargets())
+    .map((department) => ({
+      id: Number(department.id),
+      name: String(department.name || "").trim(),
+    }))
+    .filter((department) => department.id > 0 && department.name);
+  const reports = await runWithConcurrency(
+    departments,
+    2,
+    async (department) => {
+      try {
+        const report = await generateDepartmentDailyReport(department, date, { refresh });
+        return {
+          departmentId: department.id,
+          departmentName: department.name,
+          ok: Boolean(report),
+          status: report?.status || "skipped",
+          sourceCount: Number(report?.sourceCount || 0),
+          articleCount: Number(report?.articleCount || 0),
+          generatedAt: report?.generatedAt || null,
+          error: report ? (report.error || "") : "未生成部门日报",
+        };
+      } catch (error) {
+        return {
+          departmentId: department.id,
+          departmentName: department.name,
+          ok: false,
+          status: "failed",
+          sourceCount: 0,
+          articleCount: 0,
+          generatedAt: null,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  );
+
+  return {
+    date,
+    departmentCount: departments.length,
+    completedCount: reports.filter((report) => report.ok).length,
+    generatedCount: reports.filter((report) => report.status === "generated").length,
+    fallbackCount: reports.filter((report) => report.status === "fallback").length,
+    emptyCount: reports.filter((report) => report.status === "empty").length,
+    failedCount: reports.filter((report) => !report.ok).length,
+    reports,
+  };
+}
+
 async function readJsonBody(req) {
   return new Promise((resolvePromise, reject) => {
     let body = "";
@@ -5804,6 +6340,60 @@ const server = createServer(async (req, res) => {
         user: identity,
         supplement,
       });
+      return;
+    }
+
+    if (url.pathname === "/api/daily/department" && req.method === "GET") {
+      const identity = getSsoIdentityFromRequest(req);
+      if (!identity) {
+        sendJson(res, 401, {
+          ok: false,
+          error: "未识别企业微信身份",
+        });
+        return;
+      }
+      const result = await getMyDepartmentDailyReports(
+        identity,
+        url.searchParams.get("date") || getShanghaiDate(),
+        { refresh: url.searchParams.get("refresh") === "1" },
+      );
+      sendJson(res, 200, {
+        ok: true,
+        user: identity,
+        ...result,
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/daily/departments/generate" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      const date = String(body.date || url.searchParams.get("date") || getShanghaiDate());
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: "date must use YYYY-MM-DD",
+        });
+        return;
+      }
+
+      try {
+        const result = await generateAllDepartmentDailyReports(date, {
+          refresh: body.refresh === true || url.searchParams.get("refresh") === "1",
+        });
+        sendJson(res, result.failedCount ? 207 : 200, {
+          ok: result.failedCount === 0,
+          ...result,
+        });
+      } catch (error) {
+        sendJson(
+          res,
+          error?.code === "PUBLIC_DAILY_REPORT_MISSING" ? 409 : 500,
+          {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        );
+      }
       return;
     }
 
