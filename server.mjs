@@ -655,7 +655,7 @@ async function initDb() {
           department_id BIGINT PRIMARY KEY COMMENT '企业微信部门 ID',
           department_name VARCHAR(160) NOT NULL DEFAULT '' COMMENT '部门名称',
           parent_id BIGINT NULL COMMENT '上级部门 ID',
-          sort_order INT NOT NULL DEFAULT 0 COMMENT '企业微信部门排序',
+          sort_order BIGINT NOT NULL DEFAULT 0 COMMENT '企业微信部门排序',
           synced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最近同步时间',
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
           INDEX idx_wx_departments_parent (parent_id)
