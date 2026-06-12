@@ -141,7 +141,7 @@ const state = {
   user: null,
 };
 
-const authViews = ["subscriptions", "market", "sources", "review", "sso-stats", "department-subscriptions", "feedback-review", "about"];
+const authViews = ["market", "sources", "review", "sso-stats", "department-subscriptions", "feedback-review", "about"];
 const views = ["home", "all", "daily", "subscriptions", "market", "radar", "feedback", "login", "sources", "review", "sso-stats", "department-subscriptions", "feedback-review", "about", "changelog"];
 
 const filterStrip = document.querySelector("#filterStrip");
