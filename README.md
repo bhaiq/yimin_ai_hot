@@ -38,6 +38,9 @@ http://127.0.0.1:4173
 - 企业微信 SSO 访问登记：识别 `#daily?sso_auth_code=...&sso_user_id=...`，解密登录人姓名和 UserID（拼音名）并生成访问统计
 - 日报链接点击统计：通过 `/d/:token` 打开的日报会记录首次点击人、时间和 IP，并在访问统计中展示
 - 企业微信日报推送：后台异步发送 textcard 消息，支持重试失败推送，推送状态和错误信息在管理后台可查看
+- 个性化信源关注：企业微信用户可在“我的关注”中搜索、筛选和多选已启用信源
+- 专属日报补充：公共日报统一生成一次，再按用户关注信源整理当日动态；已在公共日报明确引用的文章不重复展示
+- 个性化推送提示：有订阅时提示关注信源及当日动态数量，无订阅时发送公共日报提示，不为每个人重复调用 AI
 - 日报候选过滤：无发布日期的首次抓取文章标记为 `daily_excluded`，不进入日报候选；回看时间窗口可配置
 - 日报完整分类：主题去重后不再按 12/8/8/8 条截断，全部候选都会进入日报分析与明细
 - 日报长期流水线：候选分页全量读取，新增文章分批分析，按事件聚合后生成正文；低相关和重复文章仍保留在完整资讯附录
@@ -72,6 +75,8 @@ http://127.0.0.1:4173
 - `yimin_market_project_status`：重点项目当日更新状态
 - `yimin_market_feedback`：市场部对素材的采用反馈
 - `yimin_sso_login_logs`：企业微信 SSO 访问登记日志
+- `yimin_wx_users`：稳定的企业微信 UserID 身份记录，预留部门同步字段
+- `yimin_user_source_subscriptions`：用户个人信源关注配置
 - `yimin_source_submissions`：用户提报的信源（status: pending/accepted/rejected）
 - `yimin_feedback`：前台公开反馈，记录反馈类型、页面、优先级、联系方式、反馈人和处理状态
 - `yimin_push_tasks`：企业微信日报推送任务
@@ -100,4 +105,33 @@ http://127.0.0.1:4173
 - ~~给后台增加信源审核开关，把 `source_submissions` 里的有效源转为启用源~~（已完成）
 - 将政策雷达从静态规则升级为基于文章主题和 AI 分类的数据库视图
 - 增加定时任务，按小时执行 `/api/news?refresh=1` 启动后台抓取；每天 7 点执行 `/api/daily?refresh=1` 生成过去 24 小时早报。若需要自然日完整日报，可调用 `/api/daily?refresh=1&window=calendar&date=YYYY-MM-DD`
+- ~~同步企业微信部门，增加部门默认订阅与个人覆盖规则~~（已完成）
+- 个性化日报下一阶段：确认使用率后，按订阅组合生成一次 AI 专属摘要，并缓存相同订阅组合的生成结果
 - ~~为 Jina Reader 配置代理支持，解决服务器网络环境连通性~~（待配置 `HTTPS_PROXY` 环境变量）
+
+## 本地测试企业微信身份
+
+本地无法经过企业微信推送链接时，可以在 `.env` 配置测试身份：
+
+```env
+LOCAL_TEST_SSO_ENABLED=1
+LOCAL_TEST_SSO_USER_ID=niujinlong
+LOCAL_TEST_SSO_USER_NAME=牛金龙
+LOCAL_TEST_SSO_DEPARTMENT_IDS=900000001
+```
+
+该身份只在非生产环境，并且请求来自 `localhost`、`127.0.0.1` 或 `::1` 时生效。真实签名 SSO 身份优先于本地测试身份。线上必须保持 `LOCAL_TEST_SSO_ENABLED=0`。
+
+`LOCAL_TEST_SSO_DEPARTMENT_IDS` 用逗号分隔，可在本地模拟部门继承。管理员登录后进入“部门关注”，为测试部门配置默认信源；个人取消部门默认或增加其他信源时，系统只保存差异项。
+
+## 企业微信通讯录同步
+
+通讯录同步已与日报推送解耦。定时任务直接调用：
+
+```bash
+curl -X POST https://你的域名/api/wx/sync-contacts
+```
+
+接口不需要 Token 或登录态。它会获取企业微信 `department/list`，再按部门调用 `user/simplelist?fetch_child=0`，更新 `yimin_wx_departments` 和 `yimin_wx_users.departments_json`，并返回部门数、用户数和部门成员关系数。
+
+`POST /api/push/daily` 不再执行或写入通讯录同步，只负责获取本次推送目标并发送日报。建议每天在日报生成和推送前独立执行一次通讯录同步。

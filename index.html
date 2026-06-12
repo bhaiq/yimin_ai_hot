@@ -13,13 +13,19 @@
   <body>
     <div class="app-shell">
       <aside class="sidebar" aria-label="主导航">
-        <a class="brand" href="#home" aria-label="移民热点首页">
-          <span class="brand-mark">移</span>
-          <span>
-            <strong>移民热点</strong>
-            <small>Immigration Hot</small>
-          </span>
-        </a>
+        <div class="brand-header">
+          <a class="brand" href="#home" aria-label="移民热点首页">
+            <span class="brand-mark">移</span>
+            <span>
+              <strong>移民热点</strong>
+              <small>Immigration Hot</small>
+            </span>
+          </a>
+          <button class="brief-info-button" type="button" data-brief-info-open aria-label="查看移民早报说明">
+            <span aria-hidden="true">i</span>
+            <span>说明</span>
+          </button>
+        </div>
 
         <nav class="nav-group" data-nav>
           <button class="nav-item active" data-view="home" type="button">
@@ -51,6 +57,10 @@
         <div class="sidebar-section" data-auth>
           <p class="section-label">工具</p>
           <nav class="nav-group compact" data-nav>
+            <button class="nav-item" data-view="subscriptions" type="button">
+              <span class="nav-icon">◇</span>
+              <span>我的关注</span>
+            </button>
             <button class="nav-item" data-view="market" type="button">
               <span class="nav-icon">✦</span>
               <span>市场素材</span>
@@ -66,6 +76,10 @@
             <button class="nav-item" data-view="sso-stats" type="button">
               <span class="nav-icon">※</span>
               <span>访问统计</span>
+            </button>
+            <button class="nav-item" data-view="department-subscriptions" type="button">
+              <span class="nav-icon">⌘</span>
+              <span>部门关注</span>
             </button>
             <button class="nav-item" data-view="feedback-review" type="button">
               <span class="nav-icon">☷</span>
@@ -108,10 +122,16 @@
       </aside>
 
       <header class="mobile-header">
-        <a class="brand compact-brand" href="#home">
-          <span class="brand-mark">移</span>
-          <strong>移民热点</strong>
-        </a>
+        <div class="mobile-brand-group">
+          <a class="brand compact-brand" href="#home">
+            <span class="brand-mark">移</span>
+            <strong>移民热点</strong>
+          </a>
+          <button class="brief-info-button compact" type="button" data-brief-info-open aria-label="查看移民早报说明">
+            <span aria-hidden="true">i</span>
+            <span>说明</span>
+          </button>
+        </div>
         <button class="icon-button" id="menuToggle" type="button" aria-label="展开导航">
           ☰
         </button>
@@ -194,9 +214,51 @@
               <p class="eyebrow">移民日报</p>
               <h1 id="dailyTitle">今日政策简报</h1>
             </div>
-            <button class="ghost-button" id="copyDaily" type="button">复制日报</button>
+            <div class="heading-actions">
+              <button class="ghost-button" type="button" data-view="subscriptions">管理我的关注</button>
+              <button class="ghost-button" id="copyDaily" type="button">复制日报</button>
+            </div>
           </div>
           <article class="daily-report" id="dailyReport"></article>
+        </section>
+
+        <section class="view utility-view wide-view" id="view-subscriptions" aria-labelledby="subscriptionsTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">个性化日报</p>
+              <h1 id="subscriptionsTitle">管理我的关注</h1>
+            </div>
+          </div>
+          <div class="subscription-panel">
+            <div class="subscription-intro">
+              <div>
+                <strong id="subscriptionIdentity">正在识别企业微信身份...</strong>
+                <p>公共日报会照常发送。这里选择的信源会作为你的专属关注补充，不会额外为每个人重复生成整份 AI 日报。</p>
+              </div>
+              <span class="subscription-count" id="subscriptionCount">0 个已关注</span>
+            </div>
+            <div class="subscription-toolbar">
+              <label class="subscription-search">
+                <span aria-hidden="true">⌕</span>
+                <input id="subscriptionSearch" type="search" placeholder="搜索信源名称" autocomplete="off">
+              </label>
+              <select id="subscriptionCountry" aria-label="按国家筛选">
+                <option value="">全部国家/地区</option>
+              </select>
+              <select id="subscriptionCategory" aria-label="按分类筛选">
+                <option value="">全部分类</option>
+              </select>
+              <label class="subscription-only-selected">
+                <input id="subscriptionOnlySelected" type="checkbox">
+                <span>只看已关注</span>
+              </label>
+            </div>
+            <div class="subscription-list" id="subscriptionList"></div>
+            <div class="subscription-footer">
+              <p class="form-note" id="subscriptionNote">保存后，从下一次打开日报起生效。</p>
+              <button class="primary-button" id="saveSubscriptions" type="button">保存关注</button>
+            </div>
+          </div>
         </section>
 
         <section class="view" id="view-market" aria-labelledby="marketTitle">
@@ -265,6 +327,39 @@
             <button class="ghost-button" id="refreshSsoStats" type="button">刷新</button>
           </div>
           <div class="sso-report" id="ssoStatsReport"></div>
+        </section>
+
+        <section class="view utility-view wide-view" id="view-department-subscriptions" aria-labelledby="departmentSubscriptionsTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">部门默认关注</p>
+              <h1 id="departmentSubscriptionsTitle">配置部门日报偏好</h1>
+            </div>
+          </div>
+          <div class="subscription-panel">
+            <div class="subscription-intro">
+              <div>
+                <strong>为部门设置默认信源</strong>
+                <p>部门成员会自动继承这些关注；个人仍可明确取消某个默认信源，或增加自己的关注。</p>
+              </div>
+              <span class="subscription-count" id="departmentSubscriptionCount">0 个默认关注</span>
+            </div>
+            <div class="department-subscription-toolbar">
+              <label>
+                <span>选择部门</span>
+                <select id="departmentSubscriptionSelect"></select>
+              </label>
+              <label class="subscription-search">
+                <span aria-hidden="true">⌕</span>
+                <input id="departmentSubscriptionSearch" type="search" placeholder="搜索信源名称" autocomplete="off">
+              </label>
+            </div>
+            <div class="subscription-list" id="departmentSubscriptionList"></div>
+            <div class="subscription-footer">
+              <p class="form-note" id="departmentSubscriptionNote">选择部门后配置默认关注。</p>
+              <button class="primary-button" id="saveDepartmentSubscriptions" type="button">保存部门关注</button>
+            </div>
+          </div>
         </section>
 
         <section class="view utility-view" id="view-about" aria-labelledby="aboutTitle">
@@ -381,6 +476,49 @@
           </div>
         </section>
       </main>
+    </div>
+
+    <div class="brief-info-overlay" id="briefInfoModal" aria-hidden="true">
+      <section class="brief-info-dialog" role="dialog" aria-modal="true" aria-labelledby="briefInfoTitle">
+        <button class="brief-info-close" type="button" data-brief-info-close aria-label="关闭移民早报说明">×</button>
+        <div class="brief-info-heading">
+          <span class="brief-info-icon" aria-hidden="true">i</span>
+          <div>
+            <p class="eyebrow">使用说明</p>
+            <h2 id="briefInfoTitle">关于移民早报的说明</h2>
+          </div>
+        </div>
+
+        <div class="brief-info-body">
+          <p>「移民早报」是由系统辅助生成的移民政策信息简报。</p>
+          <p>我们会持续采集来自政策官网、行业协会、知名律所等 <strong>80+ 个公开信息源</strong> 的最新动态，并通过 AI 对内容进行去重、聚合、提取和整理，帮助大家快速了解每日重点政策变化。</p>
+
+          <div class="brief-delivery">
+            <div>
+              <span>推送时间</span>
+              <strong>每天早上 8:50</strong>
+            </div>
+            <div>
+              <span>推送方式</span>
+              <strong>通过「企业微信 - 移民早报」送达每个人眼前</strong>
+            </div>
+          </div>
+
+          <div class="brief-info-notice">
+            <h3>需要说明的是</h3>
+            <ol>
+              <li>内容来源于公开渠道，不是 AI 凭空生成；</li>
+              <li>AI 主要负责信息整理和摘要提炼，用于提升阅读效率；</li>
+              <li>具体业务判断仍需结合原文链接、官方文件和专业判断；</li>
+              <li>如涉及客户沟通、方案调整或重大政策解读，请以官方原文和业务负责人确认为准。</li>
+            </ol>
+          </div>
+        </div>
+
+        <div class="brief-info-actions">
+          <button class="primary-button" type="button" data-brief-info-close>我知道了</button>
+        </div>
+      </section>
     </div>
 
     <script src="./app.js"></script>

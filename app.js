@@ -84,6 +84,27 @@ const state = {
   dailyLoading: false,
   dailyHistory: [],
   dailyDate: null,
+  personalDaily: null,
+  personalDailyLoading: false,
+  personalDailyError: "",
+  subscriptionSources: [],
+  subscriptionSelectedIds: new Set(),
+  subscriptionLoaded: false,
+  subscriptionLoading: false,
+  subscriptionSaving: false,
+  subscriptionError: "",
+  subscriptionSearch: "",
+  subscriptionCountry: "",
+  subscriptionCategory: "",
+  subscriptionOnlySelected: false,
+  departmentSubscriptions: [],
+  departmentSubscriptionSources: [],
+  departmentSubscriptionSelectedId: null,
+  departmentSubscriptionSelectedSourceIds: new Set(),
+  departmentSubscriptionSearch: "",
+  departmentSubscriptionLoading: false,
+  departmentSubscriptionSaving: false,
+  departmentSubscriptionError: "",
   ssoStats: null,
   ssoStatsLoading: false,
   ssoStatsError: "",
@@ -93,6 +114,7 @@ const state = {
   feedbackStatus: "all",
   ssoUserName: sessionStorage.getItem("yiminSsoUserName") || "",
   ssoUserId: sessionStorage.getItem("yiminSsoUserId") || "",
+  ssoLocalTest: false,
   liveMeta: {
     mode: "idle",
     text: "等待真实信源数据",
@@ -101,8 +123,8 @@ const state = {
   user: null,
 };
 
-const authViews = ["market", "sources", "review", "sso-stats", "feedback-review", "about"];
-const views = ["home", "all", "daily", "market", "radar", "feedback", "login", "sources", "review", "sso-stats", "feedback-review", "about", "changelog"];
+const authViews = ["subscriptions", "market", "sources", "review", "sso-stats", "department-subscriptions", "feedback-review", "about"];
+const views = ["home", "all", "daily", "subscriptions", "market", "radar", "feedback", "login", "sources", "review", "sso-stats", "department-subscriptions", "feedback-review", "about", "changelog"];
 
 const filterStrip = document.querySelector("#filterStrip");
 const featuredFeed = document.querySelector("#featuredFeed");
@@ -113,6 +135,13 @@ const searchInput = document.querySelector("#searchInput");
 const homeCount = document.querySelector("#homeCount");
 const allCount = document.querySelector("#allCount");
 const dailyReport = document.querySelector("#dailyReport");
+const subscriptionList = document.querySelector("#subscriptionList");
+const subscriptionIdentity = document.querySelector("#subscriptionIdentity");
+const subscriptionCount = document.querySelector("#subscriptionCount");
+const subscriptionNote = document.querySelector("#subscriptionNote");
+const departmentSubscriptionList = document.querySelector("#departmentSubscriptionList");
+const departmentSubscriptionCount = document.querySelector("#departmentSubscriptionCount");
+const departmentSubscriptionNote = document.querySelector("#departmentSubscriptionNote");
 const marketReport = document.querySelector("#marketReport");
 const ssoStatsReport = document.querySelector("#ssoStatsReport");
 const feedbackReviewList = document.querySelector("#feedbackReviewList");
@@ -443,6 +472,296 @@ function renderSnapshots() {
     .join("");
 }
 
+function renderPersonalDaily() {
+  if (!state.ssoUserId) {
+    return `
+      <section class="personal-daily">
+        <div class="personal-daily-head">
+          <div>
+            <h2>你的专属关注</h2>
+            <p>公共日报之外，按你关注的信源补充当日动态。</p>
+          </div>
+        </div>
+        <div class="personal-daily-empty">
+          <p>从企业微信日报链接进入后，系统会识别你的 UserID，届时可以设置专属关注。</p>
+          <button class="ghost-button compact" type="button" data-view="subscriptions">查看关注设置</button>
+        </div>
+      </section>
+    `;
+  }
+
+  if (state.personalDailyLoading) {
+    return `
+      <section class="personal-daily">
+        <div class="personal-daily-head">
+          <div>
+            <h2>你的专属关注</h2>
+            <p>正在整理你关注信源的当日更新...</p>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  if (state.personalDailyError) {
+    return `
+      <section class="personal-daily">
+        <div class="personal-daily-head"><div><h2>你的专属关注</h2></div></div>
+        <div class="personal-daily-empty"><p>${escapeHtml(state.personalDailyError)}</p></div>
+      </section>
+    `;
+  }
+
+  const supplement = state.personalDaily;
+  if (!supplement || Number(supplement.subscriptionCount || 0) === 0) {
+    return `
+      <section class="personal-daily">
+        <div class="personal-daily-head">
+          <div>
+            <h2>你的专属关注</h2>
+            <p>当前没有设置专门关注的信源，因此只展示公共日报。</p>
+          </div>
+        </div>
+        <div class="personal-daily-empty">
+          <p>选择常用的官方机构、国家或业务信源后，这里会自动补充相关更新。</p>
+          <button class="ghost-button compact" type="button" data-view="subscriptions">管理我的关注</button>
+        </div>
+      </section>
+    `;
+  }
+
+  const items = Array.isArray(supplement.items) ? supplement.items : [];
+  const meta = `
+    <div class="personal-daily-meta">
+      <span>关注 ${escapeHtml(supplement.subscriptionCount || 0)} 个信源</span>
+      <span>匹配 ${escapeHtml(supplement.matchedCount || 0)} 条</span>
+      ${Number(supplement.publicCoveredCount || 0) > 0
+        ? `<span>${escapeHtml(supplement.publicCoveredCount)} 条已纳入公共日报</span>`
+        : ""}
+      ${Number(supplement.hiddenCount || 0) > 0
+        ? `<span>另有 ${escapeHtml(supplement.hiddenCount)} 条未展开</span>`
+        : ""}
+    </div>
+  `;
+
+  if (!items.length) {
+    const message = Number(supplement.matchedCount || 0) > 0
+      ? "你关注的信源今日有更新，但均已纳入上方公共日报，不再重复展示。"
+      : "你关注的信源今日暂无新增。";
+    return `
+      <section class="personal-daily">
+        <div class="personal-daily-head">
+          <div>
+            <h2>你的专属关注</h2>
+            <p>${escapeHtml(state.ssoUserName || state.ssoUserId)} 的订阅补充</p>
+          </div>
+          <button class="ghost-button compact" type="button" data-view="subscriptions">调整关注</button>
+        </div>
+        ${meta}
+        <div class="personal-daily-empty"><p>${message}</p></div>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="personal-daily">
+      <div class="personal-daily-head">
+        <div>
+          <h2>你的专属关注</h2>
+          <p>${escapeHtml(state.ssoUserName || state.ssoUserId)} 的订阅补充，已排除公共日报中明确引用的文章。</p>
+        </div>
+        <button class="ghost-button compact" type="button" data-view="subscriptions">调整关注</button>
+      </div>
+      ${meta}
+      <div class="personal-daily-list">
+        ${items.map((item) => {
+          const url = safeUrl(item.url);
+          const title = escapeHtml(item.title || "未命名动态");
+          return `
+            <article class="personal-daily-item">
+              <div class="personal-daily-item-top">
+                <span class="personal-source-badge">${escapeHtml(item.source || "未知信源")}</span>
+                <span>${escapeHtml(item.country || "全球")} · ${escapeHtml(item.category || "未分类")}</span>
+                ${item.articleDate ? `<time>${escapeHtml(String(item.articleDate).slice(0, 10))}</time>` : ""}
+              </div>
+              <h3>${url
+                ? `<a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer">${title}</a>`
+                : title}</h3>
+              ${item.summary ? `<p>${escapeHtml(item.summary)}</p>` : ""}
+            </article>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function getFilteredSubscriptionSources() {
+  const query = state.subscriptionSearch.trim().toLowerCase();
+  return state.subscriptionSources.filter((source) => {
+    const sourceId = Number(source.id);
+    if (state.subscriptionOnlySelected && !state.subscriptionSelectedIds.has(sourceId)) return false;
+    if (state.subscriptionCountry && source.country !== state.subscriptionCountry) return false;
+    if (state.subscriptionCategory && source.category !== state.subscriptionCategory) return false;
+    if (query) {
+      const haystack = `${source.name} ${source.country} ${source.category} ${source.type}`.toLowerCase();
+      if (!haystack.includes(query)) return false;
+    }
+    return true;
+  });
+}
+
+function renderSubscriptionFilters() {
+  const countrySelect = document.querySelector("#subscriptionCountry");
+  const categorySelect = document.querySelector("#subscriptionCategory");
+  if (!countrySelect || !categorySelect) return;
+
+  const countries = [...new Set(state.subscriptionSources.map((source) => source.country).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, "zh-CN"));
+  const categories = [...new Set(state.subscriptionSources.map((source) => source.category).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, "zh-CN"));
+
+  countrySelect.innerHTML = '<option value="">全部国家/地区</option>'
+    + countries.map((country) => `<option value="${escapeAttr(country)}">${escapeHtml(country)}</option>`).join("");
+  categorySelect.innerHTML = '<option value="">全部分类</option>'
+    + categories.map((category) => `<option value="${escapeAttr(category)}">${escapeHtml(category)}</option>`).join("");
+  countrySelect.value = state.subscriptionCountry;
+  categorySelect.value = state.subscriptionCategory;
+}
+
+function renderSubscriptions() {
+  if (!subscriptionList || !subscriptionIdentity || !subscriptionCount || !subscriptionNote) return;
+
+  const selectedCount = state.subscriptionSelectedIds.size;
+  subscriptionCount.textContent = `${selectedCount} 个已关注`;
+  subscriptionIdentity.textContent = state.ssoUserId
+    ? `${state.ssoUserName || "企业微信用户"} · ${state.ssoUserId}${state.ssoLocalTest ? " · 本地测试身份" : ""}`
+    : "尚未识别企业微信身份";
+
+  if (!state.ssoUserId) {
+    subscriptionList.innerHTML = `
+      <div class="personal-daily-empty">
+        <p>请从企业微信推送的日报链接进入。系统识别 UserID 后，才能保存个人关注配置。</p>
+      </div>
+    `;
+    subscriptionNote.textContent = "姓名不能作为订阅身份，必须使用企业微信 UserID。";
+    document.querySelector("#saveSubscriptions").disabled = true;
+    return;
+  }
+
+  document.querySelector("#saveSubscriptions").disabled = state.subscriptionLoading || state.subscriptionSaving;
+
+  if (state.subscriptionLoading) {
+    subscriptionList.innerHTML = '<div class="empty">正在加载数据库中的信源...</div>';
+    subscriptionNote.textContent = "正在读取你的关注配置。";
+    return;
+  }
+
+  if (state.subscriptionError) {
+    subscriptionList.innerHTML = `<div class="empty">${escapeHtml(state.subscriptionError)}</div>`;
+    subscriptionNote.textContent = "加载失败，请稍后重试。";
+    return;
+  }
+
+  renderSubscriptionFilters();
+  const sources = getFilteredSubscriptionSources();
+  if (!sources.length) {
+    subscriptionList.innerHTML = '<div class="empty">没有符合当前筛选条件的信源。</div>';
+  } else {
+    subscriptionList.innerHTML = sources.map((source) => {
+      const sourceId = Number(source.id);
+      const checked = state.subscriptionSelectedIds.has(sourceId);
+      const lastFetched = source.lastFetchedAt ? String(source.lastFetchedAt).slice(0, 10) : "尚未抓取";
+      const originLabel = source.departmentDefault
+        ? (source.personalStatus === "muted" ? "已取消部门默认" : "部门默认")
+        : source.personalStatus === "subscribed"
+          ? "个人新增"
+          : "";
+      return `
+        <label class="subscription-source">
+          <input type="checkbox" data-subscription-source="${sourceId}"${checked ? " checked" : ""}>
+          <span>
+            <strong>${escapeHtml(source.name || "未命名信源")}${originLabel ? ` <em class="subscription-origin">${escapeHtml(originLabel)}</em>` : ""}</strong>
+            <small>${escapeHtml(source.country || "全球")} · ${escapeHtml(source.category || "未分类")} · ${escapeHtml(source.articleCount || 0)} 条 · ${escapeHtml(lastFetched)}</small>
+          </span>
+        </label>
+      `;
+    }).join("");
+  }
+
+  subscriptionNote.textContent = state.subscriptionSaving
+    ? "正在保存..."
+    : "保存后，日报会增加“你的专属关注”补充；没有新增时不会调用 AI。";
+}
+
+function renderDepartmentSubscriptions() {
+  if (!departmentSubscriptionList || !departmentSubscriptionCount || !departmentSubscriptionNote) return;
+  const select = document.querySelector("#departmentSubscriptionSelect");
+  const saveButton = document.querySelector("#saveDepartmentSubscriptions");
+  if (!select || !saveButton) return;
+
+  const departments = state.departmentSubscriptions;
+  select.innerHTML = departments.length
+    ? departments.map((department) => `
+      <option value="${department.id}">
+        ${escapeHtml(department.name || `部门 ${department.id}`)}（${escapeHtml(department.userCount || 0)} 人）
+      </option>
+    `).join("")
+    : '<option value="">暂无已同步部门</option>';
+  select.value = state.departmentSubscriptionSelectedId || "";
+  saveButton.disabled = (
+    !state.departmentSubscriptionSelectedId
+    || state.departmentSubscriptionLoading
+    || state.departmentSubscriptionSaving
+  );
+  departmentSubscriptionCount.textContent =
+    `${state.departmentSubscriptionSelectedSourceIds.size} 个默认关注`;
+
+  if (state.departmentSubscriptionLoading) {
+    departmentSubscriptionList.innerHTML = '<div class="empty">正在加载部门与信源...</div>';
+    departmentSubscriptionNote.textContent = "首次推送时会自动同步企业微信部门和成员关系。";
+    return;
+  }
+  if (state.departmentSubscriptionError) {
+    departmentSubscriptionList.innerHTML =
+      `<div class="empty">${escapeHtml(state.departmentSubscriptionError)}</div>`;
+    departmentSubscriptionNote.textContent = "加载失败，请稍后重试。";
+    return;
+  }
+  if (!departments.length) {
+    departmentSubscriptionList.innerHTML =
+      '<div class="empty">尚未发现部门。执行一次企业微信推送后会自动同步；本地可通过环境变量配置测试部门。</div>';
+    departmentSubscriptionNote.textContent = "需要先同步企业微信部门数据。";
+    return;
+  }
+
+  const query = state.departmentSubscriptionSearch.trim().toLowerCase();
+  const sources = state.departmentSubscriptionSources.filter((source) => {
+    if (!query) return true;
+    return `${source.name} ${source.country} ${source.category} ${source.type}`
+      .toLowerCase()
+      .includes(query);
+  });
+  departmentSubscriptionList.innerHTML = sources.length
+    ? sources.map((source) => {
+      const sourceId = Number(source.id);
+      const checked = state.departmentSubscriptionSelectedSourceIds.has(sourceId);
+      return `
+        <label class="subscription-source">
+          <input type="checkbox" data-department-subscription-source="${sourceId}"${checked ? " checked" : ""}>
+          <span>
+            <strong>${escapeHtml(source.name || "未命名信源")}</strong>
+            <small>${escapeHtml(source.country || "全球")} · ${escapeHtml(source.category || "未分类")}</small>
+          </span>
+        </label>
+      `;
+    }).join("")
+    : '<div class="empty">没有符合搜索条件的信源。</div>';
+  departmentSubscriptionNote.textContent = state.departmentSubscriptionSaving
+    ? "正在保存..."
+    : "保存后，部门成员下次打开日报或接收推送时立即按新配置计算。";
+}
+
 function renderDaily() {
   const historyHtml = state.dailyHistory.length > 0
     ? `<div class="daily-history">
@@ -476,6 +795,7 @@ function renderDaily() {
             <span>${escapeHtml(state.dailyReport.model || "AI")} · 全量 ${escapeHtml(state.dailyReport.sourceItemCount || 0)} 条${analyzedMeta}${windowText}</span>
           </div>
           ${state.dailyReport.html}
+          ${renderPersonalDaily()}
         </div>
         ${historyHtml}
       </div>
@@ -1187,6 +1507,8 @@ function renderContent() {
   renderFeed(allFeed, items);
   renderSnapshots();
   renderDaily();
+  renderSubscriptions();
+  renderDepartmentSubscriptions();
   renderMarket();
   renderRadar();
   renderSsoStats();
@@ -1406,6 +1728,8 @@ async function loadDailyReport({ refresh = false, date } = {}) {
   }
 
   state.dailyLoading = true;
+  state.personalDaily = null;
+  state.personalDailyError = "";
   renderContent();
 
   try {
@@ -1428,6 +1752,206 @@ async function loadDailyReport({ refresh = false, date } = {}) {
     state.dailyReport = null;
   } finally {
     state.dailyLoading = false;
+    renderContent();
+  }
+
+  if (state.ssoUserId && state.dailyReport) {
+    loadPersonalDaily({ date: state.dailyDate || date });
+  }
+}
+
+async function loadPersonalDaily({ date } = {}) {
+  if (window.location.protocol === "file:" || !state.ssoUserId) {
+    state.personalDaily = null;
+    state.personalDailyError = "";
+    renderContent();
+    return;
+  }
+
+  state.personalDailyLoading = true;
+  state.personalDailyError = "";
+  renderContent();
+
+  try {
+    const params = new URLSearchParams();
+    if (date) params.set("date", date);
+    const qs = params.toString();
+    const response = await fetch(`/api/daily/personal${qs ? `?${qs}` : ""}`, {
+      headers: { accept: "application/json" },
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.personalDaily = data.supplement || null;
+  } catch (error) {
+    state.personalDaily = null;
+    state.personalDailyError = `专属关注加载失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    state.personalDailyLoading = false;
+    renderContent();
+  }
+}
+
+async function loadSubscriptions() {
+  if (window.location.protocol === "file:" || !state.ssoUserId) {
+    renderContent();
+    return;
+  }
+
+  state.subscriptionLoading = true;
+  state.subscriptionError = "";
+  renderContent();
+
+  try {
+    const response = await fetch("/api/subscriptions/me", {
+      headers: { accept: "application/json" },
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.subscriptionSources = Array.isArray(data.sources) ? data.sources : [];
+    state.subscriptionSelectedIds = new Set(
+      (Array.isArray(data.subscribedSourceIds) ? data.subscribedSourceIds : [])
+        .map(Number)
+        .filter(Number.isFinite),
+    );
+    state.subscriptionLoaded = true;
+  } catch (error) {
+    state.subscriptionSources = [];
+    state.subscriptionSelectedIds = new Set();
+    state.subscriptionLoaded = false;
+    state.subscriptionError = `关注配置加载失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    state.subscriptionLoading = false;
+    renderContent();
+  }
+}
+
+async function saveSubscriptions() {
+  if (window.location.protocol === "file:" || !state.ssoUserId || state.subscriptionSaving) return;
+
+  state.subscriptionSaving = true;
+  state.subscriptionError = "";
+  renderContent();
+
+  try {
+    const response = await fetch("/api/subscriptions/me", {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify({
+        sourceIds: [...state.subscriptionSelectedIds],
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.subscriptionSources = Array.isArray(data.sources) ? data.sources : state.subscriptionSources;
+    state.subscriptionSelectedIds = new Set(
+      (Array.isArray(data.subscribedSourceIds) ? data.subscribedSourceIds : [])
+        .map(Number)
+        .filter(Number.isFinite),
+    );
+    state.subscriptionLoaded = true;
+    subscriptionNote.textContent = `已保存 ${state.subscriptionSelectedIds.size} 个关注信源。`;
+    await loadPersonalDaily({ date: state.dailyDate || undefined });
+  } catch (error) {
+    state.subscriptionError = `保存失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    state.subscriptionSaving = false;
+    renderContent();
+  }
+}
+
+function selectDepartmentSubscription(departmentIdValue) {
+  const departmentId = Number(departmentIdValue);
+  const department = state.departmentSubscriptions.find((item) => Number(item.id) === departmentId);
+  state.departmentSubscriptionSelectedId = department ? departmentId : null;
+  state.departmentSubscriptionSelectedSourceIds = new Set(
+    (department?.sourceIds || []).map(Number).filter(Number.isFinite),
+  );
+}
+
+async function loadDepartmentSubscriptions() {
+  if (window.location.protocol === "file:" || state.departmentSubscriptionLoading) return;
+  state.departmentSubscriptionLoading = true;
+  state.departmentSubscriptionError = "";
+  renderContent();
+
+  try {
+    const response = await fetch("/api/subscriptions/departments", {
+      headers: { accept: "application/json" },
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.departmentSubscriptions = Array.isArray(data.departments) ? data.departments : [];
+    state.departmentSubscriptionSources = Array.isArray(data.sources) ? data.sources : [];
+    const selectedStillExists = state.departmentSubscriptions.some(
+      (department) => Number(department.id) === Number(state.departmentSubscriptionSelectedId),
+    );
+    selectDepartmentSubscription(
+      selectedStillExists
+        ? state.departmentSubscriptionSelectedId
+        : state.departmentSubscriptions[0]?.id,
+    );
+  } catch (error) {
+    state.departmentSubscriptions = [];
+    state.departmentSubscriptionSources = [];
+    state.departmentSubscriptionError =
+      `部门关注加载失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    state.departmentSubscriptionLoading = false;
+    renderContent();
+  }
+}
+
+async function saveDepartmentSubscriptions() {
+  if (
+    window.location.protocol === "file:"
+    || !state.departmentSubscriptionSelectedId
+    || state.departmentSubscriptionSaving
+  ) return;
+
+  state.departmentSubscriptionSaving = true;
+  state.departmentSubscriptionError = "";
+  renderContent();
+  try {
+    const response = await fetch("/api/subscriptions/departments", {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify({
+        departmentId: state.departmentSubscriptionSelectedId,
+        sourceIds: [...state.departmentSubscriptionSelectedSourceIds],
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.departmentSubscriptions = Array.isArray(data.departments) ? data.departments : [];
+    state.departmentSubscriptionSources = Array.isArray(data.sources)
+      ? data.sources
+      : state.departmentSubscriptionSources;
+    selectDepartmentSubscription(state.departmentSubscriptionSelectedId);
+    departmentSubscriptionNote.textContent =
+      `已保存 ${state.departmentSubscriptionSelectedSourceIds.size} 个部门默认关注。`;
+    state.subscriptionLoaded = false;
+    state.personalDaily = null;
+  } catch (error) {
+    state.departmentSubscriptionError =
+      `部门关注保存失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    state.departmentSubscriptionSaving = false;
     renderContent();
   }
 }
@@ -1460,10 +1984,11 @@ async function loadChangelog() {
     }
     let html = "";
     for (const item of data.items) {
+      const description = String(item.description || "").replace(/\\r\\n|\\n|\\r/g, "\n");
       html += `<article>
         <time>${escapeHtml(item.log_date)}</time>
         <h2>${escapeHtml(item.title)}</h2>
-        ${item.description ? `<p>${escapeHtml(item.description)}</p>` : ""}
+        ${description ? `<p>${escapeHtml(description)}</p>` : ""}
       </article>`;
     }
     container.innerHTML = html;
@@ -1571,6 +2096,7 @@ async function recordSsoVisitFromHash() {
         }
         if (data.userId) {
           state.ssoUserId = data.userId;
+          state.ssoLocalTest = false;
           sessionStorage.setItem("yiminSsoUserId", data.userId);
         }
         sessionStorage.setItem(dedupeKey, "1");
@@ -1598,6 +2124,7 @@ async function loadSsoIdentity() {
     }
     if (data.userId) {
       state.ssoUserId = data.userId;
+      state.ssoLocalTest = Boolean(data.localTest);
       sessionStorage.setItem("yiminSsoUserId", data.userId);
     }
   } catch {
@@ -1641,7 +2168,15 @@ function setView(routeValue) {
     loadDailyHistory();
     if (!state.dailyReport && !state.dailyLoading) {
       loadDailyReport();
+    } else if (state.ssoUserId && !state.personalDaily && !state.personalDailyLoading) {
+      loadPersonalDaily({ date: state.dailyDate || undefined });
     }
+  }
+  if (viewName === "subscriptions" && !state.subscriptionLoaded && !state.subscriptionLoading) {
+    loadSubscriptions();
+  }
+  if (viewName === "department-subscriptions" && !state.departmentSubscriptionLoading) {
+    loadDepartmentSubscriptions();
   }
   if (viewName === "market") {
     loadMarketHistory();
@@ -1883,6 +2418,70 @@ searchInput.addEventListener("input", (event) => {
   renderContent();
 });
 
+document.querySelector("#subscriptionSearch")?.addEventListener("input", (event) => {
+  state.subscriptionSearch = event.target.value;
+  renderSubscriptions();
+});
+
+document.querySelector("#subscriptionCountry")?.addEventListener("change", (event) => {
+  state.subscriptionCountry = event.target.value;
+  renderSubscriptions();
+});
+
+document.querySelector("#subscriptionCategory")?.addEventListener("change", (event) => {
+  state.subscriptionCategory = event.target.value;
+  renderSubscriptions();
+});
+
+document.querySelector("#subscriptionOnlySelected")?.addEventListener("change", (event) => {
+  state.subscriptionOnlySelected = event.target.checked;
+  renderSubscriptions();
+});
+
+subscriptionList?.addEventListener("change", (event) => {
+  const checkbox = event.target.closest("[data-subscription-source]");
+  if (!checkbox) return;
+  const sourceId = Number(checkbox.dataset.subscriptionSource);
+  if (!Number.isFinite(sourceId)) return;
+  if (checkbox.checked) {
+    state.subscriptionSelectedIds.add(sourceId);
+  } else {
+    state.subscriptionSelectedIds.delete(sourceId);
+  }
+  renderSubscriptions();
+});
+
+document.querySelector("#saveSubscriptions")?.addEventListener("click", () => {
+  saveSubscriptions();
+});
+
+document.querySelector("#departmentSubscriptionSelect")?.addEventListener("change", (event) => {
+  selectDepartmentSubscription(event.target.value);
+  renderDepartmentSubscriptions();
+});
+
+document.querySelector("#departmentSubscriptionSearch")?.addEventListener("input", (event) => {
+  state.departmentSubscriptionSearch = event.target.value;
+  renderDepartmentSubscriptions();
+});
+
+departmentSubscriptionList?.addEventListener("change", (event) => {
+  const checkbox = event.target.closest("[data-department-subscription-source]");
+  if (!checkbox) return;
+  const sourceId = Number(checkbox.dataset.departmentSubscriptionSource);
+  if (!Number.isFinite(sourceId)) return;
+  if (checkbox.checked) {
+    state.departmentSubscriptionSelectedSourceIds.add(sourceId);
+  } else {
+    state.departmentSubscriptionSelectedSourceIds.delete(sourceId);
+  }
+  renderDepartmentSubscriptions();
+});
+
+document.querySelector("#saveDepartmentSubscriptions")?.addEventListener("click", () => {
+  saveDepartmentSubscriptions();
+});
+
 refreshNews.addEventListener("click", () => {
   loadLiveNews({ refresh: true });
 });
@@ -2004,8 +2603,49 @@ window.addEventListener("hashchange", () => {
   }
 });
 
+let lastBriefInfoTrigger = null;
+
+function openBriefInfoModal(trigger) {
+  const modal = document.querySelector("#briefInfoModal");
+  if (!modal) return;
+  lastBriefInfoTrigger = trigger || document.activeElement;
+  closeArticleModal();
+  modal.classList.add("active");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.style.overflow = "hidden";
+  modal.querySelector("[data-brief-info-close]")?.focus();
+}
+
+function closeBriefInfoModal() {
+  const modal = document.querySelector("#briefInfoModal");
+  if (!modal?.classList.contains("active")) return;
+  modal.classList.remove("active");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.style.overflow = "";
+  lastBriefInfoTrigger?.focus?.();
+}
+
+document.querySelectorAll("[data-brief-info-open]").forEach((button) => {
+  button.addEventListener("click", () => openBriefInfoModal(button));
+});
+
+document.querySelectorAll("[data-brief-info-close]").forEach((button) => {
+  button.addEventListener("click", closeBriefInfoModal);
+});
+
+document.querySelector("#briefInfoModal")?.addEventListener("click", (event) => {
+  if (event.target === event.currentTarget) {
+    closeBriefInfoModal();
+  }
+});
+
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
+    const briefInfoModal = document.querySelector("#briefInfoModal");
+    if (briefInfoModal?.classList.contains("active")) {
+      closeBriefInfoModal();
+      return;
+    }
     const overlay = document.getElementById("modalOverlay");
     if (overlay?.classList.contains("active")) {
       closeArticleModal();

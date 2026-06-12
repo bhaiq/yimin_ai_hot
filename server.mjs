@@ -57,6 +57,17 @@ const ssoConfig = {
   secretKey: process.env.SSO_SECRET_KEY || "GlobeVisa_SSO_2026_SecretKey!@#",
   ivSeed: process.env.SSO_IV_SEED || "globevisa_sso_iv",
 };
+const localTestSsoConfig = {
+  enabled:
+    process.env.LOCAL_TEST_SSO_ENABLED === "1"
+    && process.env.NODE_ENV !== "production",
+  userId: String(process.env.LOCAL_TEST_SSO_USER_ID || "").trim().slice(0, 128),
+  userName: String(process.env.LOCAL_TEST_SSO_USER_NAME || "").trim().slice(0, 160),
+  departmentIds: String(process.env.LOCAL_TEST_SSO_DEPARTMENT_IDS || "")
+    .split(",")
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isSafeInteger(value) && value > 0),
+};
 const firecrawlConfig = {
   apiKey: process.env.FIRECRAWL_API_KEY || "",
   baseUrl: "https://api.firecrawl.dev/v1",
@@ -613,6 +624,53 @@ async function initDb() {
           INDEX idx_sso_login_user_id (user_id),
           INDEX idx_sso_login_enc_hash (enc_hash)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='企业微信 SSO 访问登记日志表';
+
+        CREATE TABLE IF NOT EXISTS yimin_wx_users (
+          userid VARCHAR(128) PRIMARY KEY COMMENT '企业微信 UserID',
+          user_name VARCHAR(160) NOT NULL DEFAULT '' COMMENT '企业微信用户姓名',
+          departments_json JSON NULL COMMENT '所属部门，预留企业微信同步',
+          first_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次识别时间',
+          last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最近识别时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          INDEX idx_wx_users_name (user_name),
+          INDEX idx_wx_users_last_seen (last_seen_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='企业微信用户身份表';
+
+        CREATE TABLE IF NOT EXISTS yimin_user_source_subscriptions (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          userid VARCHAR(128) NOT NULL COMMENT '企业微信 UserID',
+          source_id BIGINT NOT NULL COMMENT '关注的信源 ID',
+          status ENUM('subscribed','muted') NOT NULL DEFAULT 'subscribed' COMMENT '订阅状态',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_user_source_subscription (userid, source_id),
+          INDEX idx_user_source_status (userid, status),
+          INDEX idx_subscription_source (source_id),
+          CONSTRAINT fk_subscription_user FOREIGN KEY (userid) REFERENCES yimin_wx_users(userid) ON DELETE CASCADE,
+          CONSTRAINT fk_subscription_source FOREIGN KEY (source_id) REFERENCES yimin_sources(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户信源关注配置表';
+
+        CREATE TABLE IF NOT EXISTS yimin_wx_departments (
+          department_id BIGINT PRIMARY KEY COMMENT '企业微信部门 ID',
+          department_name VARCHAR(160) NOT NULL DEFAULT '' COMMENT '部门名称',
+          parent_id BIGINT NULL COMMENT '上级部门 ID',
+          sort_order INT NOT NULL DEFAULT 0 COMMENT '企业微信部门排序',
+          synced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最近同步时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          INDEX idx_wx_departments_parent (parent_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='企业微信部门表';
+
+        CREATE TABLE IF NOT EXISTS yimin_department_source_subscriptions (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          department_id BIGINT NOT NULL COMMENT '企业微信部门 ID',
+          source_id BIGINT NOT NULL COMMENT '部门默认关注的信源 ID',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_department_source_subscription (department_id, source_id),
+          INDEX idx_department_subscription_source (source_id),
+          CONSTRAINT fk_department_subscription_source FOREIGN KEY (source_id) REFERENCES yimin_sources(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='部门默认信源关注配置表';
       `);
 
       const colCheck = await mysqlRun(`
@@ -1813,6 +1871,7 @@ const wxWorkConfig = {
   excludeDeptUrl: process.env.WX_WORK_PUSH_EXCLUDE_DEPT_URL || "https://restful.globevisa.cn/Km/YiminHot/getMainland",
   openDebug: ["1", "true", "yes"].includes(String(process.env.WX_WORK_OPEN_DEBUG || "").toLowerCase()),
 };
+let wxContactsSyncPromise = null;
 
 function generatePushToken() {
   const chars = "abcdefghijkmnpqrstuvwxyz23456789";
@@ -1909,8 +1968,8 @@ function buildWxJsConfig(jsapiTicket, url) {
   return { nonceStr, timestamp, signature };
 }
 
-async function getWxDepartmentUsers(accessToken, deptId) {
-  const url = `https://qyapi.weixin.qq.com/cgi-bin/user/simplelist?access_token=${accessToken}&department_id=${deptId}&fetch_child=1`;
+async function getWxDepartmentUsers(accessToken, deptId, { fetchChild = true } = {}) {
+  const url = `https://qyapi.weixin.qq.com/cgi-bin/user/simplelist?access_token=${accessToken}&department_id=${deptId}&fetch_child=${fetchChild ? 1 : 0}`;
   const res = await fetch(url);
   const data = await res.json();
   if (data.errcode !== 0) {
@@ -1919,12 +1978,14 @@ async function getWxDepartmentUsers(accessToken, deptId) {
   return (data.userlist || []).map((u) => ({
     userid: String(u.userid || ""),
     name: String(u.name || ""),
+    departmentIds: (Array.isArray(u.department) ? u.department : [])
+      .map(Number)
+      .filter((value) => Number.isSafeInteger(value) && value > 0),
   }));
 }
 
 async function getWxAllPushUsers(accessToken) {
-  const seen = new Set();
-  const users = [];
+  const usersById = new Map();
   const deptIds = wxWorkConfig.pushDeptIds.length > 0
     ? wxWorkConfig.pushDeptIds
     : [1];
@@ -1932,12 +1993,20 @@ async function getWxAllPushUsers(accessToken) {
   for (const deptId of deptIds) {
     const deptUsers = await getWxDepartmentUsers(accessToken, deptId);
     for (const u of deptUsers) {
-      if (u.userid && !seen.has(u.userid)) {
-        seen.add(u.userid);
-        users.push(u);
-      }
+      if (!u.userid) continue;
+      const existing = usersById.get(u.userid);
+      const departmentIds = [...new Set([
+        ...(existing?.departmentIds || []),
+        ...((u.departmentIds || []).length ? u.departmentIds : [deptId]),
+      ])];
+      usersById.set(u.userid, {
+        userid: u.userid,
+        name: u.name || existing?.name || "",
+        departmentIds,
+      });
     }
   }
+  const users = [...usersById.values()];
 
   // 从接口获取排除部门，递归子部门后差集过滤
   let excludeIds = [];
@@ -1963,6 +2032,135 @@ async function getWxAllPushUsers(accessToken) {
   }
 
   return users;
+}
+
+async function syncWxDepartments(accessToken) {
+  const res = await fetch(
+    `https://qyapi.weixin.qq.com/cgi-bin/department/list?access_token=${accessToken}`,
+  );
+  const data = await res.json();
+  if (data.errcode !== 0) {
+    throw new Error(`WeChat Work department list failed: ${data.errcode} ${data.errmsg}`);
+  }
+
+  const departments = (data.department || data.department_id || [])
+    .map((department) => ({
+      id: Number(department.id),
+      name: String(department.name || ""),
+      parentId: Number(department.parentid || department.parent_id || 0) || null,
+      order: Number(department.order || 0),
+    }))
+    .filter((department) => Number.isSafeInteger(department.id) && department.id > 0);
+  if (!departments.length) return [];
+
+  for (const batch of chunkArray(departments, 100)) {
+    await mysqlExec(`
+      INSERT INTO yimin_wx_departments (
+        department_id, department_name, parent_id, sort_order, synced_at
+      )
+      VALUES ${batch.map((department) => `(
+        ${sqlNumber(department.id)},
+        ${sqlString(department.name.slice(0, 160))},
+        ${department.parentId ? sqlNumber(department.parentId) : "NULL"},
+        ${sqlNumber(department.order)},
+        CURRENT_TIMESTAMP
+      )`).join(",")}
+      ON DUPLICATE KEY UPDATE
+        department_name = VALUES(department_name),
+        parent_id = VALUES(parent_id),
+        sort_order = VALUES(sort_order),
+        synced_at = CURRENT_TIMESTAMP;
+    `);
+  }
+  return departments;
+}
+
+async function upsertWxUsers(users) {
+  const userValues = (users || [])
+    .filter((user) => user.userid)
+    .map((user) => `(
+      ${sqlString(String(user.userid).slice(0, 128))},
+      ${sqlString(String(user.name || "").slice(0, 160))},
+      ${sqlString(JSON.stringify(
+        [...new Set(user.departmentIds || [])]
+          .map(Number)
+          .filter((value) => Number.isSafeInteger(value) && value > 0),
+      ))},
+      CURRENT_TIMESTAMP
+    )`);
+  for (const batch of chunkArray(userValues, 100)) {
+    if (!batch.length) continue;
+    await mysqlExec(`
+      INSERT INTO yimin_wx_users (userid, user_name, departments_json, last_seen_at)
+      VALUES ${batch.join(",")}
+      ON DUPLICATE KEY UPDATE
+        user_name = CASE
+          WHEN VALUES(user_name) <> '' THEN VALUES(user_name)
+          ELSE user_name
+        END,
+        departments_json = VALUES(departments_json),
+        last_seen_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP;
+    `);
+  }
+}
+
+async function performWxContactsSync() {
+  await initDb();
+  const startedAt = new Date();
+  const accessToken = await getWxAccessToken();
+  const departments = await syncWxDepartments(accessToken);
+  const usersById = new Map();
+
+  for (const departmentBatch of chunkArray(departments, 5)) {
+    const batchResults = await Promise.all(
+      departmentBatch.map(async (department) => ({
+        department,
+        users: await getWxDepartmentUsers(
+          accessToken,
+          department.id,
+          { fetchChild: false },
+        ),
+      })),
+    );
+    for (const { department, users: departmentUsers } of batchResults) {
+      for (const user of departmentUsers) {
+        if (!user.userid) continue;
+        const existing = usersById.get(user.userid);
+        usersById.set(user.userid, {
+          userid: user.userid,
+          name: user.name || existing?.name || "",
+          departmentIds: [...new Set([
+            ...(existing?.departmentIds || []),
+            ...((user.departmentIds || []).length ? user.departmentIds : [department.id]),
+          ])],
+        });
+      }
+    }
+  }
+
+  const users = [...usersById.values()];
+  await upsertWxUsers(users);
+  return {
+    departmentCount: departments.length,
+    userCount: users.length,
+    membershipCount: users.reduce(
+      (total, user) => total + (user.departmentIds || []).length,
+      0,
+    ),
+    startedAt: formatShanghaiDateTimeISO(startedAt),
+    finishedAt: formatShanghaiDateTimeISO(new Date()),
+  };
+}
+
+function syncWxContacts() {
+  if (!wxContactsSyncPromise) {
+    wxContactsSyncPromise = performWxContactsSync()
+      .finally(() => {
+        wxContactsSyncPromise = null;
+      });
+  }
+  return wxContactsSyncPromise;
 }
 
 async function sendWxTextCard(accessToken, userIds, title, description, url) {
@@ -2028,6 +2226,96 @@ async function createPushTask(dailyDate, users) {
   return taskId;
 }
 
+async function getPushSubscriptionStats(dailyDate, userIds) {
+  const cleanUserIds = [...new Set(
+    (userIds || []).map((value) => String(value || "").trim()).filter(Boolean),
+  )];
+  if (!cleanUserIds.length) return new Map();
+
+  const users = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'userid', userid,
+        'departmentIds', COALESCE(departments_json, JSON_ARRAY())
+      )
+    ), JSON_ARRAY())
+    FROM yimin_wx_users
+    WHERE userid IN (${cleanUserIds.map(sqlString).join(",")});
+  `)) || [];
+  const personalRows = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT('userid', userid, 'sourceId', source_id, 'status', status)
+    ), JSON_ARRAY())
+    FROM yimin_user_source_subscriptions
+    WHERE userid IN (${cleanUserIds.map(sqlString).join(",")});
+  `)) || [];
+  const departmentIds = [...new Set(
+    users.flatMap((user) => normalizeDepartmentIds(user.departmentIds)),
+  )];
+  const departmentRows = departmentIds.length
+    ? (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(
+        JSON_OBJECT('departmentId', department_id, 'sourceId', source_id)
+      ), JSON_ARRAY())
+      FROM yimin_department_source_subscriptions
+      WHERE department_id IN (${departmentIds.map(sqlNumber).join(",")});
+    `)) || []
+    : [];
+  const sourceItemRows = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT('sourceId', source_id, 'itemCount', item_count)
+    ), JSON_ARRAY())
+    FROM (
+      SELECT a.source_id, COUNT(DISTINCT i.article_hash) AS item_count
+      FROM yimin_daily_reports r
+      JOIN yimin_daily_report_items i
+        ON i.report_id = r.id
+       AND i.relevant = 1
+      JOIN yimin_articles a ON a.dedupe_hash = i.article_hash
+      JOIN yimin_sources s ON s.id = a.source_id AND s.enabled = 1
+      WHERE r.report_date = ${sqlString(dailyDate)}
+      GROUP BY a.source_id
+    ) source_items;
+  `)) || [];
+
+  const departmentSources = new Map();
+  for (const row of departmentRows) {
+    const departmentId = Number(row.departmentId);
+    if (!departmentSources.has(departmentId)) departmentSources.set(departmentId, new Set());
+    departmentSources.get(departmentId).add(Number(row.sourceId));
+  }
+  const personalByUser = new Map();
+  for (const row of personalRows) {
+    if (!personalByUser.has(row.userid)) personalByUser.set(row.userid, []);
+    personalByUser.get(row.userid).push(row);
+  }
+  const itemCountBySource = new Map(
+    sourceItemRows.map((row) => [Number(row.sourceId), Number(row.itemCount || 0)]),
+  );
+
+  return new Map(users.map((user) => {
+    const effectiveSourceIds = new Set();
+    for (const departmentId of normalizeDepartmentIds(user.departmentIds)) {
+      for (const sourceId of departmentSources.get(departmentId) || []) {
+        effectiveSourceIds.add(sourceId);
+      }
+    }
+    for (const row of personalByUser.get(user.userid) || []) {
+      const sourceId = Number(row.sourceId);
+      if (row.status === "subscribed") effectiveSourceIds.add(sourceId);
+      if (row.status === "muted") effectiveSourceIds.delete(sourceId);
+    }
+    return [
+      user.userid,
+      {
+        sourceCount: effectiveSourceIds.size,
+        itemCount: [...effectiveSourceIds]
+          .reduce((total, sourceId) => total + (itemCountBySource.get(sourceId) || 0), 0),
+      },
+    ];
+  }));
+}
+
 async function executePushTask(taskId) {
   await initDb();
 
@@ -2058,6 +2346,10 @@ async function executePushTask(taskId) {
   `);
 
   const allLogs = logs || [];
+  const subscriptionStats = await getPushSubscriptionStats(
+    dailyDate,
+    allLogs.map((log) => log.userid),
+  );
   let sentCount = 0;
   let failedCount = 0;
   const batchSize = 100;
@@ -2065,7 +2357,12 @@ async function executePushTask(taskId) {
   for (const logEntry of allLogs) {
     const dailyUrl = `${baseUrl}/d/${logEntry.token}`;
     const title = "移民热点日报";
-    const description = `${dailyDate} 移民政策日报已生成，点击查看今日动态。`;
+    const personalStats = subscriptionStats.get(logEntry.userid);
+    const description = personalStats?.sourceCount > 0
+      ? personalStats.itemCount > 0
+        ? `${dailyDate} 公共日报已生成，你关注的 ${personalStats.sourceCount} 个信源有 ${personalStats.itemCount} 条动态。`
+        : `${dailyDate} 公共日报已生成，你关注的 ${personalStats.sourceCount} 个信源今日暂无新增。`
+      : `${dailyDate} 移民政策公共日报已生成，点击查看今日动态。`;
 
     try {
       const result = await sendWxTextCard(accessToken, [logEntry.userid], title, description, dailyUrl);
@@ -2164,6 +2461,11 @@ async function recordPushVisit(token, ip) {
       WHERE id = ${sqlNumber(log.task_id || log.taskId)}
     `);
   }
+
+  await upsertWxUser({
+    userId: log.userid,
+    userName: log.username,
+  });
 
   return { taskId: log.task_id || log.taskId, userid: log.userid, username: log.username };
 }
@@ -2273,6 +2575,8 @@ async function recordSsoVisit({ encParam, encUserId, route, pageUrl, ip, userAge
       ${sqlString(cleanUa)}
     );
   `);
+
+  await upsertWxUser({ userId, userName });
 
   return { userName, userId };
 }
@@ -2643,7 +2947,7 @@ async function fetchWithTimeout(url, extraHeaders = {}) {
     const response = await fetch(url, {
       signal: controller.signal,
       headers: {
-        "user-agent": "ImmigrationHot/0.2 (+local prototype)",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
         accept: "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
         ...extraHeaders,
       },
@@ -4663,6 +4967,530 @@ function requireAuth(req) {
   return session || null;
 }
 
+function isLoopbackRequest(req) {
+  const remoteAddress = String(req.socket?.remoteAddress || "").toLowerCase();
+  const remoteIsLoopback =
+    remoteAddress === "::1"
+    || remoteAddress === "127.0.0.1"
+    || remoteAddress.startsWith("127.")
+    || remoteAddress === "::ffff:127.0.0.1";
+  if (!remoteIsLoopback) return false;
+
+  const rawHost = String(req.headers.host || "").trim();
+  try {
+    const hostname = new URL(`http://${rawHost}`).hostname.toLowerCase();
+    return hostname === "localhost" || hostname === "::1" || hostname.startsWith("127.");
+  } catch {
+    return false;
+  }
+}
+
+function getSsoIdentityFromRequest(req) {
+  const cookies = parseCookies(req);
+  const userName = decodeCookieValue(cookies.feedback_name).trim();
+  const userId = decodeCookieValue(cookies.sso_user_id).trim();
+  const identified = hasValidSsoIdentitySignature(
+    userName,
+    userId,
+    cookies.sso_identity_sig,
+  );
+  if (identified && userId) {
+    return { userName, userId, source: "sso" };
+  }
+
+  if (
+    localTestSsoConfig.enabled
+    && localTestSsoConfig.userId
+    && isLoopbackRequest(req)
+  ) {
+    return {
+      userName: localTestSsoConfig.userName || localTestSsoConfig.userId,
+      userId: localTestSsoConfig.userId,
+      source: "local-test",
+      departmentIds: localTestSsoConfig.departmentIds,
+    };
+  }
+
+  return null;
+}
+
+async function upsertWxUser({ userId, userName = "", departmentIds }) {
+  const cleanUserId = String(userId || "").trim().slice(0, 128);
+  if (!cleanUserId) return;
+  const cleanUserName = String(userName || "").trim().slice(0, 160);
+  const cleanDepartmentIds = Array.isArray(departmentIds)
+    ? [...new Set(
+      departmentIds
+        .map(Number)
+        .filter((value) => Number.isSafeInteger(value) && value > 0),
+    )]
+    : null;
+  const departmentsInsert = cleanDepartmentIds === null
+    ? "NULL"
+    : sqlString(JSON.stringify(cleanDepartmentIds));
+  const departmentsUpdate = cleanDepartmentIds === null
+    ? "departments_json"
+    : "VALUES(departments_json)";
+  await mysqlExec(`
+    INSERT INTO yimin_wx_users (userid, user_name, departments_json, last_seen_at)
+    VALUES (
+      ${sqlString(cleanUserId)},
+      ${sqlString(cleanUserName)},
+      ${departmentsInsert},
+      CURRENT_TIMESTAMP
+    )
+    ON DUPLICATE KEY UPDATE
+      user_name = CASE
+        WHEN VALUES(user_name) <> '' THEN VALUES(user_name)
+        ELSE user_name
+      END,
+      departments_json = ${departmentsUpdate},
+      last_seen_at = CURRENT_TIMESTAMP,
+      updated_at = CURRENT_TIMESTAMP;
+  `);
+}
+
+function normalizeDepartmentIds(value) {
+  const raw = Array.isArray(value) ? value : [];
+  return [...new Set(
+    raw
+      .map(Number)
+      .filter((departmentId) => Number.isSafeInteger(departmentId) && departmentId > 0),
+  )];
+}
+
+async function getUserSubscriptionContext(userId) {
+  const user = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'departmentIds', COALESCE(departments_json, JSON_ARRAY())
+    )
+    FROM yimin_wx_users
+    WHERE userid = ${sqlString(userId)}
+    LIMIT 1;
+  `);
+  const departmentIds = normalizeDepartmentIds(user?.departmentIds);
+
+  const departmentSourceIds = departmentIds.length
+    ? (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(source_id), JSON_ARRAY())
+      FROM (
+        SELECT DISTINCT source_id
+        FROM yimin_department_source_subscriptions
+        WHERE department_id IN (${departmentIds.map(sqlNumber).join(",")})
+      ) department_sources;
+    `)) || []
+    : [];
+  const personalRows = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT('sourceId', source_id, 'status', status)
+    ), JSON_ARRAY())
+    FROM yimin_user_source_subscriptions
+    WHERE userid = ${sqlString(userId)};
+  `)) || [];
+
+  const departmentDefaults = new Set(departmentSourceIds.map(Number).filter(Number.isFinite));
+  const personalStatuses = new Map(
+    personalRows.map((row) => [Number(row.sourceId), row.status]),
+  );
+  const effectiveSourceIds = new Set(departmentDefaults);
+  for (const [sourceId, status] of personalStatuses) {
+    if (status === "subscribed") effectiveSourceIds.add(sourceId);
+    if (status === "muted") effectiveSourceIds.delete(sourceId);
+  }
+
+  return {
+    departmentIds,
+    departmentDefaults,
+    personalStatuses,
+    effectiveSourceIds,
+  };
+}
+
+async function listMySourceSubscriptions(identity) {
+  await initDb();
+  await upsertWxUser(identity);
+  const context = await getUserSubscriptionContext(identity.userId);
+  const sources = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'id', id,
+        'name', name,
+        'url', url,
+        'country', country,
+        'category', category,
+        'type', type,
+        'priority', priority,
+        'articleCount', article_count,
+        'lastFetchedAt', last_fetched_at,
+        'personalStatus', subscription_status
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT
+        s.id,
+        s.name,
+        s.url,
+        s.country,
+        s.category,
+        s.type,
+        s.priority,
+        (SELECT COUNT(*) FROM yimin_articles a WHERE a.source_id = s.id) AS article_count,
+        IF(s.last_fetched_at IS NULL, NULL, DATE_FORMAT(s.last_fetched_at, '%Y-%m-%dT%H:%i:%s+08:00')) AS last_fetched_at,
+        us.status AS subscription_status
+      FROM yimin_sources s
+      LEFT JOIN yimin_user_source_subscriptions us
+        ON us.source_id = s.id
+       AND us.userid = ${sqlString(identity.userId)}
+      WHERE s.enabled = 1
+      ORDER BY
+        IF(us.status = 'subscribed', 0, 1),
+        s.country,
+        s.category,
+        s.priority DESC,
+        s.name
+    ) source_rows;
+  `)) || [];
+  const enrichedSources = sources.map((source) => {
+    const sourceId = Number(source.id);
+    return {
+      ...source,
+      departmentDefault: context.departmentDefaults.has(sourceId),
+      subscribed: context.effectiveSourceIds.has(sourceId),
+    };
+  });
+
+  return {
+    user: {
+      userId: identity.userId,
+      userName: identity.userName || "",
+      departmentIds: context.departmentIds,
+    },
+    sources: enrichedSources,
+    subscribedSourceIds: enrichedSources
+      .filter((source) => source.subscribed)
+      .map((source) => Number(source.id)),
+  };
+}
+
+async function saveMySourceSubscriptions(identity, rawSourceIds) {
+  await initDb();
+  await upsertWxUser(identity);
+  const context = await getUserSubscriptionContext(identity.userId);
+  const sourceIds = [...new Set(
+    (Array.isArray(rawSourceIds) ? rawSourceIds : [])
+      .map((value) => Number(value))
+      .filter((value) => Number.isSafeInteger(value) && value > 0),
+  )].slice(0, 300);
+
+  let validSourceIds = [];
+  if (sourceIds.length) {
+    validSourceIds = (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(id), JSON_ARRAY())
+      FROM yimin_sources
+      WHERE enabled = 1
+        AND id IN (${sourceIds.map((id) => sqlNumber(id)).join(",")});
+    `)) || [];
+  }
+
+  const selectedSourceIds = new Set(validSourceIds.map(Number));
+  const overrideRows = [];
+  for (const sourceId of selectedSourceIds) {
+    if (!context.departmentDefaults.has(sourceId)) {
+      overrideRows.push({ sourceId, status: "subscribed" });
+    }
+  }
+  for (const sourceId of context.departmentDefaults) {
+    if (!selectedSourceIds.has(sourceId)) {
+      overrideRows.push({ sourceId, status: "muted" });
+    }
+  }
+
+  const insertSql = overrideRows.length
+    ? `INSERT INTO yimin_user_source_subscriptions (userid, source_id, status)
+       VALUES ${overrideRows.map(({ sourceId, status }) => `(
+         ${sqlString(identity.userId)},
+         ${sqlNumber(sourceId)},
+         ${sqlString(status)}
+       )`).join(",")}
+       ON DUPLICATE KEY UPDATE status = VALUES(status), updated_at = CURRENT_TIMESTAMP;`
+    : "";
+
+  await mysqlExec(`
+    START TRANSACTION;
+    DELETE FROM yimin_user_source_subscriptions
+    WHERE userid = ${sqlString(identity.userId)};
+    ${insertSql}
+    COMMIT;
+  `);
+
+  return listMySourceSubscriptions(identity);
+}
+
+async function listDepartmentSubscriptionSettings() {
+  await initDb();
+  const [departments, users, subscriptions, sources] = await Promise.all([
+    mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(
+        JSON_OBJECT(
+          'id', department_id,
+          'name', department_name,
+          'parentId', parent_id
+        )
+      ), JSON_ARRAY())
+      FROM yimin_wx_departments;
+    `),
+    mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(
+        JSON_OBJECT(
+          'userId', userid,
+          'userName', user_name,
+          'departmentIds', COALESCE(departments_json, JSON_ARRAY())
+        )
+      ), JSON_ARRAY())
+      FROM yimin_wx_users;
+    `),
+    mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(
+        JSON_OBJECT('departmentId', department_id, 'sourceId', source_id)
+      ), JSON_ARRAY())
+      FROM yimin_department_source_subscriptions;
+    `),
+    mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(
+        JSON_OBJECT(
+          'id', id,
+          'name', name,
+          'country', country,
+          'category', category,
+          'type', type
+        )
+      ), JSON_ARRAY())
+      FROM (
+        SELECT id, name, country, category, type
+        FROM yimin_sources
+        WHERE enabled = 1
+        ORDER BY country, category, priority DESC, name
+      ) enabled_sources;
+    `),
+  ]);
+
+  const departmentMap = new Map(
+    (departments || []).map((department) => [
+      Number(department.id),
+      {
+        id: Number(department.id),
+        name: department.name || `部门 ${department.id}`,
+        parentId: department.parentId ? Number(department.parentId) : null,
+        userCount: 0,
+        sourceIds: [],
+      },
+    ]),
+  );
+  for (const user of users || []) {
+    for (const departmentId of normalizeDepartmentIds(user.departmentIds)) {
+      if (!departmentMap.has(departmentId)) {
+        departmentMap.set(departmentId, {
+          id: departmentId,
+          name: `部门 ${departmentId}`,
+          parentId: null,
+          userCount: 0,
+          sourceIds: [],
+        });
+      }
+      departmentMap.get(departmentId).userCount += 1;
+    }
+  }
+  for (const departmentId of localTestSsoConfig.departmentIds) {
+    if (!departmentMap.has(departmentId)) {
+      departmentMap.set(departmentId, {
+        id: departmentId,
+        name: `本地测试部门 ${departmentId}`,
+        parentId: null,
+        userCount: 1,
+        sourceIds: [],
+      });
+    }
+  }
+  for (const row of subscriptions || []) {
+    const departmentId = Number(row.departmentId);
+    if (!departmentMap.has(departmentId)) {
+      departmentMap.set(departmentId, {
+        id: departmentId,
+        name: `部门 ${departmentId}`,
+        parentId: null,
+        userCount: 0,
+        sourceIds: [],
+      });
+    }
+    departmentMap.get(departmentId).sourceIds.push(Number(row.sourceId));
+  }
+
+  return {
+    departments: [...departmentMap.values()]
+      .sort((a, b) => a.name.localeCompare(b.name, "zh-CN")),
+    sources: sources || [],
+  };
+}
+
+async function saveDepartmentSourceSubscriptions(departmentIdValue, rawSourceIds) {
+  await initDb();
+  const departmentId = Number(departmentIdValue);
+  if (!Number.isSafeInteger(departmentId) || departmentId <= 0) {
+    throw new Error("departmentId must be a positive integer");
+  }
+  const sourceIds = [...new Set(
+    (Array.isArray(rawSourceIds) ? rawSourceIds : [])
+      .map(Number)
+      .filter((value) => Number.isSafeInteger(value) && value > 0),
+  )].slice(0, 300);
+  const validSourceIds = sourceIds.length
+    ? (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(id), JSON_ARRAY())
+      FROM yimin_sources
+      WHERE enabled = 1
+        AND id IN (${sourceIds.map(sqlNumber).join(",")});
+    `)) || []
+    : [];
+  const insertSql = validSourceIds.length
+    ? `INSERT INTO yimin_department_source_subscriptions (department_id, source_id)
+       VALUES ${validSourceIds.map((sourceId) => `(
+         ${sqlNumber(departmentId)},
+         ${sqlNumber(sourceId)}
+       )`).join(",")};`
+    : "";
+
+  await mysqlExec(`
+    START TRANSACTION;
+    INSERT INTO yimin_wx_departments (department_id, department_name, synced_at)
+    VALUES (${sqlNumber(departmentId)}, ${sqlString(`部门 ${departmentId}`)}, CURRENT_TIMESTAMP)
+    ON DUPLICATE KEY UPDATE synced_at = synced_at;
+    DELETE FROM yimin_department_source_subscriptions
+    WHERE department_id = ${sqlNumber(departmentId)};
+    ${insertSql}
+    COMMIT;
+  `);
+
+  return listDepartmentSubscriptionSettings();
+}
+
+function normalizeComparableUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    url.hash = "";
+    return url.href.replace(/\/+$/, "");
+  } catch {
+    return String(value || "").trim().replace(/\/+$/, "");
+  }
+}
+
+async function getMyDailySupplement(identity, date = getShanghaiDate()) {
+  await initDb();
+  await upsertWxUser(identity);
+  const context = await getUserSubscriptionContext(identity.userId);
+  const effectiveSourceIds = [...context.effectiveSourceIds];
+
+  const report = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'id', id,
+      'date', DATE_FORMAT(report_date, '%Y-%m-%d'),
+      'contentMarkdown', content_markdown
+    )
+    FROM yimin_daily_reports
+    WHERE report_date = ${sqlString(date)}
+    LIMIT 1;
+  `);
+
+  let subscriptionCount = 0;
+  if (effectiveSourceIds.length) {
+    const subscriptionCountRow = await mysqlJson(`
+      SELECT JSON_OBJECT('count', COUNT(*))
+      FROM yimin_sources
+      WHERE enabled = 1
+        AND id IN (${effectiveSourceIds.map(sqlNumber).join(",")});
+    `);
+    subscriptionCount = Number(subscriptionCountRow?.count || 0);
+  }
+
+  if (!report || subscriptionCount === 0) {
+    return {
+      date,
+      subscriptionCount,
+      matchedCount: 0,
+      publicCoveredCount: 0,
+      items: [],
+    };
+  }
+
+  const rows = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'id', article_hash,
+        'sourceId', source_id,
+        'source', source_name,
+        'country', country,
+        'category', category,
+        'title', title,
+        'summary', summary,
+        'url', url,
+        'publishedAt', published_at,
+        'articleDate', article_date,
+        'section', section,
+        'importance', importance
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT
+        i.article_hash,
+        a.source_id,
+        s.name AS source_name,
+        a.country,
+        a.category,
+        a.title,
+        COALESCE(NULLIF(ad.summary_zh, ''), a.summary, '') AS summary,
+        a.url,
+        IF(a.published_at IS NULL, NULL, DATE_FORMAT(a.published_at, '%Y-%m-%dT%H:%i:%s+08:00')) AS published_at,
+        IF(i.article_date IS NULL, NULL, DATE_FORMAT(i.article_date, '%Y-%m-%dT%H:%i:%s+08:00')) AS article_date,
+        i.section,
+        i.importance
+      FROM yimin_daily_reports r
+      JOIN yimin_daily_report_items i ON i.report_id = r.id
+      JOIN yimin_articles a ON a.dedupe_hash = i.article_hash
+      JOIN yimin_sources s ON s.id = a.source_id
+      LEFT JOIN yimin_article_daily_analysis ad ON ad.article_hash = i.article_hash
+      WHERE r.report_date = ${sqlString(date)}
+        AND i.relevant = 1
+        AND s.enabled = 1
+        AND a.source_id IN (${effectiveSourceIds.map(sqlNumber).join(",")})
+      ORDER BY i.importance DESC, i.article_date DESC, i.id DESC
+      LIMIT 100
+    ) subscribed_items;
+  `)) || [];
+
+  const publicMarkdown = String(report.contentMarkdown || "");
+  const publicUrls = new Set(
+    (publicMarkdown.match(/https?:\/\/[^\s)\]}>"']+/g) || [])
+      .map(normalizeComparableUrl)
+      .filter(Boolean),
+  );
+  const uncoveredItems = rows
+    .map((item) => ({
+      ...item,
+      importance: Number(item.importance || 0),
+      sourceId: Number(item.sourceId),
+    }))
+    .filter((item) => !item.url || !publicUrls.has(normalizeComparableUrl(item.url)));
+  const items = uncoveredItems.slice(0, 30);
+
+  return {
+    date: report.date || date,
+    subscriptionCount,
+    matchedCount: rows.length,
+    publicCoveredCount: rows.length - uncoveredItems.length,
+    hiddenCount: Math.max(0, uncoveredItems.length - items.length),
+    items,
+  };
+}
+
 async function readJsonBody(req) {
   return new Promise((resolvePromise, reject) => {
     let body = "";
@@ -4730,19 +5558,13 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/sso/me" && req.method === "GET") {
-      const cookies = parseCookies(req);
-      const userName = decodeCookieValue(cookies.feedback_name).trim();
-      const userId = decodeCookieValue(cookies.sso_user_id).trim();
-      const identified = hasValidSsoIdentitySignature(
-        userName,
-        userId,
-        cookies.sso_identity_sig,
-      );
+      const identity = getSsoIdentityFromRequest(req);
       sendJson(res, 200, {
         ok: true,
-        identified,
-        userName: identified ? userName : "",
-        userId: identified ? userId : "",
+        identified: Boolean(identity),
+        userName: identity?.userName || "",
+        userId: identity?.userId || "",
+        localTest: identity?.source === "local-test",
       });
       return;
     }
@@ -4788,6 +5610,71 @@ const server = createServer(async (req, res) => {
       }
       const stats = await getSsoStats();
       sendJson(res, 200, { ok: true, stats });
+      return;
+    }
+
+    if (url.pathname === "/api/subscriptions/me") {
+      const identity = getSsoIdentityFromRequest(req);
+      if (!identity) {
+        sendJson(res, 401, {
+          ok: false,
+          error: "请从企业微信日报链接进入后管理关注",
+        });
+        return;
+      }
+
+      if (req.method === "GET") {
+        const subscriptions = await listMySourceSubscriptions(identity);
+        sendJson(res, 200, { ok: true, ...subscriptions });
+        return;
+      }
+
+      if (req.method === "PUT") {
+        const body = await readJsonBody(req);
+        if (!Array.isArray(body.sourceIds)) {
+          sendJson(res, 400, { ok: false, error: "sourceIds must be an array" });
+          return;
+        }
+        const subscriptions = await saveMySourceSubscriptions(identity, body.sourceIds);
+        sendJson(res, 200, { ok: true, ...subscriptions });
+        return;
+      }
+
+      sendJson(res, 405, { ok: false, error: "Method not allowed" });
+      return;
+    }
+
+    if (url.pathname === "/api/subscriptions/departments") {
+      if (!requireAuth(req)) {
+        sendJson(res, 401, { ok: false, error: "请先登录" });
+        return;
+      }
+
+      if (req.method === "GET") {
+        const settings = await listDepartmentSubscriptionSettings();
+        sendJson(res, 200, { ok: true, ...settings });
+        return;
+      }
+
+      if (req.method === "PUT") {
+        const body = await readJsonBody(req);
+        if (!Array.isArray(body.sourceIds)) {
+          sendJson(res, 400, { ok: false, error: "sourceIds must be an array" });
+          return;
+        }
+        try {
+          const settings = await saveDepartmentSourceSubscriptions(
+            body.departmentId,
+            body.sourceIds,
+          );
+          sendJson(res, 200, { ok: true, ...settings });
+        } catch (error) {
+          sendJson(res, 400, { ok: false, error: error.message });
+        }
+        return;
+      }
+
+      sendJson(res, 405, { ok: false, error: "Method not allowed" });
       return;
     }
 
@@ -4895,6 +5782,27 @@ const server = createServer(async (req, res) => {
       sendJson(res, 200, {
         ok: true,
         report,
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/daily/personal" && req.method === "GET") {
+      const identity = getSsoIdentityFromRequest(req);
+      if (!identity) {
+        sendJson(res, 401, {
+          ok: false,
+          error: "未识别企业微信身份",
+        });
+        return;
+      }
+      const supplement = await getMyDailySupplement(
+        identity,
+        url.searchParams.get("date") || getShanghaiDate(),
+      );
+      sendJson(res, 200, {
+        ok: true,
+        user: identity,
+        supplement,
       });
       return;
     }
@@ -5317,6 +6225,31 @@ try {
     }
 
     // ── Push task management APIs ──
+    if (url.pathname === "/api/wx/sync-contacts" && req.method === "POST") {
+      if (!wxWorkConfig.corpId || !wxWorkConfig.secret) {
+        sendJson(res, 400, {
+          ok: false,
+          error: "企业微信未配置（WX_WORK_CORP_ID / WX_WORK_SECRET）",
+        });
+        return;
+      }
+
+      try {
+        const stats = await syncWxContacts();
+        sendJson(res, 200, {
+          ok: true,
+          ...stats,
+          message: "企业微信部门和成员同步完成。",
+        });
+      } catch (error) {
+        sendJson(res, 502, {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return;
+    }
+
     if (url.pathname === "/api/push/tasks" && req.method === "GET") {
       if (!requireAuth(req)) {
         sendJson(res, 401, { ok: false, error: "请先登录" });
