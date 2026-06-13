@@ -181,6 +181,11 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+function removeReplacementCharacters(value) {
+  return String(value ?? "")
+    .replace(/(?:�|&amp;#65533;|&#65533;|\\ufffd)+/gi, "");
+}
+
 function escapeAttr(value) {
   return escapeHtml(value).replace(/`/g, "&#96;");
 }
@@ -580,12 +585,12 @@ function renderDepartmentDaily() {
           <article class="department-daily-card${report.status === "empty" ? " empty-card" : ""}">
             <div class="department-daily-card-head">
               <div>
-                <span class="department-name">${escapeHtml(report.departmentName || "未命名部门")}</span>
+                <span class="department-name">${escapeHtml(removeReplacementCharacters(report.departmentName) || "未命名部门")}</span>
                 <span>${escapeHtml(report.articleCount || 0)} 条动态 · ${escapeHtml(report.sourceCount || 0)} 个部门信源</span>
               </div>
               <span class="department-ai-badge">${report.status === "generated" ? "AI 部门解读" : report.status === "fallback" ? "规则降级" : "今日暂无"}</span>
             </div>
-            <div class="department-daily-content">${report.html || ""}</div>
+            <div class="department-daily-content">${removeReplacementCharacters(report.html)}</div>
             ${report.status !== "empty" ? '<p class="department-daily-disclaimer">内部辅助信息，请结合官方原文和业务负责人确认后再用于客户沟通。</p>' : ""}
           </article>
         `).join("")}

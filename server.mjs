@@ -5754,17 +5754,18 @@ async function getDepartmentDailyInput(department, date) {
 
 function normalizeDepartmentDailyReport(row) {
   if (!row) return null;
+  const contentMarkdown = sanitizeTextArtifacts(row.contentMarkdown);
   return {
     departmentId: Number(row.departmentId),
-    departmentName: row.departmentName || "",
+    departmentName: sanitizeTextArtifacts(row.departmentName),
     date: row.date,
-    contentMarkdown: row.contentMarkdown || "",
-    html: row.contentMarkdown ? markdownToHtml(row.contentMarkdown) : "",
+    contentMarkdown,
+    html: contentMarkdown ? markdownToHtml(contentMarkdown) : "",
     sourceCount: Number(row.sourceCount || 0),
     articleCount: Number(row.articleCount || 0),
     model: row.model || "",
     status: row.status || "empty",
-    error: row.error || "",
+    error: sanitizeTextArtifacts(row.error),
     generatedAt: row.generatedAt || null,
   };
 }
