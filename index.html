@@ -345,9 +345,27 @@
               <span class="subscription-count" id="departmentSubscriptionCount">0 个默认关注</span>
             </div>
             <div class="department-subscription-toolbar">
-              <label>
+              <label class="department-picker-label">
                 <span>选择部门</span>
-                <select id="departmentSubscriptionSelect"></select>
+                <div class="department-picker" id="departmentSubscriptionPicker">
+                  <input
+                    id="departmentSubscriptionSelect"
+                    type="search"
+                    role="combobox"
+                    aria-label="搜索并选择部门"
+                    aria-autocomplete="list"
+                    aria-controls="departmentSubscriptionOptions"
+                    aria-expanded="false"
+                    placeholder="搜索部门名称或 ID"
+                    autocomplete="off"
+                  >
+                  <div
+                    class="department-picker-options"
+                    id="departmentSubscriptionOptions"
+                    role="listbox"
+                    hidden
+                  ></div>
+                </div>
               </label>
               <label class="subscription-search">
                 <span aria-hidden="true">⌕</span>

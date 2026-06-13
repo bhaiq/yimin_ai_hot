@@ -120,6 +120,8 @@ const state = {
   departmentSubscriptionSelectedId: null,
   departmentSubscriptionSelectedSourceIds: new Set(),
   departmentSubscriptionSearch: "",
+  departmentSubscriptionPickerQuery: "",
+  departmentSubscriptionPickerOpen: false,
   departmentSubscriptionLoading: false,
   departmentSubscriptionSaving: false,
   departmentSubscriptionError: "",
@@ -511,10 +513,10 @@ function renderDepartmentDaily() {
         <div class="department-daily-head">
           <div>
             <p class="eyebrow">直属部门重点</p>
-            <h2>正在生成部门视角摘要...</h2>
+            <h2>正在读取部门日报...</h2>
           </div>
         </div>
-        <div class="department-daily-empty">系统正在结合部门关注信源和公共日报整理重点。</div>
+        <div class="department-daily-empty">正在加载定时任务生成的部门重点。</div>
       </section>
     `;
   }
@@ -559,7 +561,7 @@ function renderDepartmentDaily() {
             <h2>暂无部门日报</h2>
           </div>
         </div>
-        <div class="department-daily-empty">当前直属部门尚未配置默认关注，或所选日期没有可展示的部门重点。</div>
+        <div class="department-daily-empty">所选日期暂无部门日报，请等待每日定时任务生成。</div>
       </section>
     `;
   }
@@ -816,19 +818,49 @@ function renderSubscriptions() {
 
 function renderDepartmentSubscriptions() {
   if (!departmentSubscriptionList || !departmentSubscriptionCount || !departmentSubscriptionNote) return;
+  const picker = document.querySelector("#departmentSubscriptionPicker");
   const select = document.querySelector("#departmentSubscriptionSelect");
+  const options = document.querySelector("#departmentSubscriptionOptions");
   const saveButton = document.querySelector("#saveDepartmentSubscriptions");
-  if (!select || !saveButton) return;
+  if (!picker || !select || !options || !saveButton) return;
 
   const departments = state.departmentSubscriptions;
-  select.innerHTML = departments.length
-    ? departments.map((department) => `
-      <option value="${department.id}">
-        ${escapeHtml(department.name || `部门 ${department.id}`)}（${escapeHtml(department.userCount || 0)} 人）
-      </option>
-    `).join("")
-    : '<option value="">暂无已同步部门</option>';
-  select.value = state.departmentSubscriptionSelectedId || "";
+  const selectedDepartment = departments.find(
+    (department) => Number(department.id) === Number(state.departmentSubscriptionSelectedId),
+  );
+  const pickerQuery = state.departmentSubscriptionPickerQuery.trim().toLowerCase();
+  const visibleDepartments = departments.filter((department) => {
+    if (!pickerQuery) return true;
+    return `${department.name || ""} ${department.id}`.toLowerCase().includes(pickerQuery);
+  });
+  const selectedLabel = selectedDepartment
+    ? `${selectedDepartment.name || `部门 ${selectedDepartment.id}`}（${selectedDepartment.userCount || 0} 人）`
+    : "";
+
+  if (document.activeElement !== select || !state.departmentSubscriptionPickerOpen) {
+    select.value = selectedLabel;
+  }
+  select.disabled = state.departmentSubscriptionLoading || !departments.length;
+  select.placeholder = departments.length ? "搜索部门名称或 ID" : "暂无已同步部门";
+  select.setAttribute("aria-expanded", String(state.departmentSubscriptionPickerOpen));
+  options.hidden = !state.departmentSubscriptionPickerOpen;
+  options.innerHTML = visibleDepartments.length
+    ? visibleDepartments.map((department) => {
+      const isSelected = Number(department.id) === Number(state.departmentSubscriptionSelectedId);
+      return `
+        <button
+          class="department-picker-option${isSelected ? " selected" : ""}"
+          type="button"
+          role="option"
+          aria-selected="${isSelected}"
+          data-department-id="${department.id}"
+        >
+          <span>${escapeHtml(department.name || `部门 ${department.id}`)}</span>
+          <small>${escapeHtml(department.userCount || 0)} 人 · ID ${escapeHtml(department.id)}</small>
+        </button>
+      `;
+    }).join("")
+    : '<div class="department-picker-empty">没有匹配的部门</div>';
   saveButton.disabled = (
     !state.departmentSubscriptionSelectedId
     || state.departmentSubscriptionLoading
@@ -1922,7 +1954,7 @@ async function loadDailyReport({ refresh = false, date } = {}) {
   }
 }
 
-async function loadDepartmentDaily({ date, refresh = false } = {}) {
+async function loadDepartmentDaily({ date } = {}) {
   if (window.location.protocol === "file:" || !state.ssoUserId) {
     state.departmentDailyReports = [];
     state.departmentDailyLoaded = false;
@@ -1939,7 +1971,6 @@ async function loadDepartmentDaily({ date, refresh = false } = {}) {
   try {
     const params = new URLSearchParams();
     if (date) params.set("date", date);
-    if (refresh) params.set("refresh", "1");
     const qs = params.toString();
     const response = await fetch(`/api/daily/department${qs ? `?${qs}` : ""}`, {
       headers: { accept: "application/json" },
@@ -2075,6 +2106,8 @@ function selectDepartmentSubscription(departmentIdValue) {
   const departmentId = Number(departmentIdValue);
   const department = state.departmentSubscriptions.find((item) => Number(item.id) === departmentId);
   state.departmentSubscriptionSelectedId = department ? departmentId : null;
+  state.departmentSubscriptionPickerQuery = "";
+  state.departmentSubscriptionPickerOpen = false;
   state.departmentSubscriptionSelectedSourceIds = new Set(
     (department?.sourceIds || []).map(Number).filter(Number.isFinite),
   );
@@ -2679,8 +2712,80 @@ document.querySelector("#saveSubscriptions")?.addEventListener("click", () => {
   saveSubscriptions();
 });
 
-document.querySelector("#departmentSubscriptionSelect")?.addEventListener("change", (event) => {
-  selectDepartmentSubscription(event.target.value);
+document.querySelector("#departmentSubscriptionSelect")?.addEventListener("focus", (event) => {
+  if (!state.departmentSubscriptionPickerOpen) {
+    state.departmentSubscriptionPickerQuery = "";
+    event.target.value = "";
+  }
+  state.departmentSubscriptionPickerOpen = true;
+  renderDepartmentSubscriptions();
+});
+
+document.querySelector("#departmentSubscriptionSelect")?.addEventListener("input", (event) => {
+  state.departmentSubscriptionPickerQuery = event.target.value;
+  state.departmentSubscriptionPickerOpen = true;
+  renderDepartmentSubscriptions();
+});
+
+document.querySelector("#departmentSubscriptionSelect")?.addEventListener("keydown", (event) => {
+  const optionButtons = [...document.querySelectorAll("#departmentSubscriptionOptions [data-department-id]")];
+  if (event.key === "Escape") {
+    state.departmentSubscriptionPickerQuery = "";
+    state.departmentSubscriptionPickerOpen = false;
+    event.target.blur();
+    renderDepartmentSubscriptions();
+    return;
+  }
+  if (event.key === "Enter" && optionButtons.length === 1) {
+    event.preventDefault();
+    selectDepartmentSubscription(optionButtons[0].dataset.departmentId);
+    renderDepartmentSubscriptions();
+    return;
+  }
+  if (event.key === "ArrowDown" && optionButtons.length) {
+    event.preventDefault();
+    optionButtons[0].focus();
+  }
+});
+
+document.querySelector("#departmentSubscriptionOptions")?.addEventListener("click", (event) => {
+  const option = event.target.closest("[data-department-id]");
+  if (!option) return;
+  selectDepartmentSubscription(option.dataset.departmentId);
+  renderDepartmentSubscriptions();
+});
+
+document.querySelector("#departmentSubscriptionOptions")?.addEventListener("keydown", (event) => {
+  const option = event.target.closest("[data-department-id]");
+  if (!option) return;
+  const optionButtons = [...document.querySelectorAll("#departmentSubscriptionOptions [data-department-id]")];
+  const index = optionButtons.indexOf(option);
+  if (event.key === "ArrowDown" && optionButtons[index + 1]) {
+    event.preventDefault();
+    optionButtons[index + 1].focus();
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    if (optionButtons[index - 1]) {
+      optionButtons[index - 1].focus();
+    } else {
+      document.querySelector("#departmentSubscriptionSelect")?.focus();
+    }
+  } else if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    selectDepartmentSubscription(option.dataset.departmentId);
+    renderDepartmentSubscriptions();
+  } else if (event.key === "Escape") {
+    document.querySelector("#departmentSubscriptionSelect")?.focus();
+    state.departmentSubscriptionPickerOpen = false;
+    renderDepartmentSubscriptions();
+  }
+});
+
+document.addEventListener("click", (event) => {
+  if (event.target.closest("#departmentSubscriptionPicker")) return;
+  if (!state.departmentSubscriptionPickerOpen) return;
+  state.departmentSubscriptionPickerQuery = "";
+  state.departmentSubscriptionPickerOpen = false;
   renderDepartmentSubscriptions();
 });
 

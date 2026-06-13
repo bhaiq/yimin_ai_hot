@@ -5848,28 +5848,13 @@ async function generateDepartmentDailyReport(department, date, { refresh = false
   }
 
   const generationPromise = (async () => {
-    const input = await getDepartmentDailyInput(department, date);
-    if (!input) return null;
     const existing = await readDepartmentDailyReport(date, department.id);
-    const existingGeneratedAt = existing?.generatedAt ? new Date(existing.generatedAt) : null;
-    const fallbackCacheIsFresh = (
-      existing?.status !== "fallback"
-      || (
-        existingGeneratedAt
-        && !Number.isNaN(existingGeneratedAt.getTime())
-        && existingGeneratedAt.getTime() > Date.now() - 30 * 60 * 1000
-      )
-    );
-    if (
-      !refresh
-      && existing
-      && existing.departmentName === department.name
-      && existing.sourceConfigHash === input.sourceConfigHash
-      && existing.inputHash === input.inputHash
-      && fallbackCacheIsFresh
-    ) {
+    if (!refresh && existing) {
       return normalizeDepartmentDailyReport(existing);
     }
+
+    const input = await getDepartmentDailyInput(department, date);
+    if (!input) return null;
 
     if (!input.sources.length || !input.items.length) {
       const message = !input.sources.length
@@ -5920,7 +5905,7 @@ async function generateDepartmentDailyReport(department, date, { refresh = false
   return generationPromise;
 }
 
-async function getMyDepartmentDailyReports(identity, date, { refresh = false } = {}) {
+async function readMyDepartmentDailyReports(identity, date) {
   const departments = await getDirectUserDepartments(identity);
   if (!departments.length) {
     return {
@@ -5929,14 +5914,12 @@ async function getMyDepartmentDailyReports(identity, date, { refresh = false } =
       missingDepartmentSync: true,
     };
   }
-  const reports = await runWithConcurrency(
-    departments,
-    2,
-    (department) => generateDepartmentDailyReport(department, date, { refresh }),
+  const reports = await Promise.all(
+    departments.map((department) => readDepartmentDailyReport(date, department.id)),
   );
   return {
     date,
-    departments: reports.filter(Boolean),
+    departments: reports.map(normalizeDepartmentDailyReport).filter(Boolean),
     missingDepartmentSync: false,
   };
 }
@@ -6352,10 +6335,9 @@ const server = createServer(async (req, res) => {
         });
         return;
       }
-      const result = await getMyDepartmentDailyReports(
+      const result = await readMyDepartmentDailyReports(
         identity,
         url.searchParams.get("date") || getShanghaiDate(),
-        { refresh: url.searchParams.get("refresh") === "1" },
       );
       sendJson(res, 200, {
         ok: true,
