@@ -1285,20 +1285,18 @@ function getArticleTranslationContentHash(item) {
     .digest("hex");
 }
 
-function articleDisplayRelevanceWhere({ articleAlias = "a", sourceAlias = "s", analysisAlias = "ad" } = {}) {
-  const haystack = `LOWER(CONCAT_WS(' ',
+function articleDisplayRelevanceWhere({ articleAlias = "a", analysisAlias = "ad" } = {}) {
+  const articleText = `LOWER(CONCAT_WS(' ',
     ${articleAlias}.title,
-    ${articleAlias}.summary,
-    ${sourceAlias}.name,
-    ${articleAlias}.country,
-    ${articleAlias}.category,
-    JSON_UNQUOTE(${articleAlias}.tags_json)
+    ${articleAlias}.summary
   ))`;
-  const pattern = [
+  const positivePattern = [
     "immigration",
     "immigrant",
     "visa",
-    "permit",
+    "work permit",
+    "study permit",
+    "residence permit",
     "resident",
     "residence",
     "permanent residence",
@@ -1326,6 +1324,7 @@ function articleDisplayRelevanceWhere({ articleAlias = "a", sourceAlias = "s", a
     "express entry",
     "lmia",
     "sponsor",
+    "sponsorship",
     "skilled worker",
     "priority date",
     "visa bulletin",
@@ -1338,8 +1337,10 @@ function articleDisplayRelevanceWhere({ articleAlias = "a", sourceAlias = "s", a
     "公民",
     "工签",
     "学签",
-    "雇主",
-    "担保",
+    "工作签证",
+    "学生签证",
+    "雇主担保",
+    "配偶签证",
     "庇护",
     "难民",
     "边境",
@@ -1351,10 +1352,31 @@ function articleDisplayRelevanceWhere({ articleAlias = "a", sourceAlias = "s", a
     "投资移民",
     "技术移民",
   ].join("|");
+  const unrelatedPattern = [
+    "牛肉",
+    "牛肉粥",
+    "二氧化硫",
+    "食物安全",
+    "食安",
+    "样本检出",
+    "渔农",
+    "放鱼",
+    "放流",
+    "热带气旋",
+    "暴雨",
+    "台风",
+    "天文台",
+    "雇主雇员",
+    "劳工处",
+    "工作安排",
+  ].join("|");
 
   return `(
-    (${analysisAlias}.article_hash IS NOT NULL AND ${analysisAlias}.relevant = 1)
-    OR (${analysisAlias}.article_hash IS NULL AND ${haystack} REGEXP ${sqlString(pattern)})
+    ${articleText} NOT REGEXP ${sqlString(unrelatedPattern)}
+    AND (
+      (${analysisAlias}.article_hash IS NOT NULL AND ${analysisAlias}.relevant = 1)
+      OR ${articleText} REGEXP ${sqlString(positivePattern)}
+    )
   )`;
 }
 
