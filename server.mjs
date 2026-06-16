@@ -1285,6 +1285,79 @@ function getArticleTranslationContentHash(item) {
     .digest("hex");
 }
 
+function articleDisplayRelevanceWhere({ articleAlias = "a", sourceAlias = "s", analysisAlias = "ad" } = {}) {
+  const haystack = `LOWER(CONCAT_WS(' ',
+    ${articleAlias}.title,
+    ${articleAlias}.summary,
+    ${sourceAlias}.name,
+    ${articleAlias}.country,
+    ${articleAlias}.category,
+    JSON_UNQUOTE(${articleAlias}.tags_json)
+  ))`;
+  const pattern = [
+    "immigration",
+    "immigrant",
+    "visa",
+    "permit",
+    "resident",
+    "residence",
+    "permanent residence",
+    "citizenship",
+    "naturalization",
+    "green card",
+    "uscis",
+    "ircc",
+    "home office",
+    "border",
+    "asylum",
+    "refugee",
+    "deport",
+    "removal",
+    "eb-5",
+    "eb5",
+    "eb-1",
+    "eb1",
+    "niw",
+    "i-485",
+    "i-140",
+    "h-1b",
+    "h1b",
+    "pnp",
+    "express entry",
+    "lmia",
+    "sponsor",
+    "skilled worker",
+    "priority date",
+    "visa bulletin",
+    "移民",
+    "签证",
+    "居留",
+    "永居",
+    "绿卡",
+    "入籍",
+    "公民",
+    "工签",
+    "学签",
+    "雇主",
+    "担保",
+    "庇护",
+    "难民",
+    "边境",
+    "排期",
+    "身份",
+    "护照",
+    "配额",
+    "省提名",
+    "投资移民",
+    "技术移民",
+  ].join("|");
+
+  return `(
+    (${analysisAlias}.article_hash IS NOT NULL AND ${analysisAlias}.relevant = 1)
+    OR (${analysisAlias}.article_hash IS NULL AND ${haystack} REGEXP ${sqlString(pattern)})
+  )`;
+}
+
 function buildArticleTranslationPrompt(items) {
   const payload = items.map((item) => ({
     id: item.id,
@@ -1592,12 +1665,16 @@ async function listArticlesFromDb(limit = maxTotalItems) {
           IF(t.status = 'translated' AND (NULLIF(t.title_zh, '') IS NOT NULL OR NULLIF(t.summary_zh, '') IS NOT NULL), CAST(TRUE AS JSON), CAST(FALSE AS JSON)) AS translated
         FROM yimin_articles a
         JOIN yimin_sources s ON s.id = a.source_id
+        LEFT JOIN yimin_article_daily_analysis ad
+          ON ad.article_hash = a.dedupe_hash
+         AND ad.analysis_version = ${sqlString(dailyAnalysisVersion)}
         LEFT JOIN yimin_article_translations t
           ON t.article_hash = a.dedupe_hash
          AND t.translation_version = ${sqlString(articleTranslationVersion)}
          AND t.status = 'translated'
          AND t.source_title <=> a.title
          AND t.source_summary <=> COALESCE(a.summary, '')
+        WHERE ${articleDisplayRelevanceWhere()}
         ORDER BY a.heat DESC, COALESCE(a.published_at, a.fetched_at) DESC, a.id DESC
         LIMIT ${sqlNumber(limit, maxTotalItems)}
       ) ranked;
