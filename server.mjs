@@ -1672,8 +1672,6 @@ async function listArticlesFromDb(limit = maxTotalItems) {
           ON t.article_hash = a.dedupe_hash
          AND t.translation_version = ${sqlString(articleTranslationVersion)}
          AND t.status = 'translated'
-         AND t.source_title <=> a.title
-         AND t.source_summary <=> COALESCE(a.summary, '')
         WHERE ${articleDisplayRelevanceWhere()}
         ORDER BY a.heat DESC, COALESCE(a.published_at, a.fetched_at) DESC, a.id DESC
         LIMIT ${sqlNumber(limit, maxTotalItems)}
@@ -1746,8 +1744,6 @@ async function listRecentArticlesFromDb(limit = Math.max(maxTotalItems * 2, 160)
           ON t.article_hash = a.dedupe_hash
          AND t.translation_version = ${sqlString(articleTranslationVersion)}
          AND t.status = 'translated'
-         AND t.source_title <=> a.title
-         AND t.source_summary <=> COALESCE(a.summary, '')
         ORDER BY COALESCE(a.published_at, a.fetched_at) DESC, a.heat DESC, a.id DESC
         LIMIT ${sqlNumber(limit, Math.max(maxTotalItems * 2, 160))}
       ) ranked;
@@ -1796,8 +1792,6 @@ async function listDailyCandidateArticlePageFromDb(window, offset, limit = daily
           ON t.article_hash = a.dedupe_hash
          AND t.translation_version = ${sqlString(articleTranslationVersion)}
          AND t.status = 'translated'
-         AND t.source_title <=> a.title
-         AND t.source_summary <=> COALESCE(a.summary, '')
         WHERE a.daily_excluded = 0
           AND COALESCE(a.published_at, a.fetched_at) >= ${sqlDate(window.recentStart)}
           AND COALESCE(a.published_at, a.fetched_at) < ${sqlDate(window.end)}
