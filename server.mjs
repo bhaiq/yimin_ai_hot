@@ -19,6 +19,10 @@ const dailyAnalysisBatchSize = Math.max(10, Number(process.env.DAILY_ANALYSIS_BA
 const dailyAnalysisConcurrency = Math.max(1, Number(process.env.DAILY_ANALYSIS_CONCURRENCY || 3));
 const dailyFinalPromptMaxChars = Math.max(20000, Number(process.env.DAILY_FINAL_PROMPT_MAX_CHARS || 80000));
 const dailyAnalysisVersion = "daily-analysis-v1";
+const articleTranslationVersion = "article-translation-v1";
+const articleTranslationBatchSize = Math.max(5, Number(process.env.ARTICLE_TRANSLATION_BATCH_SIZE || 30));
+const articleTranslationConcurrency = Math.max(1, Number(process.env.ARTICLE_TRANSLATION_CONCURRENCY || 2));
+const articleTranslationMaxPerRun = Math.max(20, Number(process.env.ARTICLE_TRANSLATION_MAX_PER_RUN || 300));
 const dailyRecentLookbackHoursValue = Number(process.env.DAILY_RECENT_LOOKBACK_HOURS || 48);
 const dailyRecentLookbackHours = Number.isFinite(dailyRecentLookbackHoursValue)
   ? Math.max(24, dailyRecentLookbackHoursValue)
@@ -91,6 +95,7 @@ const mimeTypes = {
 let cache = null;
 let dbReadyPromise = null;
 let activeFetchRun = null;
+let activeArticleTranslationPromise = null;
 const departmentDailyGenerationPromises = new Map();
 
 async function loadEnv() {
@@ -439,6 +444,24 @@ async function initDb() {
           INDEX idx_article_daily_analysis_relevant (relevant, importance),
           INDEX idx_article_daily_analysis_version (analysis_version)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文章级日报分析缓存';
+
+        CREATE TABLE IF NOT EXISTS yimin_article_translations (
+          article_hash CHAR(40) PRIMARY KEY COMMENT '文章去重哈希',
+          content_hash CHAR(64) NOT NULL COMMENT '参与翻译的内容哈希',
+          translation_version VARCHAR(40) NOT NULL COMMENT '翻译逻辑版本',
+          source_title VARCHAR(600) NOT NULL COMMENT '翻译时的原始标题',
+          source_summary TEXT NULL COMMENT '翻译时的原始简介',
+          title_zh VARCHAR(600) NULL COMMENT '中文标题',
+          summary_zh TEXT NULL COMMENT '中文简介',
+          status ENUM('translated','failed') NOT NULL DEFAULT 'translated' COMMENT '翻译状态',
+          model VARCHAR(120) NULL COMMENT '翻译模型',
+          last_error TEXT NULL COMMENT '最近一次翻译错误',
+          translated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '翻译时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          INDEX idx_article_translations_status (status, updated_at),
+          INDEX idx_article_translations_version (translation_version)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文章标题和简介中文翻译缓存';
 
         CREATE TABLE IF NOT EXISTS yimin_daily_report_events (
           id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
@@ -1253,14 +1276,298 @@ async function upsertArticle(item, sourceId, { dailyExcluded = false, dailyExclu
   `);
 }
 
+function getArticleTranslationContentHash(item) {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      title: sanitizeTextArtifacts(item.title),
+      summary: sanitizeTextArtifacts(item.summary),
+    }))
+    .digest("hex");
+}
+
+function buildArticleTranslationPrompt(items) {
+  const payload = items.map((item) => ({
+    id: item.id,
+    title: sanitizeTextArtifacts(item.title),
+    summary: truncate(item.summary, 700),
+    source: sanitizeTextArtifacts(item.source),
+    country: sanitizeTextArtifacts(item.country),
+    category: sanitizeTextArtifacts(item.category),
+  }));
+
+  return `请把以下移民资讯的标题和简介翻译为简体中文，只返回 JSON 数组，不要 Markdown，不要解释。
+
+每个输入 id 必须恰好返回一次，字段格式：
+{"id":"原 id","titleZh":"中文标题","summaryZh":"中文简介"}
+
+规则：
+- 只翻译 title 和 summary，不添加原文没有的政策、日期、费用、名额或影响判断。
+- 保留 USCIS、IRCC、EB-5、NIW、PNP、Express Entry、Home Office 等常用机构/项目名；必要时可在中文中保留英文缩写。
+- titleZh 要像新闻标题，简洁自然。
+- summaryZh 不超过 120 字；如果原简介为空，请基于标题翻译出一句中性简介，不扩写事实。
+- 如果原文已经是中文，可润色为简体中文。
+
+输入：
+${JSON.stringify(payload)}`;
+}
+
+async function listPendingArticleTranslations(limit = articleTranslationMaxPerRun) {
+  const rows = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'id', dedupe_hash,
+        'title', title,
+        'summary', COALESCE(summary, ''),
+        'source', source_name,
+        'country', country,
+        'category', category
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT a.*, s.name AS source_name, t.status AS translation_status, t.updated_at AS translation_updated_at
+      FROM yimin_articles a
+      JOIN yimin_sources s ON s.id = a.source_id
+      LEFT JOIN yimin_article_translations t ON t.article_hash = a.dedupe_hash
+      WHERE t.article_hash IS NULL
+        OR t.translation_version <> ${sqlString(articleTranslationVersion)}
+        OR t.status <> 'translated'
+        OR NOT (t.source_title <=> a.title)
+        OR NOT (t.source_summary <=> COALESCE(a.summary, ''))
+      ORDER BY
+        CASE WHEN t.article_hash IS NULL THEN 0 ELSE 1 END,
+        COALESCE(a.published_at, a.fetched_at) DESC,
+        a.id DESC
+      LIMIT ${sqlNumber(limit, articleTranslationMaxPerRun)}
+    ) pending_translations;
+  `)) || [];
+
+  return rows.map((row) => ({
+    ...row,
+    contentHash: getArticleTranslationContentHash(row),
+  }));
+}
+
+async function saveArticleTranslations(items, translationsById) {
+  const values = [];
+  for (const item of items) {
+    const translated = translationsById.get(item.id);
+    const titleZh = truncate(translated?.titleZh || "", 600);
+    const summaryZh = truncate(translated?.summaryZh || "", 600);
+    if (!titleZh && !summaryZh) {
+      continue;
+    }
+
+    values.push(`(
+      ${sqlString(item.id)},
+      ${sqlString(item.contentHash || getArticleTranslationContentHash(item))},
+      ${sqlString(articleTranslationVersion)},
+      ${sqlString(sanitizeTextArtifacts(item.title))},
+      ${sqlString(sanitizeTextArtifacts(item.summary))},
+      ${sqlString(titleZh || sanitizeTextArtifacts(item.title))},
+      ${sqlString(summaryZh || sanitizeTextArtifacts(item.summary))},
+      'translated',
+      ${sqlString(deepseekConfig.model)},
+      NULL
+    )`);
+  }
+
+  if (!values.length) {
+    return 0;
+  }
+
+  await mysqlExec(`
+    INSERT INTO yimin_article_translations (
+      article_hash, content_hash, translation_version, source_title, source_summary,
+      title_zh, summary_zh, status, model, last_error
+    )
+    VALUES ${values.join(",")}
+    ON DUPLICATE KEY UPDATE
+      content_hash = VALUES(content_hash),
+      translation_version = VALUES(translation_version),
+      source_title = VALUES(source_title),
+      source_summary = VALUES(source_summary),
+      title_zh = VALUES(title_zh),
+      summary_zh = VALUES(summary_zh),
+      status = VALUES(status),
+      model = VALUES(model),
+      last_error = NULL,
+      translated_at = CURRENT_TIMESTAMP,
+      updated_at = CURRENT_TIMESTAMP;
+  `);
+
+  return values.length;
+}
+
+async function saveArticleTranslationFailures(items, error) {
+  const message = truncate(error instanceof Error ? error.message : String(error), 1000);
+  const values = items.map((item) => `(
+    ${sqlString(item.id)},
+    ${sqlString(item.contentHash || getArticleTranslationContentHash(item))},
+    ${sqlString(articleTranslationVersion)},
+    ${sqlString(sanitizeTextArtifacts(item.title))},
+    ${sqlString(sanitizeTextArtifacts(item.summary))},
+    NULL,
+    NULL,
+    'failed',
+    ${sqlString(deepseekConfig.model)},
+    ${sqlString(message)}
+  )`);
+  if (!values.length) {
+    return;
+  }
+
+  await mysqlExec(`
+    INSERT INTO yimin_article_translations (
+      article_hash, content_hash, translation_version, source_title, source_summary,
+      title_zh, summary_zh, status, model, last_error
+    )
+    VALUES ${values.join(",")}
+    ON DUPLICATE KEY UPDATE
+      content_hash = VALUES(content_hash),
+      translation_version = VALUES(translation_version),
+      source_title = VALUES(source_title),
+      source_summary = VALUES(source_summary),
+      status = VALUES(status),
+      model = VALUES(model),
+      last_error = VALUES(last_error),
+      updated_at = CURRENT_TIMESTAMP;
+  `);
+}
+
+async function translateArticleBatch(items) {
+  const content = await callDeepSeek(buildArticleTranslationPrompt(items));
+  const parsed = parseDeepSeekJsonArray(content);
+  const translationsById = new Map();
+  for (const row of parsed) {
+    const id = String(row?.id || "");
+    if (!id) continue;
+    translationsById.set(id, {
+      titleZh: sanitizeTextArtifacts(row.titleZh || row.title_zh || ""),
+      summaryZh: sanitizeTextArtifacts(row.summaryZh || row.summary_zh || ""),
+    });
+  }
+  return saveArticleTranslations(items, translationsById);
+}
+
+async function translatePendingArticles({ limit = articleTranslationMaxPerRun } = {}) {
+  await initDb();
+
+  if (!deepseekConfig.apiKey) {
+    return {
+      ok: false,
+      skipped: true,
+      error: "DeepSeek API key is not configured",
+      pendingCount: 0,
+      translatedCount: 0,
+      failedCount: 0,
+    };
+  }
+
+  const pending = await listPendingArticleTranslations(limit);
+  if (!pending.length) {
+    return {
+      ok: true,
+      pendingCount: 0,
+      translatedCount: 0,
+      failedCount: 0,
+    };
+  }
+
+  const batches = [];
+  for (let index = 0; index < pending.length; index += articleTranslationBatchSize) {
+    batches.push(pending.slice(index, index + articleTranslationBatchSize));
+  }
+
+  let translatedCount = 0;
+  let failedCount = 0;
+  await runWithConcurrency(batches, articleTranslationConcurrency, async (batch) => {
+    try {
+      translatedCount += await translateArticleBatch(batch);
+    } catch (error) {
+      failedCount += batch.length;
+      await saveArticleTranslationFailures(batch, error).catch((saveError) => {
+        console.error("Save article translation failures failed:", saveError);
+      });
+      console.error("Article translation batch failed:", error instanceof Error ? error.message : String(error));
+    }
+  });
+
+  cache = null;
+  return {
+    ok: failedCount === 0,
+    pendingCount: pending.length,
+    translatedCount,
+    failedCount,
+  };
+}
+
+function startArticleTranslationInBackground(options = {}) {
+  if (activeArticleTranslationPromise) {
+    return activeArticleTranslationPromise;
+  }
+
+  activeArticleTranslationPromise = translatePendingArticles(options)
+    .then((result) => {
+      if (result?.skipped) {
+        console.warn("Article translation skipped:", result.error);
+      }
+      return result;
+    })
+    .catch((error) => {
+      console.error("Article translation failed:", error);
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    })
+    .finally(() => {
+      activeArticleTranslationPromise = null;
+    });
+
+  return activeArticleTranslationPromise;
+}
+
+async function getArticleTranslationStatus() {
+  await initDb();
+  const row = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'translatedCount', SUM(CASE WHEN t.status = 'translated' THEN 1 ELSE 0 END),
+      'failedCount', SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END),
+      'missingCount', SUM(CASE WHEN t.article_hash IS NULL THEN 1 ELSE 0 END),
+      'staleCount', SUM(CASE
+        WHEN t.article_hash IS NOT NULL
+          AND (
+            t.translation_version <> ${sqlString(articleTranslationVersion)}
+            OR NOT (t.source_title <=> a.title)
+            OR NOT (t.source_summary <=> COALESCE(a.summary, ''))
+          )
+        THEN 1 ELSE 0 END),
+      'running', ${activeArticleTranslationPromise ? "CAST(TRUE AS JSON)" : "CAST(FALSE AS JSON)"}
+    )
+    FROM yimin_articles a
+    LEFT JOIN yimin_article_translations t ON t.article_hash = a.dedupe_hash;
+  `);
+
+  return {
+    translatedCount: Number(row?.translatedCount || 0),
+    failedCount: Number(row?.failedCount || 0),
+    missingCount: Number(row?.missingCount || 0),
+    staleCount: Number(row?.staleCount || 0),
+    running: Boolean(row?.running),
+  };
+}
+
 async function listArticlesFromDb(limit = maxTotalItems) {
   return (
     (await mysqlJson(`
       SELECT COALESCE(JSON_ARRAYAGG(
         JSON_OBJECT(
           'id', dedupe_hash,
-          'title', title,
-          'summary', COALESCE(summary, ''),
+          'title', display_title,
+          'summary', COALESCE(display_summary, ''),
+          'originalTitle', original_title,
+          'originalSummary', COALESCE(original_summary, ''),
+          'translated', translated,
           'source', source_name,
           'country', country,
           'category', category,
@@ -1275,9 +1582,22 @@ async function listArticlesFromDb(limit = maxTotalItems) {
         )
       ), JSON_ARRAY())
       FROM (
-        SELECT a.*, s.name AS source_name
+        SELECT
+          a.*,
+          s.name AS source_name,
+          a.title AS original_title,
+          a.summary AS original_summary,
+          COALESCE(NULLIF(t.title_zh, ''), a.title) AS display_title,
+          COALESCE(NULLIF(t.summary_zh, ''), a.summary, '') AS display_summary,
+          IF(t.status = 'translated' AND (NULLIF(t.title_zh, '') IS NOT NULL OR NULLIF(t.summary_zh, '') IS NOT NULL), CAST(TRUE AS JSON), CAST(FALSE AS JSON)) AS translated
         FROM yimin_articles a
         JOIN yimin_sources s ON s.id = a.source_id
+        LEFT JOIN yimin_article_translations t
+          ON t.article_hash = a.dedupe_hash
+         AND t.translation_version = ${sqlString(articleTranslationVersion)}
+         AND t.status = 'translated'
+         AND t.source_title <=> a.title
+         AND t.source_summary <=> COALESCE(a.summary, '')
         ORDER BY a.heat DESC, COALESCE(a.published_at, a.fetched_at) DESC, a.id DESC
         LIMIT ${sqlNumber(limit, maxTotalItems)}
       ) ranked;
@@ -1316,8 +1636,11 @@ async function listRecentArticlesFromDb(limit = Math.max(maxTotalItems * 2, 160)
       SELECT COALESCE(JSON_ARRAYAGG(
         JSON_OBJECT(
           'id', dedupe_hash,
-          'title', title,
-          'summary', COALESCE(summary, ''),
+          'title', display_title,
+          'summary', COALESCE(display_summary, ''),
+          'originalTitle', original_title,
+          'originalSummary', COALESCE(original_summary, ''),
+          'translated', translated,
           'source', source_name,
           'country', country,
           'category', category,
@@ -1332,9 +1655,22 @@ async function listRecentArticlesFromDb(limit = Math.max(maxTotalItems * 2, 160)
         )
       ), JSON_ARRAY())
       FROM (
-        SELECT a.*, s.name AS source_name
+        SELECT
+          a.*,
+          s.name AS source_name,
+          a.title AS original_title,
+          a.summary AS original_summary,
+          COALESCE(NULLIF(t.title_zh, ''), a.title) AS display_title,
+          COALESCE(NULLIF(t.summary_zh, ''), a.summary, '') AS display_summary,
+          IF(t.status = 'translated' AND (NULLIF(t.title_zh, '') IS NOT NULL OR NULLIF(t.summary_zh, '') IS NOT NULL), CAST(TRUE AS JSON), CAST(FALSE AS JSON)) AS translated
         FROM yimin_articles a
         JOIN yimin_sources s ON s.id = a.source_id
+        LEFT JOIN yimin_article_translations t
+          ON t.article_hash = a.dedupe_hash
+         AND t.translation_version = ${sqlString(articleTranslationVersion)}
+         AND t.status = 'translated'
+         AND t.source_title <=> a.title
+         AND t.source_summary <=> COALESCE(a.summary, '')
         ORDER BY COALESCE(a.published_at, a.fetched_at) DESC, a.heat DESC, a.id DESC
         LIMIT ${sqlNumber(limit, Math.max(maxTotalItems * 2, 160))}
       ) ranked;
@@ -1349,8 +1685,11 @@ async function listDailyCandidateArticlePageFromDb(window, offset, limit = daily
         JSON_OBJECT(
           'id', dedupe_hash,
           'sourceId', source_id,
-          'title', title,
-          'summary', COALESCE(summary, ''),
+          'title', display_title,
+          'summary', COALESCE(display_summary, ''),
+          'originalTitle', original_title,
+          'originalSummary', COALESCE(original_summary, ''),
+          'translated', translated,
           'source', source_name,
           'country', country,
           'category', category,
@@ -1365,9 +1704,23 @@ async function listDailyCandidateArticlePageFromDb(window, offset, limit = daily
         )
       ), JSON_ARRAY())
       FROM (
-        SELECT a.*, s.name AS source_name, COALESCE(a.published_at, a.fetched_at) AS article_at
+        SELECT
+          a.*,
+          s.name AS source_name,
+          COALESCE(a.published_at, a.fetched_at) AS article_at,
+          a.title AS original_title,
+          a.summary AS original_summary,
+          COALESCE(NULLIF(t.title_zh, ''), a.title) AS display_title,
+          COALESCE(NULLIF(t.summary_zh, ''), a.summary, '') AS display_summary,
+          IF(t.status = 'translated' AND (NULLIF(t.title_zh, '') IS NOT NULL OR NULLIF(t.summary_zh, '') IS NOT NULL), CAST(TRUE AS JSON), CAST(FALSE AS JSON)) AS translated
         FROM yimin_articles a
         JOIN yimin_sources s ON s.id = a.source_id
+        LEFT JOIN yimin_article_translations t
+          ON t.article_hash = a.dedupe_hash
+         AND t.translation_version = ${sqlString(articleTranslationVersion)}
+         AND t.status = 'translated'
+         AND t.source_title <=> a.title
+         AND t.source_summary <=> COALESCE(a.summary, '')
         WHERE a.daily_excluded = 0
           AND COALESCE(a.published_at, a.fetched_at) >= ${sqlDate(window.recentStart)}
           AND COALESCE(a.published_at, a.fetched_at) < ${sqlDate(window.end)}
@@ -3722,6 +4075,9 @@ async function executeFetchRun(runId, sources, { concurrency = feedFetchConcurre
       itemCount,
     });
     cache = null;
+    startArticleTranslationInBackground().catch((error) => {
+      console.error("Post-fetch article translation failed:", error);
+    });
     return results.map((result) => result.status);
   } catch (error) {
     await finishFetchRun(runId, {
@@ -6260,6 +6616,52 @@ const server = createServer(async (req, res) => {
       const sync = url.searchParams.get("sync") === "1";
       const payload = await getNews({ force, background: force && !sync });
       sendJson(res, 200, payload);
+      return;
+    }
+
+    if (url.pathname === "/api/translations/articles") {
+      if (req.method === "GET") {
+        sendJson(res, 200, {
+          ok: true,
+          status: await getArticleTranslationStatus(),
+        });
+        return;
+      }
+
+      if (req.method === "POST") {
+        const session = requireAuth(req);
+        if (!session && !isLoopbackRequest(req)) {
+          sendJson(res, 401, {
+            ok: false,
+            error: "Unauthorized",
+          });
+          return;
+        }
+
+        const limit = Math.max(1, Math.min(2000, Number(url.searchParams.get("limit") || articleTranslationMaxPerRun)));
+        if (url.searchParams.get("sync") === "1") {
+          const result = await translatePendingArticles({ limit });
+          sendJson(res, 200, {
+            ok: true,
+            result,
+            status: await getArticleTranslationStatus(),
+          });
+          return;
+        }
+
+        startArticleTranslationInBackground({ limit });
+        sendJson(res, 202, {
+          ok: true,
+          running: true,
+          status: await getArticleTranslationStatus(),
+        });
+        return;
+      }
+
+      sendJson(res, 405, {
+        ok: false,
+        error: "Method not allowed",
+      });
       return;
     }
 

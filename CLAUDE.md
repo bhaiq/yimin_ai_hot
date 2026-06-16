@@ -46,7 +46,7 @@ Single-file HTTP server handling both API and static files:
 
 ### Frontend (`app.js` + `index.html` + `styles.css`)
 
-Single-page app with hash-based routing (`#home`, `#all`, `#daily`, `#subscriptions`, `#market`, `#radar`, `#feedback`, `#login`, `#sources`, `#review`, `#sso-stats`, `#department-subscriptions`, `#feedback-review`, `#about`, `#changelog`). Works both served from the Node server (live API data) and opened as `file://` (falls back to hardcoded demo data and localStorage drafts).
+Single-page app with hash-based routing (`#home`, `#all`, `#daily`, `#subscriptions`, `#market`, `#radar`, `#feedback`, `#login`, `#sources`, `#review`, `#sso-stats`, `#department-subscriptions`, `#feedback-review`, `#about`, `#changelog`). Works both served from the Node server (live API data) and opened as `file://` (renders empty state — no demo data is loaded; only form drafts like source submissions and feedback fall back to localStorage).
 
 Key frontend patterns:
 - `state` object holds all app state; `renderContent()` re-renders all views on any change

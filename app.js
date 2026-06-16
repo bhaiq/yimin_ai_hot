@@ -283,7 +283,7 @@ function matchesItem(item) {
   const query = state.query.trim().toLowerCase();
   const inQuery =
     !query ||
-    [item.title, item.summary, item.source, item.country, item.category, ...(item.tags || [])]
+    [item.title, item.summary, item.originalTitle, item.originalSummary, item.source, item.country, item.category, ...(item.tags || [])]
       .join(" ")
       .toLowerCase()
       .includes(query);
