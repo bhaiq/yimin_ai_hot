@@ -6629,15 +6629,6 @@ const server = createServer(async (req, res) => {
       }
 
       if (req.method === "POST") {
-        const session = requireAuth(req);
-        if (!session && !isLoopbackRequest(req)) {
-          sendJson(res, 401, {
-            ok: false,
-            error: "Unauthorized",
-          });
-          return;
-        }
-
         const limit = Math.max(1, Math.min(2000, Number(url.searchParams.get("limit") || articleTranslationMaxPerRun)));
         if (url.searchParams.get("sync") === "1") {
           const result = await translatePendingArticles({ limit });
