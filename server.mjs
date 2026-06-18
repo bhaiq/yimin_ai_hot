@@ -18,11 +18,12 @@ const dailyCandidatePageSize = Math.max(50, Number(process.env.DAILY_CANDIDATE_P
 const dailyAnalysisBatchSize = Math.max(10, Number(process.env.DAILY_ANALYSIS_BATCH_SIZE || 30));
 const dailyAnalysisConcurrency = Math.max(1, Number(process.env.DAILY_ANALYSIS_CONCURRENCY || 3));
 const dailyFinalPromptMaxChars = Math.max(20000, Number(process.env.DAILY_FINAL_PROMPT_MAX_CHARS || 80000));
-const dailyAnalysisVersion = "daily-analysis-v1";
+const dailyAnalysisVersion = "daily-analysis-v2";
 const articleTranslationVersion = "article-translation-v1";
 const articleTranslationBatchSize = Math.max(5, Number(process.env.ARTICLE_TRANSLATION_BATCH_SIZE || 30));
 const articleTranslationConcurrency = Math.max(1, Number(process.env.ARTICLE_TRANSLATION_CONCURRENCY || 2));
 const articleTranslationMaxPerRun = Math.max(20, Number(process.env.ARTICLE_TRANSLATION_MAX_PER_RUN || 300));
+const articleRelevanceMaxPerRun = Math.max(20, Number(process.env.ARTICLE_RELEVANCE_MAX_PER_RUN || 300));
 const dailyRecentLookbackHoursValue = Number(process.env.DAILY_RECENT_LOOKBACK_HOURS || 48);
 const dailyRecentLookbackHours = Number.isFinite(dailyRecentLookbackHoursValue)
   ? Math.max(24, dailyRecentLookbackHoursValue)
@@ -96,6 +97,7 @@ let cache = null;
 let dbReadyPromise = null;
 let activeFetchRun = null;
 let activeArticleTranslationPromise = null;
+let activeArticleRelevancePromise = null;
 const departmentDailyGenerationPromises = new Map();
 
 async function loadEnv() {
@@ -1286,98 +1288,7 @@ function getArticleTranslationContentHash(item) {
 }
 
 function articleDisplayRelevanceWhere({ articleAlias = "a", analysisAlias = "ad" } = {}) {
-  const articleText = `LOWER(CONCAT_WS(' ',
-    ${articleAlias}.title,
-    ${articleAlias}.summary
-  ))`;
-  const positivePattern = [
-    "immigration",
-    "immigrant",
-    "visa",
-    "work permit",
-    "study permit",
-    "residence permit",
-    "resident",
-    "residence",
-    "permanent residence",
-    "citizenship",
-    "naturalization",
-    "green card",
-    "uscis",
-    "ircc",
-    "home office",
-    "border",
-    "asylum",
-    "refugee",
-    "deport",
-    "removal",
-    "eb-5",
-    "eb5",
-    "eb-1",
-    "eb1",
-    "niw",
-    "i-485",
-    "i-140",
-    "h-1b",
-    "h1b",
-    "pnp",
-    "express entry",
-    "lmia",
-    "sponsor",
-    "sponsorship",
-    "skilled worker",
-    "priority date",
-    "visa bulletin",
-    "移民",
-    "签证",
-    "居留",
-    "永居",
-    "绿卡",
-    "入籍",
-    "公民",
-    "工签",
-    "学签",
-    "工作签证",
-    "学生签证",
-    "雇主担保",
-    "配偶签证",
-    "庇护",
-    "难民",
-    "边境",
-    "排期",
-    "身份",
-    "护照",
-    "配额",
-    "省提名",
-    "投资移民",
-    "技术移民",
-  ].join("|");
-  const unrelatedPattern = [
-    "牛肉",
-    "牛肉粥",
-    "二氧化硫",
-    "食物安全",
-    "食安",
-    "样本检出",
-    "渔农",
-    "放鱼",
-    "放流",
-    "热带气旋",
-    "暴雨",
-    "台风",
-    "天文台",
-    "雇主雇员",
-    "劳工处",
-    "工作安排",
-  ].join("|");
-
-  return `(
-    ${articleText} NOT REGEXP ${sqlString(unrelatedPattern)}
-    AND (
-      (${analysisAlias}.article_hash IS NOT NULL AND ${analysisAlias}.relevant = 1)
-      OR ${articleText} REGEXP ${sqlString(positivePattern)}
-    )
-  )`;
+  return `${analysisAlias}.article_hash IS NOT NULL AND ${analysisAlias}.relevant = 1`;
 }
 
 function buildArticleTranslationPrompt(items) {
@@ -1648,6 +1559,147 @@ async function getArticleTranslationStatus() {
     failedCount: Number(row?.failedCount || 0),
     missingCount: Number(row?.missingCount || 0),
     staleCount: Number(row?.staleCount || 0),
+    running: Boolean(row?.running),
+  };
+}
+
+async function listPendingArticleRelevanceAnalyses(limit = articleRelevanceMaxPerRun) {
+  const scanLimit = Math.max(limit * 3, limit);
+  const rows = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'id', dedupe_hash,
+        'title', title,
+        'summary', COALESCE(summary, ''),
+        'source', source_name,
+        'country', country,
+        'category', category,
+        'time', COALESCE(DATE_FORMAT(published_at, '%H:%i'), '刚刚'),
+        'publishedAt', IF(published_at IS NULL, NULL, DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+        'fetchedAt', IF(fetched_at IS NULL, NULL, DATE_FORMAT(fetched_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+        'url', url,
+        'heat', heat,
+        'impact', impact,
+        'tags', CAST(tags_json AS JSON),
+        'analysisContentHash', analysis_content_hash
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT a.*, s.name AS source_name, ad.content_hash AS analysis_content_hash
+      FROM yimin_articles a
+      JOIN yimin_sources s ON s.id = a.source_id
+      LEFT JOIN yimin_article_daily_analysis ad
+        ON ad.article_hash = a.dedupe_hash
+       AND ad.analysis_version = ${sqlString(dailyAnalysisVersion)}
+      ORDER BY
+        CASE WHEN ad.article_hash IS NULL THEN 0 ELSE 1 END,
+        COALESCE(a.published_at, a.fetched_at) DESC,
+        a.id DESC
+      LIMIT ${sqlNumber(scanLimit, Math.max(articleRelevanceMaxPerRun * 3, articleRelevanceMaxPerRun))}
+    ) pending_relevance;
+  `)) || [];
+
+  return rows
+    .filter((item) => item.analysisContentHash !== getDailyAnalysisContentHash(item))
+    .slice(0, limit);
+}
+
+async function analyzePendingArticleRelevance({ limit = articleRelevanceMaxPerRun } = {}) {
+  await initDb();
+
+  if (!deepseekConfig.apiKey) {
+    return {
+      ok: false,
+      skipped: true,
+      error: "DeepSeek API key is not configured",
+      pendingCount: 0,
+      analyzedCount: 0,
+      failedCount: 0,
+    };
+  }
+
+  const pending = await listPendingArticleRelevanceAnalyses(limit);
+  if (!pending.length) {
+    return {
+      ok: true,
+      pendingCount: 0,
+      analyzedCount: 0,
+      failedCount: 0,
+    };
+  }
+
+  const batches = [];
+  for (let index = 0; index < pending.length; index += dailyAnalysisBatchSize) {
+    batches.push(pending.slice(index, index + dailyAnalysisBatchSize));
+  }
+
+  let analyzedCount = 0;
+  let failedCount = 0;
+  await runWithConcurrency(batches, dailyAnalysisConcurrency, async (batch) => {
+    try {
+      const analyses = await analyzeDailyArticleBatch(batch);
+      await saveDailyAnalyses(analyses);
+      analyzedCount += analyses.length;
+    } catch (error) {
+      failedCount += batch.length;
+      console.error("Article relevance analysis batch failed:", error instanceof Error ? error.message : String(error));
+    }
+  });
+
+  cache = null;
+  return {
+    ok: failedCount === 0,
+    pendingCount: pending.length,
+    analyzedCount,
+    failedCount,
+  };
+}
+
+function startArticleRelevanceInBackground(options = {}) {
+  if (activeArticleRelevancePromise) {
+    return activeArticleRelevancePromise;
+  }
+
+  activeArticleRelevancePromise = analyzePendingArticleRelevance(options)
+    .then((result) => {
+      if (result?.skipped) {
+        console.warn("Article relevance analysis skipped:", result.error);
+      }
+      return result;
+    })
+    .catch((error) => {
+      console.error("Article relevance analysis failed:", error);
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    })
+    .finally(() => {
+      activeArticleRelevancePromise = null;
+    });
+
+  return activeArticleRelevancePromise;
+}
+
+async function getArticleRelevanceStatus() {
+  await initDb();
+  const row = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'relevantCount', SUM(CASE WHEN ad.relevant = 1 THEN 1 ELSE 0 END),
+      'irrelevantCount', SUM(CASE WHEN ad.article_hash IS NOT NULL AND ad.relevant = 0 THEN 1 ELSE 0 END),
+      'missingCount', SUM(CASE WHEN ad.article_hash IS NULL THEN 1 ELSE 0 END),
+      'running', ${activeArticleRelevancePromise ? "CAST(TRUE AS JSON)" : "CAST(FALSE AS JSON)"}
+    )
+    FROM yimin_articles a
+    LEFT JOIN yimin_article_daily_analysis ad
+      ON ad.article_hash = a.dedupe_hash
+     AND ad.analysis_version = ${sqlString(dailyAnalysisVersion)};
+  `);
+
+  return {
+    relevantCount: Number(row?.relevantCount || 0),
+    irrelevantCount: Number(row?.irrelevantCount || 0),
+    missingCount: Number(row?.missingCount || 0),
     running: Boolean(row?.running),
   };
 }
@@ -4168,9 +4220,11 @@ async function executeFetchRun(runId, sources, { concurrency = feedFetchConcurre
       itemCount,
     });
     cache = null;
-    startArticleTranslationInBackground().catch((error) => {
-      console.error("Post-fetch article translation failed:", error);
-    });
+    startArticleRelevanceInBackground()
+      .then(() => startArticleTranslationInBackground())
+      .catch((error) => {
+        console.error("Post-fetch article AI tasks failed:", error);
+      });
     return results.map((result) => result.status);
   } catch (error) {
     await finishFetchRun(runId, {
@@ -4628,8 +4682,10 @@ function buildDailyAnalysisPrompt(items) {
 {"id":"原 id","relevant":true,"importance":0-100,"canonicalTopic":"用于合并同一事件的简短中文主题，不含媒体名","summaryZh":"不超过120字的中文事实摘要","country":"国家或地区","category":"政策分类","impact":"高影响/中影响/低影响"}
 
 规则：
-- 与移民、签证、居留、国籍、边境、工签、雇主担保、留学签证、投资移民、难民庇护直接相关时 relevant=true。
-- 普通旅游、房产、娱乐、体育、一般商业或科技新闻且没有移民影响时 relevant=false。
+- 只有对移民业务、客户申请、签证/居留/永居/入籍路径、项目政策、配额排期、审理规则、申请费用、雇主担保、工签/学签、投资移民、技术移民、难民庇护政策有实际参考价值时 relevant=true。
+- 即使出现 immigration/immigrant/alien/border/CBP/ICE 等词，只要主要内容是刑事执法个案、酒驾或死亡事件、海关查扣、假冒商品、普通公共活动、健康日宣传、天气安排、食品安全、农业渔业、一般劳工关系或普通社会新闻，也必须 relevant=false。
+- 官方机构发布但与签证、身份、申请资格、审理流程、项目政策无关时 relevant=false。
+- 普通旅游、房产、娱乐、体育、一般商业或科技新闻且没有明确移民申请影响时 relevant=false。
 - canonicalTopic 对同一政策或同一事件的不同媒体报道应尽量使用相同表述。
 - 不得编造原文没有的政策、日期、费用或影响。
 - 外文内容翻译成简体中文。
@@ -6709,6 +6765,43 @@ const server = createServer(async (req, res) => {
       const sync = url.searchParams.get("sync") === "1";
       const payload = await getNews({ force, background: force && !sync });
       sendJson(res, 200, payload);
+      return;
+    }
+
+    if (url.pathname === "/api/relevance/articles") {
+      if (req.method === "GET") {
+        sendJson(res, 200, {
+          ok: true,
+          status: await getArticleRelevanceStatus(),
+        });
+        return;
+      }
+
+      if (req.method === "POST") {
+        const limit = Math.max(1, Math.min(2000, Number(url.searchParams.get("limit") || articleRelevanceMaxPerRun)));
+        if (url.searchParams.get("sync") === "1") {
+          const result = await analyzePendingArticleRelevance({ limit });
+          sendJson(res, 200, {
+            ok: true,
+            result,
+            status: await getArticleRelevanceStatus(),
+          });
+          return;
+        }
+
+        startArticleRelevanceInBackground({ limit });
+        sendJson(res, 202, {
+          ok: true,
+          running: true,
+          status: await getArticleRelevanceStatus(),
+        });
+        return;
+      }
+
+      sendJson(res, 405, {
+        ok: false,
+        error: "Method not allowed",
+      });
       return;
     }
 
