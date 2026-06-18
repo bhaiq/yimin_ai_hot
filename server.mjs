@@ -339,6 +339,10 @@ async function initDb() {
           priority INT NOT NULL DEFAULT 70 COMMENT '优先级 0-100，越高越重要',
           type VARCHAR(20) NOT NULL DEFAULT 'rss' COMMENT '来源类型（rss/twitter/html/json/website）',
           enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用（1=启用 0=禁用）',
+          public_daily_enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否进入公共日报（1=公开 0=仅订阅部门）',
+          public_daily_exclusion_reason VARCHAR(255) NULL COMMENT '不进入公共日报的原因',
+          public_daily_updated_by VARCHAR(160) NULL COMMENT '最后调整公共日报范围的管理员',
+          public_daily_updated_at DATETIME NULL COMMENT '最后调整公共日报范围的时间',
           last_fetched_at DATETIME NULL COMMENT '最后一次抓取时间',
           last_fetch_error TEXT NULL COMMENT '最后一次抓取错误信息',
           daily_baseline_at DATETIME NULL COMMENT '日报基线抓取完成时间',
@@ -346,6 +350,7 @@ async function initDb() {
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
           UNIQUE KEY uk_sources_url (url(768)),
           INDEX idx_sources_enabled (enabled),
+          INDEX idx_sources_public_daily (enabled, public_daily_enabled),
           INDEX idx_sources_country (country)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='RSS 信息来源配置表';
 
@@ -744,6 +749,59 @@ async function initDb() {
           ALTER TABLE yimin_sources
           ADD COLUMN daily_baseline_at DATETIME NULL COMMENT '日报基线抓取完成时间'
           AFTER last_fetch_error;
+        `);
+      }
+
+      const sourceDistributionColumns = await mysqlRun(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+          AND TABLE_NAME = 'yimin_sources'
+          AND COLUMN_NAME IN (
+            'public_daily_enabled',
+            'public_daily_exclusion_reason',
+            'public_daily_updated_by',
+            'public_daily_updated_at'
+          );
+      `);
+      if (!sourceDistributionColumns.includes("public_daily_enabled")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_sources
+          ADD COLUMN public_daily_enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否进入公共日报（1=公开 0=仅订阅部门）'
+          AFTER enabled;
+        `);
+      }
+      if (!sourceDistributionColumns.includes("public_daily_exclusion_reason")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_sources
+          ADD COLUMN public_daily_exclusion_reason VARCHAR(255) NULL COMMENT '不进入公共日报的原因'
+          AFTER public_daily_enabled;
+        `);
+      }
+      if (!sourceDistributionColumns.includes("public_daily_updated_by")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_sources
+          ADD COLUMN public_daily_updated_by VARCHAR(160) NULL COMMENT '最后调整公共日报范围的管理员'
+          AFTER public_daily_exclusion_reason;
+        `);
+      }
+      if (!sourceDistributionColumns.includes("public_daily_updated_at")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_sources
+          ADD COLUMN public_daily_updated_at DATETIME NULL COMMENT '最后调整公共日报范围的时间'
+          AFTER public_daily_updated_by;
+        `);
+      }
+
+      const sourceDistributionIndex = await mysqlRun(`
+        SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+          AND TABLE_NAME = 'yimin_sources'
+          AND INDEX_NAME = 'idx_sources_public_daily';
+      `);
+      if (!sourceDistributionIndex.includes("idx_sources_public_daily")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_sources
+          ADD INDEX idx_sources_public_daily (enabled, public_daily_enabled);
         `);
       }
 
@@ -1867,6 +1925,8 @@ async function listDailyCandidateArticlePageFromDb(window, offset, limit = daily
          AND t.translation_version = ${sqlString(articleTranslationVersion)}
          AND t.status = 'translated'
         WHERE a.daily_excluded = 0
+          AND s.enabled = 1
+          AND s.public_daily_enabled = 1
           AND COALESCE(a.published_at, a.fetched_at) >= ${sqlDate(window.recentStart)}
           AND COALESCE(a.published_at, a.fetched_at) < ${sqlDate(window.end)}
         ORDER BY a.heat DESC, article_at DESC, a.id DESC
@@ -1909,6 +1969,98 @@ async function listSourceStatusesFromDb() {
       ) source_rows;
     `)) || []
   );
+}
+
+async function listSourceDistributionSettings() {
+  return (
+    (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(
+        JSON_OBJECT(
+          'id', id,
+          'name', name,
+          'url', url,
+          'country', country,
+          'category', category,
+          'type', type,
+          'enabled', IF(enabled = 1, CAST(TRUE AS JSON), CAST(FALSE AS JSON)),
+          'publicDailyEnabled', IF(public_daily_enabled = 1, CAST(TRUE AS JSON), CAST(FALSE AS JSON)),
+          'publicDailyExclusionReason', COALESCE(public_daily_exclusion_reason, ''),
+          'publicDailyUpdatedBy', COALESCE(public_daily_updated_by, ''),
+          'publicDailyUpdatedAt', IF(
+            public_daily_updated_at IS NULL,
+            NULL,
+            DATE_FORMAT(public_daily_updated_at, '%Y-%m-%dT%H:%i:%s+08:00')
+          ),
+          'departmentCount', department_count
+        )
+      ), JSON_ARRAY())
+      FROM (
+        SELECT
+          s.*,
+          (
+            SELECT COUNT(DISTINCT ds.department_id)
+            FROM yimin_department_source_subscriptions ds
+            WHERE ds.source_id = s.id
+          ) AS department_count
+        FROM yimin_sources s
+        ORDER BY s.enabled DESC, s.public_daily_enabled ASC, s.country, s.category, s.name
+      ) source_distribution;
+    `)) || []
+  );
+}
+
+async function updateSourceDistributionSetting(sourceIdValue, data, session) {
+  const sourceId = Number(sourceIdValue);
+  if (!Number.isSafeInteger(sourceId) || sourceId <= 0) {
+    throw new Error("sourceId must be a positive integer");
+  }
+  if (typeof data.publicDailyEnabled !== "boolean") {
+    throw new Error("publicDailyEnabled must be a boolean");
+  }
+
+  const reason = truncate(String(data.reason || "").trim(), 255);
+  if (!data.publicDailyEnabled && !reason) {
+    throw new Error("设为仅订阅部门时必须填写调整原因");
+  }
+
+  const result = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'id', id,
+      'enabled', enabled,
+      'publicDailyEnabled', public_daily_enabled
+    )
+    FROM yimin_sources
+    WHERE id = ${sqlNumber(sourceId)}
+    LIMIT 1;
+  `);
+  if (!result) {
+    const error = new Error("信源不存在");
+    error.code = "SOURCE_NOT_FOUND";
+    throw error;
+  }
+
+  await mysqlExec(`
+    UPDATE yimin_sources
+    SET public_daily_enabled = ${data.publicDailyEnabled ? 1 : 0},
+        public_daily_exclusion_reason = ${data.publicDailyEnabled ? "NULL" : sqlString(reason)},
+        public_daily_updated_by = ${sqlString(session?.username || "admin")},
+        public_daily_updated_at = CURRENT_TIMESTAMP
+    WHERE id = ${sqlNumber(sourceId)};
+  `);
+  if (
+    Boolean(Number(result.enabled))
+    && Boolean(Number(result.publicDailyEnabled)) !== data.publicDailyEnabled
+  ) {
+    const currentDate = getShanghaiDate();
+    await mysqlExec(`
+      DELETE FROM yimin_department_daily_reports
+      WHERE report_date = ${sqlString(currentDate)};
+      DELETE FROM yimin_daily_reports
+      WHERE report_date = ${sqlString(currentDate)};
+    `);
+  }
+  cache = null;
+  return listSourceDistributionSettings();
 }
 
 function getMarketArticleDate(item) {
@@ -2765,10 +2917,16 @@ async function getPushSubscriptionStats(dailyDate, userIds) {
   `)) || [];
   const personalRows = (await mysqlJson(`
     SELECT COALESCE(JSON_ARRAYAGG(
-      JSON_OBJECT('userid', userid, 'sourceId', source_id, 'status', status)
+      JSON_OBJECT(
+        'userid', us.userid,
+        'sourceId', us.source_id,
+        'status', us.status,
+        'publicDailyEnabled', IF(s.public_daily_enabled = 1, CAST(TRUE AS JSON), CAST(FALSE AS JSON))
+      )
     ), JSON_ARRAY())
-    FROM yimin_user_source_subscriptions
-    WHERE userid IN (${cleanUserIds.map(sqlString).join(",")});
+    FROM yimin_user_source_subscriptions us
+    JOIN yimin_sources s ON s.id = us.source_id AND s.enabled = 1
+    WHERE us.userid IN (${cleanUserIds.map(sqlString).join(",")});
   `)) || [];
   const departmentIds = [...new Set(
     users.flatMap((user) => normalizeDepartmentIds(user.departmentIds)),
@@ -2787,14 +2945,24 @@ async function getPushSubscriptionStats(dailyDate, userIds) {
       JSON_OBJECT('sourceId', source_id, 'itemCount', item_count)
     ), JSON_ARRAY())
     FROM (
-      SELECT a.source_id, COUNT(DISTINCT i.article_hash) AS item_count
+      SELECT a.source_id, COUNT(DISTINCT a.dedupe_hash) AS item_count
       FROM yimin_daily_reports r
-      JOIN yimin_daily_report_items i
-        ON i.report_id = r.id
-       AND i.relevant = 1
-      JOIN yimin_articles a ON a.dedupe_hash = i.article_hash
+      JOIN yimin_articles a
+        ON COALESCE(a.published_at, a.fetched_at) >= DATE_SUB(
+          COALESCE(r.window_end_at, DATE_ADD(r.report_date, INTERVAL 1 DAY)),
+          INTERVAL ${sqlNumber(dailyRecentLookbackHours)} HOUR
+        )
+       AND COALESCE(a.published_at, a.fetched_at) < COALESCE(
+          r.window_end_at,
+          DATE_ADD(r.report_date, INTERVAL 1 DAY)
+        )
+       AND a.daily_excluded = 0
       JOIN yimin_sources s ON s.id = a.source_id AND s.enabled = 1
+      LEFT JOIN yimin_article_daily_analysis ad
+        ON ad.article_hash = a.dedupe_hash
+       AND ad.analysis_version = ${sqlString(dailyAnalysisVersion)}
       WHERE r.report_date = ${sqlString(dailyDate)}
+        AND COALESCE(ad.relevant, 1) = 1
       GROUP BY a.source_id
     ) source_items;
   `)) || [];
@@ -2823,7 +2991,7 @@ async function getPushSubscriptionStats(dailyDate, userIds) {
     }
     for (const row of personalByUser.get(user.userid) || []) {
       const sourceId = Number(row.sourceId);
-      if (row.status === "subscribed") effectiveSourceIds.add(sourceId);
+      if (row.status === "subscribed" && row.publicDailyEnabled) effectiveSourceIds.add(sourceId);
       if (row.status === "muted") effectiveSourceIds.delete(sourceId);
     }
     return [
@@ -5648,10 +5816,15 @@ async function getUserSubscriptionContext(userId) {
     : [];
   const personalRows = (await mysqlJson(`
     SELECT COALESCE(JSON_ARRAYAGG(
-      JSON_OBJECT('sourceId', source_id, 'status', status)
+      JSON_OBJECT(
+        'sourceId', us.source_id,
+        'status', us.status,
+        'publicDailyEnabled', IF(s.public_daily_enabled = 1, CAST(TRUE AS JSON), CAST(FALSE AS JSON))
+      )
     ), JSON_ARRAY())
-    FROM yimin_user_source_subscriptions
-    WHERE userid = ${sqlString(userId)};
+    FROM yimin_user_source_subscriptions us
+    JOIN yimin_sources s ON s.id = us.source_id AND s.enabled = 1
+    WHERE us.userid = ${sqlString(userId)};
   `)) || [];
 
   const departmentDefaults = new Set(departmentSourceIds.map(Number).filter(Number.isFinite));
@@ -5659,8 +5832,10 @@ async function getUserSubscriptionContext(userId) {
     personalRows.map((row) => [Number(row.sourceId), row.status]),
   );
   const effectiveSourceIds = new Set(departmentDefaults);
-  for (const [sourceId, status] of personalStatuses) {
-    if (status === "subscribed") effectiveSourceIds.add(sourceId);
+  for (const row of personalRows) {
+    const sourceId = Number(row.sourceId);
+    const status = row.status;
+    if (status === "subscribed" && row.publicDailyEnabled) effectiveSourceIds.add(sourceId);
     if (status === "muted") effectiveSourceIds.delete(sourceId);
   }
 
@@ -5676,6 +5851,9 @@ async function listMySourceSubscriptions(identity) {
   await initDb();
   await upsertWxUser(identity);
   const context = await getUserSubscriptionContext(identity.userId);
+  const visibleSourceCondition = context.departmentDefaults.size
+    ? `(s.public_daily_enabled = 1 OR s.id IN (${[...context.departmentDefaults].map(sqlNumber).join(",")}))`
+    : "s.public_daily_enabled = 1";
   const sources = (await mysqlJson(`
     SELECT COALESCE(JSON_ARRAYAGG(
       JSON_OBJECT(
@@ -5686,6 +5864,7 @@ async function listMySourceSubscriptions(identity) {
         'category', category,
         'type', type,
         'priority', priority,
+        'publicDailyEnabled', IF(public_daily_enabled = 1, CAST(TRUE AS JSON), CAST(FALSE AS JSON)),
         'articleCount', article_count,
         'lastFetchedAt', last_fetched_at,
         'personalStatus', subscription_status
@@ -5700,6 +5879,7 @@ async function listMySourceSubscriptions(identity) {
         s.category,
         s.type,
         s.priority,
+        s.public_daily_enabled,
         (SELECT COUNT(*) FROM yimin_articles a WHERE a.source_id = s.id) AS article_count,
         IF(s.last_fetched_at IS NULL, NULL, DATE_FORMAT(s.last_fetched_at, '%Y-%m-%dT%H:%i:%s+08:00')) AS last_fetched_at,
         us.status AS subscription_status
@@ -5708,6 +5888,7 @@ async function listMySourceSubscriptions(identity) {
         ON us.source_id = s.id
        AND us.userid = ${sqlString(identity.userId)}
       WHERE s.enabled = 1
+        AND ${visibleSourceCondition}
       ORDER BY
         IF(us.status = 'subscribed', 0, 1),
         s.country,
@@ -5750,10 +5931,14 @@ async function saveMySourceSubscriptions(identity, rawSourceIds) {
 
   let validSourceIds = [];
   if (sourceIds.length) {
+    const selectableSourceCondition = context.departmentDefaults.size
+      ? `(public_daily_enabled = 1 OR id IN (${[...context.departmentDefaults].map(sqlNumber).join(",")}))`
+      : "public_daily_enabled = 1";
     validSourceIds = (await mysqlJson(`
       SELECT COALESCE(JSON_ARRAYAGG(id), JSON_ARRAY())
       FROM yimin_sources
       WHERE enabled = 1
+        AND ${selectableSourceCondition}
         AND id IN (${sourceIds.map((id) => sqlNumber(id)).join(",")});
     `)) || [];
   }
@@ -5828,11 +6013,12 @@ async function listDepartmentSubscriptionSettings() {
           'name', name,
           'country', country,
           'category', category,
-          'type', type
+          'type', type,
+          'publicDailyEnabled', IF(public_daily_enabled = 1, CAST(TRUE AS JSON), CAST(FALSE AS JSON))
         )
       ), JSON_ARRAY())
       FROM (
-        SELECT id, name, country, category, type
+        SELECT id, name, country, category, type, public_daily_enabled
         FROM yimin_sources
         WHERE enabled = 1
         ORDER BY country, category, priority DESC, name
@@ -6166,7 +6352,10 @@ async function getDepartmentDailyInput(department, date) {
   const report = await mysqlJson(`
     SELECT JSON_OBJECT(
       'date', DATE_FORMAT(report_date, '%Y-%m-%d'),
-      'contentMarkdown', content_markdown
+      'contentMarkdown', content_markdown,
+      'windowMode', window_mode,
+      'windowStart', IF(window_start_at IS NULL, NULL, DATE_FORMAT(window_start_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+      'windowEnd', IF(window_end_at IS NULL, NULL, DATE_FORMAT(window_end_at, '%Y-%m-%dT%H:%i:%s+08:00'))
     )
     FROM yimin_daily_reports
     WHERE report_date = ${sqlString(date)}
@@ -6187,61 +6376,101 @@ async function getDepartmentDailyInput(department, date) {
     ) department_sources;
   `)) || [];
   const sourceIds = sources.map((source) => Number(source.id)).filter(Number.isFinite);
+  const sourceConfigHash = createHash("sha256")
+    .update([...sourceIds].sort((a, b) => a - b).join(","))
+    .digest("hex");
   if (!sourceIds.length) {
     return {
       report,
       sources,
       items: [],
-      sourceConfigHash: createHash("sha256").update("").digest("hex"),
+      sourceConfigHash,
       inputHash: createHash("sha256").update(String(report.contentMarkdown || "")).digest("hex"),
     };
   }
 
-  const items = (await mysqlJson(`
+  const fallbackWindow = getDailyDateWindow(date, report.windowMode || "calendar");
+  const windowEnd = report.windowEnd ? new Date(report.windowEnd) : fallbackWindow.end;
+  const recentStart = new Date(windowEnd.getTime() - dailyRecentLookbackHours * 36e5);
+  const rawItems = (await mysqlJson(`
     SELECT COALESCE(JSON_ARRAYAGG(
       JSON_OBJECT(
-        'id', article_hash,
+        'id', dedupe_hash,
         'sourceId', source_id,
         'source', source_name,
         'country', country,
         'category', category,
-        'title', title,
-        'summary', summary,
+        'title', display_title,
+        'summary', COALESCE(display_summary, ''),
         'url', url,
-        'articleDate', article_date,
-        'section', section,
-        'importance', importance
+        'publishedAt', published_at,
+        'fetchedAt', fetched_at,
+        'heat', heat,
+        'impact', impact,
+        'tags', CAST(tags_json AS JSON)
       )
     ), JSON_ARRAY())
     FROM (
       SELECT
-        i.article_hash,
+        a.dedupe_hash,
         a.source_id,
         s.name AS source_name,
         a.country,
         a.category,
-        a.title,
-        COALESCE(NULLIF(ad.summary_zh, ''), a.summary, '') AS summary,
+        COALESCE(NULLIF(t.title_zh, ''), a.title) AS display_title,
+        COALESCE(NULLIF(t.summary_zh, ''), a.summary, '') AS display_summary,
         a.url,
-        IF(i.article_date IS NULL, NULL, DATE_FORMAT(i.article_date, '%Y-%m-%dT%H:%i:%s+08:00')) AS article_date,
-        i.section,
-        i.importance
-      FROM yimin_daily_reports r
-      JOIN yimin_daily_report_items i ON i.report_id = r.id
-      JOIN yimin_articles a ON a.dedupe_hash = i.article_hash
-      JOIN yimin_sources s ON s.id = a.source_id
-      LEFT JOIN yimin_article_daily_analysis ad ON ad.article_hash = i.article_hash
-      WHERE r.report_date = ${sqlString(date)}
-        AND i.relevant = 1
+        IF(a.published_at IS NULL, NULL, DATE_FORMAT(a.published_at, '%Y-%m-%dT%H:%i:%s+08:00')) AS published_at,
+        IF(a.fetched_at IS NULL, NULL, DATE_FORMAT(a.fetched_at, '%Y-%m-%dT%H:%i:%s+08:00')) AS fetched_at,
+        a.heat,
+        a.impact,
+        a.tags_json,
+        COALESCE(a.published_at, a.fetched_at) AS article_at
+      FROM yimin_articles a
+      JOIN yimin_sources s ON s.id = a.source_id AND s.enabled = 1
+      LEFT JOIN yimin_article_translations t
+        ON t.article_hash = a.dedupe_hash
+       AND t.translation_version = ${sqlString(articleTranslationVersion)}
+       AND t.status = 'translated'
+      WHERE a.daily_excluded = 0
         AND a.source_id IN (${sourceIds.map(sqlNumber).join(",")})
-      ORDER BY i.importance DESC, i.article_date DESC, i.id DESC
-      LIMIT 40
+        AND COALESCE(a.published_at, a.fetched_at) >= ${sqlDate(recentStart)}
+        AND COALESCE(a.published_at, a.fetched_at) < ${sqlDate(windowEnd)}
+      ORDER BY a.heat DESC, article_at DESC, a.id DESC
+      LIMIT 500
     ) department_items;
   `)) || [];
 
-  const sourceConfigHash = createHash("sha256")
-    .update(sourceIds.sort((a, b) => a - b).join(","))
-    .digest("hex");
+  const analysisInput = rawItems.map((item) => {
+    const articleDate = getDailyArticleDate(item);
+    return {
+      ...item,
+      title: sanitizeTextArtifacts(item.title),
+      summary: sanitizeTextArtifacts(item.summary),
+      source: sanitizeTextArtifacts(item.source),
+      country: sanitizeTextArtifacts(item.country),
+      category: sanitizeTextArtifacts(item.category),
+      impact: sanitizeTextArtifacts(item.impact),
+      tags: (item.tags || []).map((tag) => sanitizeTextArtifacts(tag)).filter(Boolean),
+      articleDate: articleDate ? formatShanghaiDateTimeISO(articleDate) : null,
+      dailyScore: getDailyItemScore(item, articleDate, { end: windowEnd }),
+    };
+  });
+  const analyses = await getDailyArticleAnalyses(analysisInput);
+  const items = analysisInput
+    .map((item) => {
+      const analysis = analyses.get(item.id) || buildFallbackDailyAnalysis(item);
+      return {
+        ...item,
+        summary: analysis.summaryZh || item.summary,
+        importance: analysis.importance,
+        relevant: analysis.relevant,
+      };
+    })
+    .filter((item) => item.relevant)
+    .sort((a, b) => b.importance - a.importance || b.dailyScore - a.dailyScore)
+    .slice(0, 40);
+
   const inputHash = createHash("sha256")
     .update(JSON.stringify({
       publicMarkdown: report.contentMarkdown || "",
@@ -6355,12 +6584,16 @@ async function generateDepartmentDailyReport(department, date, { refresh = false
 
   const generationPromise = (async () => {
     const existing = await readDepartmentDailyReport(date, department.id);
-    if (!refresh && existing) {
-      return normalizeDepartmentDailyReport(existing);
-    }
-
     const input = await getDepartmentDailyInput(department, date);
     if (!input) return null;
+    if (
+      !refresh
+      && existing
+      && existing.sourceConfigHash === input.sourceConfigHash
+      && existing.inputHash === input.inputHash
+    ) {
+      return normalizeDepartmentDailyReport(existing);
+    }
 
     if (!input.sources.length || !input.items.length) {
       const message = !input.sources.length
@@ -6724,6 +6957,45 @@ const server = createServer(async (req, res) => {
         sendJson(res, 200, { ok: true, items: rows || [] });
       } catch (e) {
         sendJson(res, 200, { ok: true, items: [] });
+      }
+      return;
+    }
+
+    if (url.pathname === "/api/source-distribution" && req.method === "GET") {
+      const session = requireAuth(req);
+      if (!session) {
+        sendJson(res, 401, { ok: false, error: "请先登录" });
+        return;
+      }
+      await initDb();
+      sendJson(res, 200, {
+        ok: true,
+        sources: await listSourceDistributionSettings(),
+      });
+      return;
+    }
+
+    const sourceDistributionMatch = url.pathname.match(/^\/api\/source-distribution\/(\d+)$/);
+    if (sourceDistributionMatch && req.method === "PUT") {
+      const session = requireAuth(req);
+      if (!session) {
+        sendJson(res, 401, { ok: false, error: "请先登录" });
+        return;
+      }
+      await initDb();
+      try {
+        const body = await readJsonBody(req);
+        const sources = await updateSourceDistributionSetting(
+          sourceDistributionMatch[1],
+          body,
+          session,
+        );
+        sendJson(res, 200, { ok: true, sources });
+      } catch (error) {
+        sendJson(res, error?.code === "SOURCE_NOT_FOUND" ? 404 : 400, {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
       return;
     }

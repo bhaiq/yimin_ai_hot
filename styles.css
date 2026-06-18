@@ -2369,6 +2369,130 @@ img {
   margin-bottom: 12px;
 }
 
+.source-management-section + .source-management-section {
+  margin-top: 28px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+
+.source-management-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.source-management-heading strong,
+.source-management-heading p {
+  display: block;
+  margin: 0;
+}
+
+.source-management-heading strong {
+  color: var(--text);
+  font-size: 16px;
+}
+
+.source-management-heading p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.source-management-heading input {
+  width: min(360px, 100%);
+  min-height: 38px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-input);
+  color: var(--text);
+  outline: 0;
+}
+
+.source-management-heading input:focus {
+  border-color: var(--accent);
+}
+
+.source-distribution-list {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.source-distribution-card {
+  padding: 15px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.source-distribution-card.department-only {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--line));
+}
+
+.source-distribution-card-head,
+.source-distribution-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.source-distribution-card-head strong,
+.source-distribution-card-head small {
+  display: block;
+}
+
+.source-distribution-card-head small,
+.source-distribution-footer span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.source-scope-badge {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.source-distribution-fields {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.35fr) minmax(260px, 1fr);
+  gap: 10px;
+  margin: 13px 0;
+}
+
+.source-distribution-fields label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.source-distribution-fields input,
+.source-distribution-fields select {
+  width: 100%;
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text);
+  outline: 0;
+}
+
+.source-distribution-fields input:focus,
+.source-distribution-fields select:focus {
+  border-color: var(--accent);
+}
+
 .feedback-review-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -2675,6 +2799,21 @@ img {
   .app-shell {
     display: block;
     background: var(--bg);
+  }
+
+  .source-management-heading,
+  .source-distribution-card-head,
+  .source-distribution-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .source-management-heading input {
+    width: 100%;
+  }
+
+  .source-distribution-fields {
+    grid-template-columns: 1fr;
   }
 
   .sidebar {

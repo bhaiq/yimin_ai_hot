@@ -125,6 +125,11 @@ const state = {
   departmentSubscriptionLoading: false,
   departmentSubscriptionSaving: false,
   departmentSubscriptionError: "",
+  sourceDistributionSources: [],
+  sourceDistributionLoading: false,
+  sourceDistributionSavingId: null,
+  sourceDistributionError: "",
+  sourceDistributionSearch: "",
   ssoStats: null,
   ssoStatsLoading: false,
   ssoStatsError: "",
@@ -808,7 +813,7 @@ function renderSubscriptions() {
         <label class="subscription-source">
           <input type="checkbox" data-subscription-source="${sourceId}"${checked ? " checked" : ""}>
           <span>
-            <strong>${escapeHtml(source.name || "未命名信源")}${originLabel ? ` <em class="subscription-origin">${escapeHtml(originLabel)}</em>` : ""}</strong>
+            <strong>${escapeHtml(source.name || "未命名信源")}${originLabel ? ` <em class="subscription-origin">${escapeHtml(originLabel)}</em>` : ""}${source.publicDailyEnabled === false ? ' <em class="subscription-origin">部门专属</em>' : ""}</strong>
             <small>${escapeHtml(source.country || "全球")} · ${escapeHtml(source.category || "未分类")} · ${escapeHtml(source.articleCount || 0)} 条 · ${escapeHtml(lastFetched)}</small>
           </span>
         </label>
@@ -907,7 +912,7 @@ function renderDepartmentSubscriptions() {
         <label class="subscription-source">
           <input type="checkbox" data-department-subscription-source="${sourceId}"${checked ? " checked" : ""}>
           <span>
-            <strong>${escapeHtml(source.name || "未命名信源")}</strong>
+            <strong>${escapeHtml(source.name || "未命名信源")}${source.publicDailyEnabled === false ? ' <em class="subscription-origin">仅订阅部门</em>' : ""}</strong>
             <small>${escapeHtml(source.country || "全球")} · ${escapeHtml(source.category || "未分类")}</small>
           </span>
         </label>
@@ -2445,14 +2450,143 @@ function setView(routeValue) {
 
 async function loadSubmissions() {
   const container = document.querySelector("#reviewList");
+  const distributionContainer = document.querySelector("#sourceDistributionList");
   container.innerHTML = '<p class="form-note">加载中...</p>';
+  if (distributionContainer) {
+    distributionContainer.innerHTML = '<p class="form-note">加载中...</p>';
+  }
+  state.sourceDistributionLoading = true;
+  state.sourceDistributionError = "";
   try {
-    const response = await fetch("/api/submissions");
-    const data = await response.json();
-    if (!data.ok) throw new Error(data.error);
-    renderReview(data.submissions || []);
-  } catch {
+    const [submissionResponse, distributionResponse] = await Promise.all([
+      fetch("/api/submissions"),
+      fetch("/api/source-distribution"),
+    ]);
+    const [submissionData, distributionData] = await Promise.all([
+      submissionResponse.json(),
+      distributionResponse.json(),
+    ]);
+    if (!submissionResponse.ok || !submissionData.ok) {
+      throw new Error(submissionData.error || `HTTP ${submissionResponse.status}`);
+    }
+    if (!distributionResponse.ok || !distributionData.ok) {
+      throw new Error(distributionData.error || `HTTP ${distributionResponse.status}`);
+    }
+    state.sourceDistributionSources = Array.isArray(distributionData.sources)
+      ? distributionData.sources
+      : [];
+    renderReview(submissionData.submissions || []);
+  } catch (error) {
+    state.sourceDistributionSources = [];
+    state.sourceDistributionError = error instanceof Error ? error.message : String(error);
     container.innerHTML = '<p class="form-note">加载失败，请检查是否已登录。</p>';
+  } finally {
+    state.sourceDistributionLoading = false;
+    renderSourceDistribution();
+  }
+}
+
+function renderSourceDistribution() {
+  const container = document.querySelector("#sourceDistributionList");
+  const note = document.querySelector("#sourceDistributionNote");
+  if (!container || !note) return;
+
+  if (state.sourceDistributionLoading) {
+    container.innerHTML = '<p class="form-note">正在加载信源发布范围...</p>';
+    return;
+  }
+  if (state.sourceDistributionError) {
+    container.innerHTML = `<div class="empty">${escapeHtml(state.sourceDistributionError)}</div>`;
+    return;
+  }
+
+  const query = state.sourceDistributionSearch.trim().toLowerCase();
+  const sources = state.sourceDistributionSources.filter((source) => {
+    if (!query) return true;
+    return `${source.name || ""} ${source.country || ""} ${source.category || ""}`
+      .toLowerCase()
+      .includes(query);
+  });
+  if (!sources.length) {
+    container.innerHTML = '<div class="empty">没有符合条件的信源。</div>';
+    return;
+  }
+
+  container.innerHTML = `<div class="source-distribution-list">${sources.map((source) => {
+    const sourceId = Number(source.id);
+    const isPublic = source.publicDailyEnabled !== false;
+    const isSaving = Number(state.sourceDistributionSavingId) === sourceId;
+    const updated = source.publicDailyUpdatedAt
+      ? String(source.publicDailyUpdatedAt).replace("T", " ").slice(0, 16)
+      : "尚未调整";
+    return `
+      <article class="source-distribution-card${isPublic ? " public" : " department-only"}" data-source-distribution-id="${sourceId}">
+        <div class="source-distribution-card-head">
+          <div>
+            <strong>${escapeHtml(source.name || "未命名信源")}</strong>
+            <small>${escapeHtml(source.country || "全球")} · ${escapeHtml(source.category || "未分类")} · ${escapeHtml(source.type || "rss")}</small>
+          </div>
+          <span class="source-scope-badge">${source.enabled === false ? "已停用" : isPublic ? "公共日报" : "仅订阅部门"}</span>
+        </div>
+        <div class="source-distribution-fields">
+          <label>
+            <span>发布范围</span>
+            <select data-source-distribution-scope${isSaving ? " disabled" : ""}>
+              <option value="public"${isPublic ? " selected" : ""}>公共日报</option>
+              <option value="department"${isPublic ? "" : " selected"}>仅订阅部门</option>
+            </select>
+          </label>
+          <label>
+            <span>调整原因</span>
+            <input data-source-distribution-reason maxlength="255" value="${escapeHtml(source.publicDailyExclusionReason || "")}" placeholder="切换为仅订阅部门时必填"${isSaving ? " disabled" : ""}>
+          </label>
+        </div>
+        <div class="source-distribution-footer">
+          <span>${escapeHtml(source.departmentCount || 0)} 个部门订阅 · ${escapeHtml(updated)}${source.publicDailyUpdatedBy ? ` · ${escapeHtml(source.publicDailyUpdatedBy)}` : ""}</span>
+          <button class="ghost-button" data-action="save-source-distribution" data-id="${sourceId}" type="button"${isSaving ? " disabled" : ""}>${isSaving ? "保存中..." : "保存范围"}</button>
+        </div>
+      </article>
+    `;
+  }).join("")}</div>`;
+}
+
+async function saveSourceDistribution(card) {
+  if (!card || state.sourceDistributionSavingId) return;
+  const sourceId = Number(card.dataset.sourceDistributionId);
+  const scope = card.querySelector("[data-source-distribution-scope]")?.value || "public";
+  const reason = card.querySelector("[data-source-distribution-reason]")?.value.trim() || "";
+  if (scope === "department" && !reason) {
+    document.querySelector("#sourceDistributionNote").textContent = "切换为仅订阅部门时必须填写调整原因。";
+    card.querySelector("[data-source-distribution-reason]")?.focus();
+    return;
+  }
+
+  state.sourceDistributionSavingId = sourceId;
+  renderSourceDistribution();
+  try {
+    const response = await fetch(`/api/source-distribution/${sourceId}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({
+        publicDailyEnabled: scope === "public",
+        reason,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.sourceDistributionSources = Array.isArray(data.sources) ? data.sources : [];
+    state.departmentSubscriptionLoading = false;
+    state.subscriptionLoaded = false;
+    document.querySelector("#sourceDistributionNote").textContent =
+      "发布范围已保存。请重新生成当天公共日报和部门重点后生效。";
+  } catch (error) {
+    document.querySelector("#sourceDistributionNote").textContent =
+      `保存失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    state.sourceDistributionSavingId = null;
+    renderSourceDistribution();
   }
 }
 
@@ -2510,8 +2644,14 @@ document.addEventListener("click", async (event) => {
   const btn = event.target.closest("[data-action]");
   if (!btn) return;
   const id = btn.dataset.id;
-  const card = btn.closest(".review-card");
   const action = btn.dataset.action;
+
+  if (action === "save-source-distribution") {
+    await saveSourceDistribution(btn.closest("[data-source-distribution-id]"));
+    return;
+  }
+
+  const card = btn.closest(".review-card");
 
   if (action === "accept") {
     const fields = {
@@ -2797,6 +2937,11 @@ document.addEventListener("click", (event) => {
 document.querySelector("#departmentSubscriptionSearch")?.addEventListener("input", (event) => {
   state.departmentSubscriptionSearch = event.target.value;
   renderDepartmentSubscriptions();
+});
+
+document.querySelector("#sourceDistributionSearch")?.addEventListener("input", (event) => {
+  state.sourceDistributionSearch = event.target.value;
+  renderSourceDistribution();
 });
 
 departmentSubscriptionList?.addEventListener("change", (event) => {

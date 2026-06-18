@@ -311,11 +311,30 @@
         <section class="view utility-view" id="view-review" aria-labelledby="reviewTitle">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">信源审核</p>
-              <h1 id="reviewTitle">审核用户提报的信源</h1>
+              <p class="eyebrow">信源管理</p>
+              <h1 id="reviewTitle">审核信源与配置发布范围</h1>
             </div>
           </div>
-          <div id="reviewList"></div>
+          <div class="source-management-section">
+            <div class="source-management-heading">
+              <div>
+                <strong>公共日报发布范围</strong>
+                <p>“仅订阅部门”仍会正常抓取，只在已订阅该信源的部门重点中出现。</p>
+              </div>
+              <input id="sourceDistributionSearch" type="search" placeholder="搜索信源名称、国家或分类" autocomplete="off">
+            </div>
+            <div id="sourceDistributionList"></div>
+            <p class="form-note" id="sourceDistributionNote">修改后请重新生成当天公共日报和部门重点。</p>
+          </div>
+          <div class="source-management-section">
+            <div class="source-management-heading">
+              <div>
+                <strong>用户提报审核</strong>
+                <p>审核通过后，信源默认进入公共日报。</p>
+              </div>
+            </div>
+            <div id="reviewList"></div>
+          </div>
         </section>
 
         <section class="view utility-view wide-view" id="view-sso-stats" aria-labelledby="ssoStatsTitle">
