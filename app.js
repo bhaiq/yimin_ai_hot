@@ -337,7 +337,56 @@ function translateCount(count) {
 }
 
 function translateCategoryLabel(category) {
-  return category === "全部" ? t("common.all") : category;
+  if (category === "全部") return t("common.all");
+  return state.language === "en" ? translateLabelToEnglish(category) || category : category;
+}
+
+const englishLabelFallbackMap = new Map([
+  ["高影响", "High Impact"],
+  ["中影响", "Medium Impact"],
+  ["低影响", "Low Impact"],
+  ["美国", "United States"],
+  ["加拿大", "Canada"],
+  ["英国", "United Kingdom"],
+  ["欧盟", "European Union"],
+  ["欧洲", "Europe"],
+  ["希腊", "Greece"],
+  ["西班牙", "Spain"],
+  ["土耳其", "Turkey"],
+  ["香港", "Hong Kong"],
+  ["葡萄牙", "Portugal"],
+  ["韩国", "South Korea"],
+  ["日本", "Japan"],
+  ["新加坡", "Singapore"],
+  ["德国", "Germany"],
+  ["法国", "France"],
+  ["意大利", "Italy"],
+  ["爱尔兰", "Ireland"],
+  ["澳新", "Australia / New Zealand"],
+  ["澳大利亚", "Australia"],
+  ["新西兰", "New Zealand"],
+  ["全球", "Global"],
+  ["其他", "Other"],
+  ["政策", "Policy"],
+  ["签证", "Visa"],
+  ["排期", "Visa Bulletin"],
+  ["雇主担保", "Employer Sponsorship"],
+  ["官方", "Official"],
+  ["官方机构", "Official Agency"],
+  ["投资", "Investment"],
+  ["工签", "Work Permit"],
+  ["留学", "Study Abroad"],
+  ["韩国政策简报-法务部", "South Korea Policy Brief - Ministry of Justice"],
+  ["EB-5", "EB-5"],
+  ["NIW", "NIW"],
+  ["EB-1", "EB-1"],
+  ["EE", "Express Entry"],
+  ["PNP", "PNP"],
+]);
+
+function translateLabelToEnglish(value) {
+  const text = cleanFilterLabel(value);
+  return text ? (englishLabelFallbackMap.get(text) || text) : "";
 }
 
 function applyStaticTranslations() {
@@ -941,6 +990,7 @@ function renderFeed(container, items) {
       const image = safeUrl(item.image);
       const displayTitle = getLocalizedArticleTitle(item);
       const displaySummary = getLocalizedArticleSummary(item);
+      const displaySource = getLocalizedSource(item);
       const displayImpact = getLocalizedImpact(item);
       const displayTags = getLocalizedTags(item);
       const title = escapeHtml(displayTitle);
@@ -951,7 +1001,7 @@ function renderFeed(container, items) {
           <div class="news-body">
             <div class="meta-row">
               <span class="source-dot" aria-hidden="true"></span>
-              <span>${escapeHtml(item.source)}</span>
+              <span>${escapeHtml(displaySource)}</span>
               <span>${escapeHtml(item.time)}</span>
               <span class="priority">HOT ${escapeHtml(item.heat)}</span>
             </div>
@@ -997,27 +1047,34 @@ function getLocalizedArticleSummary(item) {
   return item.summary || item.originalSummary || t("common.readOriginal");
 }
 
+function getLocalizedSource(item) {
+  return state.language === "en"
+    ? translateLabelToEnglish(item.source) || item.source || t("common.unknownSource")
+    : item.source || t("common.unknownSource");
+}
+
 function getLocalizedCountry(item) {
   return state.language === "en"
-    ? item.countryEn || item.country || t("common.global")
+    ? translateLabelToEnglish(item.countryEn) || translateLabelToEnglish(item.country) || t("common.global")
     : item.country || item.countryEn || t("common.global");
 }
 
 function getLocalizedCategory(item) {
   return state.language === "en"
-    ? item.categoryEn || item.category || t("common.policy")
+    ? translateLabelToEnglish(item.categoryEn) || translateLabelToEnglish(item.category) || t("common.policy")
     : item.category || item.categoryEn || t("common.policy");
 }
 
 function getLocalizedImpact(item) {
   return state.language === "en"
-    ? item.impactEn || item.impact || "Medium Impact"
+    ? translateLabelToEnglish(item.impactEn) || translateLabelToEnglish(item.impact) || "Medium Impact"
     : item.impact || item.impactEn || "中影响";
 }
 
 function getLocalizedTags(item) {
-  if (state.language === "en" && Array.isArray(item.tagsEn) && item.tagsEn.length) {
-    return item.tagsEn;
+  if (state.language === "en") {
+    const tags = Array.isArray(item.tagsEn) && item.tagsEn.length ? item.tagsEn : item.tags;
+    return [...new Set((Array.isArray(tags) ? tags : []).map(translateLabelToEnglish).filter(Boolean))];
   }
   return Array.isArray(item.tags) ? item.tags : [];
 }
@@ -1248,11 +1305,14 @@ function renderPersonalDaily() {
         ${items.map((item) => {
           const url = safeUrl(item.url);
           const title = escapeHtml(item.title || "未命名动态");
+          const source = getLocalizedSource(item);
+          const country = getLocalizedCountry(item);
+          const category = getLocalizedCategory(item);
           return `
             <article class="personal-daily-item">
               <div class="personal-daily-item-top">
-                <span class="personal-source-badge">${escapeHtml(item.source || "未知信源")}</span>
-                <span>${escapeHtml(item.country || "全球")} · ${escapeHtml(item.category || "未分类")}</span>
+                <span class="personal-source-badge">${escapeHtml(source)}</span>
+                <span>${escapeHtml(country)} · ${escapeHtml(category)}</span>
                 ${item.articleDate ? `<time>${escapeHtml(String(item.articleDate).slice(0, 10))}</time>` : ""}
               </div>
               <h3>${url
