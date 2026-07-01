@@ -3166,8 +3166,9 @@ img {
   }
 }
 
-/* Theme switch */
-.theme-switch {
+/* Theme and language switches */
+.theme-switch,
+.language-switch {
   display: flex;
   align-items: center;
   gap: 2px;
@@ -3180,10 +3181,17 @@ img {
   background: color-mix(in srgb, var(--bg-input) 64%, transparent);
 }
 
-.theme-switch label {
+.language-switch {
+  margin-top: -14px;
+}
+
+.theme-switch label,
+.language-switch button {
   position: relative;
   padding: 2px 7px;
+  border: 0;
   border-radius: 999px;
+  background: transparent;
   color: var(--faint);
   cursor: pointer;
   font-size: 12px;
@@ -3194,12 +3202,14 @@ img {
     background 0.15s ease;
 }
 
-.theme-switch label:has(input:checked) {
+.theme-switch label:has(input:checked),
+.language-switch button.active {
   background: var(--panel-soft);
   color: var(--text);
 }
 
-.theme-switch label:hover:not(:has(input:checked)) {
+.theme-switch label:hover:not(:has(input:checked)),
+.language-switch button:hover:not(.active) {
   color: var(--muted);
 }
 
@@ -3211,7 +3221,8 @@ img {
   pointer-events: none;
 }
 
-.theme-switch label:has(input:focus-visible) {
+.theme-switch label:has(input:focus-visible),
+.language-switch button:focus-visible {
   outline: 1px solid var(--line-strong);
   outline-offset: 1px;
 }

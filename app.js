@@ -2,6 +2,379 @@ const maxFilterChips = 18;
 const filterViews = ["home", "all"];
 const toolbarViews = ["home", "all"];
 const filterCategoryStorageKey = "yiminHot.filterCategory";
+const languageStorageKey = "yiminHot.language";
+const supportedLanguages = new Set(["zh", "en"]);
+
+const i18n = {
+  zh: {
+    "app.title": "移民热点 · Immigration Hot",
+    "briefInfo.aria": "查看移民早报说明",
+    "briefInfo.button": "说明",
+    "briefInfo.closeAria": "关闭移民早报说明",
+    "briefInfo.eyebrow": "使用说明",
+    "briefInfo.title": "关于移民早报的说明",
+    "briefInfo.intro": "「移民早报」是由系统辅助生成的移民政策信息简报。",
+    "briefInfo.sourceText": "我们会持续采集来自政策官网、行业协会、知名律所等 {count} 个公开信息源的最新动态，并通过 AI 对内容进行去重、聚合、提取和整理，帮助大家快速了解每日重点政策变化。",
+    "briefInfo.sourceTextLoading": "我们会持续采集来自政策官网、行业协会、知名律所等多个公开信息源的最新动态，并通过 AI 对内容进行去重、聚合、提取和整理，帮助大家快速了解每日重点政策变化。",
+    "briefInfo.deliveryTime": "推送时间",
+    "briefInfo.deliveryTimeValue": "每天早上 8:50",
+    "briefInfo.deliveryMethod": "推送方式",
+    "briefInfo.deliveryMethodValue": "通过「企业微信 - 移民早报」送达每个人眼前",
+    "briefInfo.noticeTitle": "需要说明的是",
+    "briefInfo.notice1": "内容来源于公开渠道，不是 AI 凭空生成；",
+    "briefInfo.notice2": "AI 主要负责信息整理和摘要提炼，用于提升阅读效率；",
+    "briefInfo.notice3": "具体业务判断仍需结合原文链接、官方文件和专业判断；",
+    "briefInfo.notice4": "如涉及客户沟通、方案调整或重大政策解读，请以官方原文和业务负责人确认为准。",
+    "briefInfo.gotIt": "我知道了",
+    "nav.home": "精选热点",
+    "nav.all": "全部动态",
+    "nav.daily": "移民日报",
+    "nav.radar": "政策雷达",
+    "nav.feedback": "反馈建议",
+    "nav.changelog": "更新日志",
+    "nav.subscriptions": "我的关注",
+    "nav.tools": "工具",
+    "nav.market": "市场素材",
+    "nav.sources": "信源提报",
+    "nav.review": "信源审核",
+    "nav.ssoStats": "访问统计",
+    "nav.departmentSubscriptions": "部门关注",
+    "nav.feedbackReview": "反馈意见查看",
+    "nav.about": "关于本站",
+    "nav.expand": "展开导航",
+    "language.aria": "语言切换",
+    "theme.dark": "深色",
+    "theme.system": "跟随系统",
+    "theme.light": "浅色",
+    "theme.darkTitle": "使用深色主题",
+    "theme.systemTitle": "跟随系统主题",
+    "theme.lightTitle": "使用浅色主题",
+    "common.login": "登录",
+    "common.logout": "登出",
+    "common.refresh": "刷新",
+    "common.refreshing": "刷新中",
+    "common.fetching": "抓取中",
+    "common.loading": "加载中...",
+    "common.all": "全部",
+    "common.items": "条",
+    "common.source": "信源",
+    "common.sources": "信源",
+    "common.global": "全球",
+    "common.policy": "政策",
+    "common.uncategorized": "未分类",
+    "common.unknownSource": "未知信源",
+    "common.untitledUpdate": "未命名动态",
+    "common.readOriginal": "查看原文获取完整信息。",
+    "common.justNow": "刚刚",
+    "common.noData": "暂无数据",
+    "common.noMatchingHotspots": "没有匹配的热点，换个关键词试试。",
+    "search.placeholder": "搜索国家、项目、签证、机构...",
+    "status.todayMonitor": "今日监测",
+    "status.demo": "演示数据 · 启动服务后自动抓取",
+    "status.connecting": "正在连接实时信源...",
+    "status.live": "今日监测 {count} 条更新",
+    "status.fetching": "后台抓取中 {processed}/{total} 个信源 · {progress}% · 已入库 {count} 条",
+    "status.noHistory": "后台抓取任务已启动，暂无历史文章可展示",
+    "status.noLive": "实时信源暂无真实返回",
+    "home.eyebrow": "精选热点",
+    "home.title": "今天值得移民顾问先看的动态",
+    "home.brief": "今日速览",
+    "home.highPriority": "条高优先级",
+    "home.countries": "个国家/地区",
+    "home.categories": "类客户影响",
+    "home.liveHotspots": "实时热点",
+    "home.snapshot": "项目快照",
+    "home.noLead": "暂无热点数据",
+    "home.noSnapshot": "暂无真实热点快照，等待信源抓取入库。",
+    "home.snapshotWait": "等待信源抓取后自动生成项目快照。",
+    "all.eyebrow": "全部动态",
+    "all.title": "移民热点时间线",
+    "radar.eyebrow": "政策雷达",
+    "radar.title": "项目经理关注面板",
+    "radar.risk.high": "高",
+    "radar.risk.medium": "中",
+    "radar.risk.low": "低",
+    "radar.articleCount": "{count} 篇文章",
+    "radar.back": "← 返回雷达",
+    "radar.meterAria": "{title}风险指数 {value}",
+    "radar.multipleMarkets": "多个国家",
+    "radar.relatedText": "{markets}相关动态 {count} 条，需要关注最新变化。",
+    "radar.noSignal": "近期暂无明显风险信号，保持关注即可。",
+    "radar.rule.visaBulletin": "排期风险",
+    "radar.rule.funds": "资金合规",
+    "radar.rule.employer": "雇主依赖",
+    "radar.rule.documents": "材料周期",
+    "radar.rule.policy": "政策变动",
+    "radar.rule.visa": "签证动态",
+    "daily.eyebrow": "移民日报",
+    "daily.title": "今日政策简报",
+    "daily.manageSubscriptions": "管理我的关注",
+    "daily.copy": "复制日报",
+    "daily.copied": "已复制",
+    "daily.copyFailed": "复制失败",
+    "daily.history": "历史日报",
+    "daily.public": "公共日报",
+    "daily.department": "部门日报",
+    "daily.departmentFocus": "{name} 部门重点",
+    "daily.personal": "我的关注",
+    "daily.defaultTitle": "移民热点日报",
+    "daily.meta": "{model} · 全量 {sourceCount} 条{extra}",
+    "daily.analyzedMeta": " · 相关 {relevantCount} 条 · 聚合 {eventCount} 个事件",
+    "daily.generating": "DeepSeek 正在生成日报...",
+    "daily.empty": "暂无已生成日报。请点击刷新或访问日报接口生成，页面不会再展示演示内容。",
+    "daily.perspectiveLabel": "日报视角",
+    "subscriptions.eyebrow": "个性化日报",
+    "subscriptions.title": "管理我的关注",
+    "subscriptions.intro": "公共日报会照常发送。这里选择的信源会作为你的专属关注补充，不会额外为每个人重复生成整份 AI 日报。",
+    "subscriptions.search": "搜索信源名称",
+    "subscriptions.save": "保存关注",
+    "subscriptions.count": "{count} 个已关注",
+    "subscriptions.identifying": "正在识别企业微信身份...",
+    "feedback.eyebrow": "反馈",
+    "feedback.title": "感谢您的宝贵意见",
+    "feedback.type": "反馈类型",
+    "feedback.typeAccuracy": "内容准确性",
+    "feedback.typeSource": "信息源补充",
+    "feedback.typeExperience": "页面体验",
+    "feedback.typeDaily": "日报质量",
+    "feedback.typeWorkflow": "业务流程",
+    "feedback.module": "相关页面",
+    "feedback.moduleDaily": "移民日报",
+    "feedback.moduleHome": "精选热点",
+    "feedback.moduleAll": "全部动态",
+    "feedback.moduleRadar": "政策雷达",
+    "feedback.moduleMarket": "市场素材",
+    "feedback.moduleOther": "其他",
+    "feedback.priority": "优先级",
+    "feedback.priorityNormal": "一般建议",
+    "feedback.priorityHigh": "影响工作",
+    "feedback.priorityUrgent": "需要尽快处理",
+    "feedback.contact": "联系方式（选填）",
+    "feedback.contactPlaceholder": "邮箱、电话或企业微信",
+    "feedback.message": "具体说明",
+    "feedback.messagePlaceholder": "请描述遇到的问题、希望补充的信息，或你认为更好用的方式。",
+    "feedback.submit": "提交反馈",
+    "feedback.reset": "清空",
+    "feedback.note": "提交后我们会尽快查看。",
+    "feedback.received": "已收到，感谢您的反馈。",
+    "feedback.savedDraft": "数据库提交失败，已保存到本地草稿。",
+  },
+  en: {
+    "app.title": "Immigration Hot",
+    "briefInfo.aria": "View daily brief information",
+    "briefInfo.button": "Info",
+    "briefInfo.closeAria": "Close daily brief information",
+    "briefInfo.eyebrow": "Guide",
+    "briefInfo.title": "About Immigration Daily News",
+    "briefInfo.intro": "Immigration Daily News is a system-assisted immigration policy brief.",
+    "briefInfo.sourceText": "We continuously collect updates from {count} public sources, including policy websites, industry associations, and reputable law firms. AI helps deduplicate, cluster, extract, and organize the information so the team can quickly understand key policy changes.",
+    "briefInfo.sourceTextLoading": "We continuously collect updates from public sources, including policy websites, industry associations, and reputable law firms. AI helps deduplicate, cluster, extract, and organize the information so the team can quickly understand key policy changes.",
+    "briefInfo.deliveryTime": "Delivery Time",
+    "briefInfo.deliveryTimeValue": "Every morning at 8:50",
+    "briefInfo.deliveryMethod": "Delivery Method",
+    "briefInfo.deliveryMethodValue": "Delivered through WeChat Work - Immigration Daily News",
+    "briefInfo.noticeTitle": "Important Notes",
+    "briefInfo.notice1": "Content comes from public sources and is not invented by AI.",
+    "briefInfo.notice2": "AI is mainly used for organization and summarization to improve reading efficiency.",
+    "briefInfo.notice3": "Business decisions should still be based on original links, official documents, and professional judgment.",
+    "briefInfo.notice4": "For client communication, plan changes, or major policy interpretation, rely on official originals and confirmation from business owners.",
+    "briefInfo.gotIt": "Got it",
+    "nav.home": "Highlights",
+    "nav.all": "All Updates",
+    "nav.daily": "Daily Brief",
+    "nav.radar": "Policy Radar",
+    "nav.feedback": "Feedback",
+    "nav.changelog": "Changelog",
+    "nav.subscriptions": "My Sources",
+    "nav.tools": "Tools",
+    "nav.market": "Market Brief",
+    "nav.sources": "Submit Source",
+    "nav.review": "Source Review",
+    "nav.ssoStats": "Access Stats",
+    "nav.departmentSubscriptions": "Dept Sources",
+    "nav.feedbackReview": "Feedback Review",
+    "nav.about": "About",
+    "nav.expand": "Open navigation",
+    "language.aria": "Language switcher",
+    "theme.dark": "Dark",
+    "theme.system": "System",
+    "theme.light": "Light",
+    "theme.darkTitle": "Use dark theme",
+    "theme.systemTitle": "Follow system theme",
+    "theme.lightTitle": "Use light theme",
+    "common.login": "Log In",
+    "common.logout": "Log Out",
+    "common.refresh": "Refresh",
+    "common.refreshing": "Refreshing",
+    "common.fetching": "Fetching",
+    "common.loading": "Loading...",
+    "common.all": "All",
+    "common.items": "items",
+    "common.source": "source",
+    "common.sources": "sources",
+    "common.global": "Global",
+    "common.policy": "Policy",
+    "common.uncategorized": "Uncategorized",
+    "common.unknownSource": "Unknown source",
+    "common.untitledUpdate": "Untitled update",
+    "common.readOriginal": "Open the original article for full details.",
+    "common.justNow": "Just now",
+    "common.noData": "No data",
+    "common.noMatchingHotspots": "No matching updates. Try another keyword.",
+    "search.placeholder": "Search countries, programs, visas, agencies...",
+    "status.todayMonitor": "Today",
+    "status.demo": "Demo data · Start the service to fetch live sources",
+    "status.connecting": "Connecting to live sources...",
+    "status.live": "{count} updates monitored today",
+    "status.fetching": "Fetching in background {processed}/{total} sources · {progress}% · {count} saved",
+    "status.noHistory": "Background fetch started. No historical articles yet.",
+    "status.noLive": "No live source results yet",
+    "home.eyebrow": "Highlights",
+    "home.title": "Updates immigration consultants should read first today",
+    "home.brief": "At A Glance",
+    "home.highPriority": "high priority",
+    "home.countries": "countries/regions",
+    "home.categories": "client impact areas",
+    "home.liveHotspots": "Live Hotspots",
+    "home.snapshot": "Program Snapshot",
+    "home.noLead": "No hotspot data yet",
+    "home.noSnapshot": "No live snapshot yet. Waiting for sources to be fetched.",
+    "home.snapshotWait": "Program snapshots will appear after source data is fetched.",
+    "all.eyebrow": "All Updates",
+    "all.title": "Immigration Update Timeline",
+    "radar.eyebrow": "Policy Radar",
+    "radar.title": "Program Manager Watchlist",
+    "radar.risk.high": "High",
+    "radar.risk.medium": "Medium",
+    "radar.risk.low": "Low",
+    "radar.articleCount": "{count} {articleWord}",
+    "radar.back": "← Back to Radar",
+    "radar.meterAria": "{title} risk index {value}",
+    "radar.multipleMarkets": "Multiple markets",
+    "radar.relatedText": "{markets}: {count} related {updateWord}. Watch for the latest changes.",
+    "radar.noSignal": "No clear risk signal recently. Keep monitoring.",
+    "radar.rule.visaBulletin": "Visa Bulletin Risk",
+    "radar.rule.funds": "Funds Compliance",
+    "radar.rule.employer": "Employer Dependency",
+    "radar.rule.documents": "Document Timeline",
+    "radar.rule.policy": "Policy Change",
+    "radar.rule.visa": "Visa Updates",
+    "daily.eyebrow": "Daily Brief",
+    "daily.title": "Today's Policy Brief",
+    "daily.manageSubscriptions": "Manage My Sources",
+    "daily.copy": "Copy Brief",
+    "daily.copied": "Copied",
+    "daily.copyFailed": "Copy Failed",
+    "daily.history": "History",
+    "daily.public": "Public Brief",
+    "daily.department": "Department Brief",
+    "daily.departmentFocus": "{name} Department Focus",
+    "daily.personal": "My Sources",
+    "daily.defaultTitle": "Immigration Daily News",
+    "daily.meta": "{model} · {sourceCount} total items{extra}",
+    "daily.analyzedMeta": " · {relevantCount} relevant · {eventCount} events",
+    "daily.generating": "DeepSeek is generating the daily brief...",
+    "daily.empty": "No generated daily brief yet. Refresh or call the daily API to generate one.",
+    "daily.perspectiveLabel": "Daily brief perspective",
+    "subscriptions.eyebrow": "Personalized Brief",
+    "subscriptions.title": "Manage My Sources",
+    "subscriptions.intro": "The public daily brief will still be sent. Sources selected here become your personal supplement, without regenerating a full AI brief for every person.",
+    "subscriptions.search": "Search source name",
+    "subscriptions.save": "Save Sources",
+    "subscriptions.count": "{count} followed",
+    "subscriptions.identifying": "Identifying WeChat Work user...",
+    "feedback.eyebrow": "Feedback",
+    "feedback.title": "Thanks for Your Feedback",
+    "feedback.type": "Feedback Type",
+    "feedback.typeAccuracy": "Content Accuracy",
+    "feedback.typeSource": "Source Suggestion",
+    "feedback.typeExperience": "Page Experience",
+    "feedback.typeDaily": "Daily Brief Quality",
+    "feedback.typeWorkflow": "Workflow",
+    "feedback.module": "Related Page",
+    "feedback.moduleDaily": "Daily Brief",
+    "feedback.moduleHome": "Highlights",
+    "feedback.moduleAll": "All Updates",
+    "feedback.moduleRadar": "Policy Radar",
+    "feedback.moduleMarket": "Market Brief",
+    "feedback.moduleOther": "Other",
+    "feedback.priority": "Priority",
+    "feedback.priorityNormal": "General Suggestion",
+    "feedback.priorityHigh": "Work Impact",
+    "feedback.priorityUrgent": "Needs Quick Attention",
+    "feedback.contact": "Contact (optional)",
+    "feedback.contactPlaceholder": "Email, phone, or WeChat Work",
+    "feedback.message": "Details",
+    "feedback.messagePlaceholder": "Describe the issue, source to add, or what would make this easier to use.",
+    "feedback.submit": "Submit Feedback",
+    "feedback.reset": "Clear",
+    "feedback.note": "We will review your feedback as soon as possible.",
+    "feedback.received": "Received. Thanks for your feedback.",
+    "feedback.savedDraft": "Database submission failed. Saved as a local draft.",
+  },
+};
+
+function getSavedLanguage() {
+  try {
+    const saved = localStorage.getItem(languageStorageKey);
+    if (supportedLanguages.has(saved)) return saved;
+  } catch {
+    // ignore storage errors
+  }
+  return navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+function t(key, params = {}) {
+  const dictionary = i18n[state?.language || "zh"] || i18n.zh;
+  const template = dictionary[key] || i18n.zh[key] || key;
+  return String(template).replace(/\{(\w+)\}/g, (_match, name) => params[name] ?? "");
+}
+
+function translateCount(count) {
+  return state.language === "en" ? `${count} ${t("common.items")}` : `${count} 条`;
+}
+
+function translateCategoryLabel(category) {
+  return category === "全部" ? t("common.all") : category;
+}
+
+function applyStaticTranslations() {
+  document.documentElement.lang = state.language === "en" ? "en" : "zh-CN";
+  document.title = t("app.title");
+  document.querySelectorAll("[data-i18n]").forEach((node) => {
+    node.textContent = t(node.dataset.i18n);
+  });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((node) => {
+    node.setAttribute("placeholder", t(node.dataset.i18nPlaceholder));
+  });
+  document.querySelectorAll("[data-i18n-title]").forEach((node) => {
+    node.setAttribute("title", t(node.dataset.i18nTitle));
+  });
+  document.querySelectorAll("[data-i18n-aria-label]").forEach((node) => {
+    node.setAttribute("aria-label", t(node.dataset.i18nAriaLabel));
+  });
+  document.querySelectorAll("[data-lang-option]").forEach((button) => {
+    const active = button.dataset.langOption === state.language;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  renderBriefInfo();
+}
+
+function renderBriefInfo() {
+  const intro = document.querySelector("#briefInfoIntro");
+  const sourceText = document.querySelector("#briefInfoSourceText");
+  if (intro) {
+    intro.textContent = t("briefInfo.intro");
+  }
+  if (!sourceText) return;
+
+  const count = Number(state?.sourceStats?.enabledCount || 0);
+  const content = count > 0
+    ? t("briefInfo.sourceText", { count })
+    : t("briefInfo.sourceTextLoading");
+  sourceText.textContent = content;
+}
 
 function buildSnapshots(items) {
   const countryMap = {};
@@ -17,7 +390,7 @@ function buildSnapshots(items) {
     .slice(0, 4);
 
   if (!topCountries.length) {
-    return [{ title: "暂无数据", text: "等待信源抓取后自动生成项目快照。" }];
+    return [{ title: t("common.noData"), text: t("home.snapshotWait") }];
   }
 
   return topCountries.map(([country, articles]) => {
@@ -31,39 +404,139 @@ function buildSnapshots(items) {
   });
 }
 
-function buildRadarItems(items) {
-  const keywordRules = [
-    { title: "排期风险", keywords: ["排期", "visa bulletin", "priority date", "等待", "排期"], label: "高" },
-    { title: "资金合规", keywords: ["资金", "investor", "投资", "source of funds", "合规"], label: "高" },
-    { title: "雇主依赖", keywords: ["employer", "employer", "担保", "sponsor", "雇主", "lmia"], label: "中" },
-    { title: "材料周期", keywords: ["材料", "document", "认证", "评估", "语言"], label: "中" },
-    { title: "政策变动", keywords: ["policy", "政策", "rule", "regulation", "fee", "新规"], label: "中" },
-    { title: "签证动态", keywords: ["visa", "签证", "permit", "工签", "绿卡"], label: "低" },
+function getRadarRules() {
+  return [
+    {
+      key: "visa_bulletin",
+      titleKey: "radar.rule.visaBulletin",
+      keywords: ["排期", "visa bulletin", "priority date", "等待", "cut-off date", "final action date", "dates for filing"],
+      displayKeywords: {
+        zh: ["排期", "优先日", "等待时间"],
+        en: ["Visa Bulletin", "Priority Date", "Cut-off Date"],
+      },
+      baseRisk: "high",
+      legacyTitles: ["排期风险"],
+    },
+    {
+      key: "funds_compliance",
+      titleKey: "radar.rule.funds",
+      keywords: ["资金", "investor", "投资", "source of funds", "合规", "funds", "investment"],
+      displayKeywords: {
+        zh: ["资金", "投资", "合规"],
+        en: ["Funds", "Investment", "Source of Funds"],
+      },
+      baseRisk: "high",
+      legacyTitles: ["资金合规"],
+    },
+    {
+      key: "employer_dependency",
+      titleKey: "radar.rule.employer",
+      keywords: ["employer", "担保", "sponsor", "雇主", "lmia", "labor certification", "employment"],
+      displayKeywords: {
+        zh: ["雇主", "担保", "LMIA"],
+        en: ["Employer", "Sponsor", "LMIA"],
+      },
+      baseRisk: "medium",
+      legacyTitles: ["雇主依赖"],
+    },
+    {
+      key: "document_timeline",
+      titleKey: "radar.rule.documents",
+      keywords: ["材料", "document", "认证", "评估", "语言", "credential", "assessment", "language test"],
+      displayKeywords: {
+        zh: ["材料", "认证", "语言"],
+        en: ["Documents", "Credential Assessment", "Language Test"],
+      },
+      baseRisk: "medium",
+      legacyTitles: ["材料周期"],
+    },
+    {
+      key: "policy_change",
+      titleKey: "radar.rule.policy",
+      keywords: ["policy", "政策", "rule", "regulation", "fee", "新规", "guidance", "update"],
+      displayKeywords: {
+        zh: ["政策", "新规", "费用"],
+        en: ["Policy", "Rule", "Fee"],
+      },
+      baseRisk: "medium",
+      legacyTitles: ["政策变动"],
+    },
+    {
+      key: "visa_updates",
+      titleKey: "radar.rule.visa",
+      keywords: ["visa", "签证", "permit", "工签", "绿卡", "work permit", "green card", "residence"],
+      displayKeywords: {
+        zh: ["签证", "工签", "绿卡"],
+        en: ["Visa", "Work Permit", "Green Card"],
+      },
+      baseRisk: "low",
+      legacyTitles: ["签证动态"],
+    },
   ];
+}
 
-  return keywordRules.map((rule) => {
+function getRadarSearchText(item) {
+  return [
+    item.title,
+    item.summary,
+    item.originalTitle,
+    item.originalSummary,
+    item.country,
+    item.countryEn,
+    item.category,
+    item.categoryEn,
+    item.impact,
+    item.impactEn,
+    ...(item.tags || []),
+    ...(item.tagsEn || []),
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function getRadarArticleCount(count) {
+  return t("radar.articleCount", {
+    count,
+    articleWord: count === 1 ? "article" : "articles",
+  });
+}
+
+function getRadarRelatedText(markets, count) {
+  return t("radar.relatedText", {
+    markets,
+    count,
+    updateWord: count === 1 ? "update" : "updates",
+  });
+}
+
+function buildRadarItems(items) {
+  return getRadarRules().map((rule) => {
     const matched = items.filter((item) => {
-      const text = `${item.title} ${item.summary} ${(item.tags || []).join(" ")}`.toLowerCase();
+      const text = getRadarSearchText(item);
       return rule.keywords.some((kw) => text.includes(kw));
     });
     const count = matched.length;
-    const baseValue = rule.label === "高" ? 75 : rule.label === "中" ? 55 : 40;
+    const baseValue = rule.baseRisk === "high" ? 75 : rule.baseRisk === "medium" ? 55 : 40;
     const value = Math.min(99, Math.max(30, baseValue + count * 3));
     const riskLevel = value >= 75 ? "high" : value >= 55 ? "medium" : "low";
-    const riskText = value >= 75 ? "高" : value >= 55 ? "中" : "低";
-    const countries = [...new Set(matched.map((m) => m.country).filter(Boolean))].slice(0, 3).join("、");
+    const marketSeparator = state.language === "en" ? ", " : "、";
+    const markets = [...new Set(matched.map(getLocalizedCountry).filter(Boolean))]
+      .slice(0, 3)
+      .join(marketSeparator);
 
     return {
-      title: rule.title,
-      keywords: rule.keywords,
+      key: rule.key,
+      legacyTitles: rule.legacyTitles,
+      title: t(rule.titleKey),
+      keywords: rule.displayKeywords[state.language] || rule.displayKeywords.zh,
       matched,
       risk: riskLevel,
-      riskText,
+      riskText: t(`radar.risk.${riskLevel}`),
       value,
       count,
       text: count > 0
-        ? `${countries || "多个国家"}相关动态 ${count} 条，需要关注最新变化。`
-        : "近期暂无明显风险信号，保持关注即可。",
+        ? getRadarRelatedText(markets || t("radar.multipleMarkets"), count)
+        : t("radar.noSignal"),
     };
   });
 }
@@ -82,6 +555,7 @@ function getSavedDailyPerspective() {
 
 const state = {
   view: "home",
+  language: getSavedLanguage(),
   category: "全部",
   query: "",
   items: [],
@@ -140,6 +614,11 @@ const state = {
   ssoUserName: sessionStorage.getItem("yiminSsoUserName") || "",
   ssoUserId: sessionStorage.getItem("yiminSsoUserId") || "",
   ssoLocalTest: false,
+  sourceStats: {
+    enabledCount: null,
+    totalCount: null,
+    publicDailyCount: null,
+  },
   liveMeta: {
     mode: "idle",
     text: "等待真实信源数据",
@@ -288,7 +767,21 @@ function matchesItem(item) {
   const query = state.query.trim().toLowerCase();
   const inQuery =
     !query ||
-    [item.title, item.summary, item.originalTitle, item.originalSummary, item.source, item.country, item.category, ...(item.tags || [])]
+    [
+      item.title,
+      item.summary,
+      item.originalTitle,
+      item.originalSummary,
+      item.source,
+      item.country,
+      item.countryEn,
+      item.category,
+      item.categoryEn,
+      item.impact,
+      item.impactEn,
+      ...(item.tags || []),
+      ...(item.tagsEn || []),
+    ]
       .join(" ")
       .toLowerCase()
       .includes(query);
@@ -332,7 +825,7 @@ function cleanFilterLabel(label) {
 }
 
 function getItemFilterLabels(item) {
-  return [item.country, item.category, ...(item.tags || [])]
+  return [getLocalizedCountry(item), getLocalizedCategory(item), ...getLocalizedTags(item)]
     .map(cleanFilterLabel)
     .filter(Boolean);
 }
@@ -401,6 +894,7 @@ function getDynamicCategories() {
 }
 
 function renderFilters() {
+  applyStaticTranslations();
   const showToolbar = toolbarViews.includes(state.view);
   if (toolbar) {
     toolbar.hidden = !showToolbar;
@@ -426,7 +920,7 @@ function renderFilters() {
     .map(
       (category) => `
         <button class="chip ${state.category === category ? "active" : ""}" type="button" data-category="${category}">
-          ${escapeHtml(category)}
+          ${escapeHtml(translateCategoryLabel(category))}
         </button>
       `,
     )
@@ -435,7 +929,7 @@ function renderFilters() {
 
 function renderFeed(container, items) {
   if (!items.length) {
-    container.innerHTML = '<div class="empty">没有匹配的热点，换个关键词试试。</div>';
+    container.innerHTML = `<div class="empty">${escapeHtml(t("common.noMatchingHotspots"))}</div>`;
     return;
   }
 
@@ -443,10 +937,14 @@ function renderFeed(container, items) {
     .map((item) => {
       const url = safeUrl(item.url);
       const image = safeUrl(item.image);
-      const title = escapeHtml(item.title);
+      const displayTitle = getLocalizedArticleTitle(item);
+      const displaySummary = getLocalizedArticleSummary(item);
+      const displayImpact = getLocalizedImpact(item);
+      const displayTags = getLocalizedTags(item);
+      const title = escapeHtml(displayTitle);
       const cardContent = `
           <div class="thumb">
-            <img src="${escapeAttr(image)}" alt="${escapeAttr(`${item.country}${item.category}相关图片`)}" loading="lazy" />
+            <img src="${escapeAttr(image)}" alt="${escapeAttr(`${getLocalizedCountry(item)}${getLocalizedCategory(item)}相关图片`)}" loading="lazy" />
           </div>
           <div class="news-body">
             <div class="meta-row">
@@ -456,10 +954,10 @@ function renderFeed(container, items) {
               <span class="priority">HOT ${escapeHtml(item.heat)}</span>
             </div>
             <h3>${title}</h3>
-            <p>${escapeHtml(item.summary)}</p>
+            <p>${escapeHtml(displaySummary)}</p>
             <div class="tag-row">
-              <span class="tag impact">${escapeHtml(item.impact)}</span>
-              ${(item.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}
+              <span class="tag impact">${escapeHtml(displayImpact)}</span>
+              ${displayTags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}
             </div>
           </div>
       `;
@@ -467,7 +965,7 @@ function renderFeed(container, items) {
       if (url) {
         return `
           <article class="news-card">
-            <a class="news-card-link" href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开原文：${escapeAttr(item.title)}">
+            <a class="news-card-link" href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开原文：${escapeAttr(displayTitle)}">
               ${cardContent}
             </a>
           </article>
@@ -483,10 +981,49 @@ function renderFeed(container, items) {
     .join("");
 }
 
+function getLocalizedArticleTitle(item) {
+  if (state.language === "en") {
+    return item.originalTitle || item.title || t("common.untitledUpdate");
+  }
+  return item.title || item.originalTitle || t("common.untitledUpdate");
+}
+
+function getLocalizedArticleSummary(item) {
+  if (state.language === "en") {
+    return item.originalSummary || item.summary || t("common.readOriginal");
+  }
+  return item.summary || item.originalSummary || t("common.readOriginal");
+}
+
+function getLocalizedCountry(item) {
+  return state.language === "en"
+    ? item.countryEn || item.country || t("common.global")
+    : item.country || item.countryEn || t("common.global");
+}
+
+function getLocalizedCategory(item) {
+  return state.language === "en"
+    ? item.categoryEn || item.category || t("common.policy")
+    : item.category || item.categoryEn || t("common.policy");
+}
+
+function getLocalizedImpact(item) {
+  return state.language === "en"
+    ? item.impactEn || item.impact || "Medium Impact"
+    : item.impact || item.impactEn || "中影响";
+}
+
+function getLocalizedTags(item) {
+  if (state.language === "en" && Array.isArray(item.tagsEn) && item.tagsEn.length) {
+    return item.tagsEn;
+  }
+  return Array.isArray(item.tags) ? item.tags : [];
+}
+
 function renderSnapshots() {
   const items = buildSnapshots(state.items);
   if (!items.length) {
-    snapshotList.innerHTML = '<div class="empty">暂无真实热点快照，等待信源抓取入库。</div>';
+    snapshotList.innerHTML = `<div class="empty">${escapeHtml(t("home.noSnapshot"))}</div>`;
     return;
   }
 
@@ -753,9 +1290,9 @@ function renderSubscriptionFilters() {
   const categories = [...new Set(state.subscriptionSources.map((source) => source.category).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, "zh-CN"));
 
-  countrySelect.innerHTML = '<option value="">全部国家/地区</option>'
+  countrySelect.innerHTML = `<option value="">${state.language === "en" ? "All countries/regions" : "全部国家/地区"}</option>`
     + countries.map((country) => `<option value="${escapeAttr(country)}">${escapeHtml(country)}</option>`).join("");
-  categorySelect.innerHTML = '<option value="">全部分类</option>'
+  categorySelect.innerHTML = `<option value="">${state.language === "en" ? "All categories" : "全部分类"}</option>`
     + categories.map((category) => `<option value="${escapeAttr(category)}">${escapeHtml(category)}</option>`).join("");
   countrySelect.value = state.subscriptionCountry;
   categorySelect.value = state.subscriptionCategory;
@@ -765,10 +1302,10 @@ function renderSubscriptions() {
   if (!subscriptionList || !subscriptionIdentity || !subscriptionCount || !subscriptionNote) return;
 
   const selectedCount = state.subscriptionSelectedIds.size;
-  subscriptionCount.textContent = `${selectedCount} 个已关注`;
+  subscriptionCount.textContent = t("subscriptions.count", { count: selectedCount });
   subscriptionIdentity.textContent = state.ssoUserId
     ? `${state.ssoUserName || "企业微信用户"} · ${state.ssoUserId}${state.ssoLocalTest ? " · 本地测试身份" : ""}`
-    : "尚未识别企业微信身份";
+    : t("subscriptions.identifying");
 
   if (!state.ssoUserId) {
     subscriptionList.innerHTML = `
@@ -927,7 +1464,7 @@ function renderDepartmentSubscriptions() {
 function renderDaily() {
   const historyHtml = state.dailyHistory.length > 0
     ? `<div class="daily-history">
-        <h3>历史日报</h3>
+        <h3>${escapeHtml(t("daily.history"))}</h3>
         <ul class="daily-history-list">
           ${state.dailyHistory
             .map((h) => {
@@ -935,7 +1472,7 @@ function renderDaily() {
               return `<li>
               <button class="daily-history-item${isCurrent ? " active" : ""}" data-daily-date="${h.date}">
                 <span class="daily-history-date">${h.date}</span>
-                <span class="daily-history-count">${h.sourceItemCount || 0} 条</span>
+                <span class="daily-history-count">${escapeHtml(translateCount(h.sourceItemCount || 0))}</span>
               </button>
             </li>`;
             })
@@ -947,7 +1484,10 @@ function renderDaily() {
   if (state.dailyReport?.html) {
     const windowText = state.dailyReport.windowLabel ? ` · ${escapeHtml(state.dailyReport.windowLabel)}` : "";
     const analyzedMeta = Number(state.dailyReport.eventCount || 0) > 0
-      ? ` · 相关 ${escapeHtml(state.dailyReport.relevantItemCount || 0)} 条 · 聚合 ${escapeHtml(state.dailyReport.eventCount || 0)} 个事件`
+      ? t("daily.analyzedMeta", {
+        relevantCount: state.dailyReport.relevantItemCount || 0,
+        eventCount: state.dailyReport.eventCount || 0,
+      })
       : "";
     const reports = Array.isArray(state.departmentDailyReports)
       ? state.departmentDailyReports
@@ -956,8 +1496,8 @@ function renderDaily() {
       .map((report) => String(report.departmentName || "").trim())
       .filter(Boolean);
     const departmentLabel = departmentNames.length === 1
-      ? `${departmentNames[0]} 部门重点`
-      : "部门日报";
+      ? t("daily.departmentFocus", { name: departmentNames[0] })
+      : t("daily.department");
     const departmentCount = reports.reduce(
       (total, report) => total + Number(report.articleCount || 0),
       0,
@@ -975,12 +1515,16 @@ function renderDaily() {
       <div class="daily-layout">
         <div class="daily-main">
           <div class="daily-meta">
-            <strong>${escapeHtml(state.dailyReport.title || "移民热点日报")}</strong>
-            <span>${escapeHtml(state.dailyReport.model || "AI")} · 全量 ${escapeHtml(state.dailyReport.sourceItemCount || 0)} 条${analyzedMeta}${windowText}</span>
+            <strong>${escapeHtml(state.language === "en" ? t("daily.defaultTitle") : (state.dailyReport.title || t("daily.defaultTitle")))}</strong>
+            <span>${escapeHtml(t("daily.meta", {
+              model: state.dailyReport.model || "AI",
+              sourceCount: state.dailyReport.sourceItemCount || 0,
+              extra: `${analyzedMeta}${windowText}`,
+            }))}</span>
           </div>
-          <div class="daily-perspective-nav" role="tablist" aria-label="日报视角">
+          <div class="daily-perspective-nav" role="tablist" aria-label="${escapeAttr(t("daily.perspectiveLabel"))}">
             <button class="daily-perspective-tab${activePerspective === "public" ? " active" : ""}" type="button" role="tab" aria-selected="${activePerspective === "public"}" data-daily-perspective="public">
-              <span>公共日报</span>
+              <span>${escapeHtml(t("daily.public"))}</span>
               <small>${escapeHtml(state.dailyReport.relevantItemCount || state.dailyReport.sourceItemCount || 0)}</small>
             </button>
             <button class="daily-perspective-tab${activePerspective === "department" ? " active" : ""}" type="button" role="tab" aria-selected="${activePerspective === "department"}" data-daily-perspective="department" title="${escapeAttr(departmentLabel)}">
@@ -988,7 +1532,7 @@ function renderDaily() {
               <small>${state.departmentDailyLoading ? "…" : escapeHtml(departmentCount)}</small>
             </button>
             <button class="daily-perspective-tab${activePerspective === "personal" ? " active" : ""}" type="button" role="tab" aria-selected="${activePerspective === "personal"}" data-daily-perspective="personal">
-              <span>我的关注</span>
+              <span>${escapeHtml(t("daily.personal"))}</span>
               <small>${state.personalDailyLoading ? "…" : escapeHtml(personalCount)}</small>
             </button>
           </div>
@@ -1007,7 +1551,7 @@ function renderDaily() {
     dailyReport.innerHTML = `
       <div class="daily-layout">
         <div class="daily-main">
-          <div class="empty">DeepSeek 正在生成日报...</div>
+          <div class="empty">${escapeHtml(t("daily.generating"))}</div>
         </div>
         ${historyHtml}
       </div>
@@ -1018,7 +1562,7 @@ function renderDaily() {
   dailyReport.innerHTML = `
     <div class="daily-layout">
       <div class="daily-main">
-        <div class="empty">暂无已生成日报。请点击刷新或访问日报接口生成，页面不会再展示演示内容。</div>
+        <div class="empty">${escapeHtml(t("daily.empty"))}</div>
       </div>
       ${historyHtml}
     </div>
@@ -1226,15 +1770,15 @@ function renderRadar() {
       (item, i) => `
         <article class="radar-card clickable" data-radar="${i}">
           <header>
-            <h2>${item.title}</h2>
-            <span class="risk ${item.risk}">${item.riskText}</span>
+            <h2>${escapeHtml(item.title)}</h2>
+            <span class="risk ${escapeAttr(item.risk)}">${escapeHtml(item.riskText)}</span>
           </header>
-          <p>${item.text}</p>
+          <p>${escapeHtml(item.text)}</p>
           <div class="radar-card-footer">
-            <span class="radar-count">${item.count} 篇文章</span>
+            <span class="radar-count">${escapeHtml(getRadarArticleCount(item.count))}</span>
             <span class="radar-arrow">→</span>
           </div>
-          <div class="meter" aria-label="${item.title}风险指数 ${item.value}">
+          <div class="meter" aria-label="${escapeAttr(t("radar.meterAria", { title: item.title, value: item.value }))}">
             <span style="width: ${item.value}%"></span>
           </div>
         </article>
@@ -1244,7 +1788,11 @@ function renderRadar() {
 }
 
 function renderRadarDetail() {
-  const rule = buildRadarItems(state.items).find((r) => r.title === state.radarDetail);
+  const rule = buildRadarItems(state.items).find((r) =>
+    r.key === state.radarDetail ||
+    r.title === state.radarDetail ||
+    (r.legacyTitles || []).includes(state.radarDetail),
+  );
   if (!rule) {
     state.radarDetail = null;
     renderRadar();
@@ -1252,21 +1800,21 @@ function renderRadarDetail() {
   }
   radarGrid.innerHTML = `
     <div class="radar-detail">
-      <button class="radar-back" id="radarBack">← 返回雷达</button>
+      <button class="radar-back" id="radarBack">${escapeHtml(t("radar.back"))}</button>
       <div class="radar-detail-header">
-        <h2>${rule.title}</h2>
-        <span class="risk ${rule.risk}">${rule.riskText}</span>
+        <h2>${escapeHtml(rule.title)}</h2>
+        <span class="risk ${escapeAttr(rule.risk)}">${escapeHtml(rule.riskText)}</span>
       </div>
-      <div class="radar-keywords">${rule.keywords.map((k) => `<span class="tag">${k}</span>`).join("")}</div>
-      <p class="radar-detail-desc">${rule.text}</p>
+      <div class="radar-keywords">${rule.keywords.map((k) => `<span class="tag">${escapeHtml(k)}</span>`).join("")}</div>
+      <p class="radar-detail-desc">${escapeHtml(rule.text)}</p>
       <div class="radar-feed" id="radarFeed"></div>
     </div>
   `;
   renderFeed(document.getElementById("radarFeed"), rule.matched);
 }
 
-function showRadarDetail(title) {
-  state.radarDetail = title;
+function showRadarDetail(key) {
+  state.radarDetail = key;
   renderRadar();
 }
 
@@ -1276,12 +1824,21 @@ function hideRadarDetail() {
 }
 
 function renderCounts(items) {
-  homeCount.textContent = `${Math.min(items.length, 5)} 条`;
-  allCount.textContent = `${items.length} 条`;
+  homeCount.textContent = translateCount(Math.min(items.length, 5));
+  allCount.textContent = translateCount(items.length);
 }
 
 function isFetchRunActive(run = state.fetchRun) {
   return run?.status === "running";
+}
+
+function translateLiveMetaText(text) {
+  const value = String(text || "");
+  if (value === "等待真实信源数据") return t("status.demo");
+  if (value === "正在连接实时信源...") return t("status.connecting");
+  if (value === "后台抓取任务已启动，暂无历史文章可展示") return t("status.noHistory");
+  if (value === "实时信源暂无真实返回") return t("status.noLive");
+  return value;
 }
 
 function formatFetchRunStatus(run) {
@@ -1292,7 +1849,7 @@ function formatFetchRunStatus(run) {
   const total = Number(run.sourceCount || 0);
   const progress = Number(run.progress || 0);
   const itemCount = Number(run.itemCount || 0);
-  return `后台抓取中 ${processed}/${total} 个信源 · ${progress}% · 已入库 ${itemCount} 条`;
+  return t("status.fetching", { processed, total, progress, count: itemCount });
 }
 
 function renderStatus(items) {
@@ -1303,16 +1860,16 @@ function renderStatus(items) {
     monitorStatus.textContent = formatFetchRunStatus(state.fetchRun);
   } else if (state.liveMeta.mode === "live") {
     const count = state.liveMeta.todayArticleCount ?? items.length;
-    monitorStatus.textContent = `今日监测 ${count} 条更新`;
+    monitorStatus.textContent = t("status.live", { count });
   } else if (state.liveMeta.mode === "loading") {
-    monitorStatus.textContent = "正在连接实时信源...";
+    monitorStatus.textContent = t("status.connecting");
   } else {
-    monitorStatus.textContent = state.liveMeta.text;
+    monitorStatus.textContent = translateLiveMetaText(state.liveMeta.text);
   }
 
   if (refreshNews) {
     refreshNews.disabled = isFetchRunActive();
-    refreshNews.textContent = isFetchRunActive() ? "抓取中" : "刷新";
+    refreshNews.textContent = isFetchRunActive() ? t("common.fetching") : t("common.refresh");
   }
 
   if (!sourceHealth) {
@@ -1352,17 +1909,19 @@ function renderLead(items) {
 
   const top = items[0];
   if (!top) {
-    el.innerHTML = "暂无热点数据";
+    el.innerHTML = escapeHtml(t("home.noLead"));
     return;
   }
 
   const image = safeUrl(top.image);
   const url = safeUrl(top.url);
+  const displayTitle = getLocalizedArticleTitle(top);
+  const displaySummary = getLocalizedArticleSummary(top);
   const inner = `
     <div class="lead-copy">
       <span class="hot-label">HOT ${top.heat}</span>
-      <h2>${escapeHtml(top.title)}</h2>
-      <p>${escapeHtml(top.summary)}</p>
+      <h2>${escapeHtml(displayTitle)}</h2>
+      <p>${escapeHtml(displaySummary)}</p>
     </div>
     <figure class="lead-media">
       ${image ? `<img src="${escapeAttr(image)}" alt="${escapeAttr(`${top.country}${top.category}相关图片`)}" />` : ""}
@@ -1730,15 +2289,22 @@ function parseHashRoute(value = window.location.hash) {
 function normalizeApiItem(item) {
   return {
     id: item.id,
-    title: item.title || "未命名动态",
-    summary: item.summary || "查看原文获取完整信息。",
-    source: item.source || "未知信源",
-    country: cleanFilterLabel(item.country) || "全球",
-    category: cleanFilterLabel(item.category) || "政策",
-    time: item.time || "刚刚",
+    title: item.title || t("common.untitledUpdate"),
+    summary: item.summary || t("common.readOriginal"),
+    originalTitle: item.originalTitle || item.title || "",
+    originalSummary: item.originalSummary || "",
+    translated: Boolean(item.translated),
+    source: item.source || t("common.unknownSource"),
+    country: cleanFilterLabel(item.country) || t("common.global"),
+    countryEn: cleanFilterLabel(item.countryEn) || "",
+    category: cleanFilterLabel(item.category) || t("common.policy"),
+    categoryEn: cleanFilterLabel(item.categoryEn) || "",
+    time: item.time || t("common.justNow"),
     heat: Number(item.heat || 60),
     impact: item.impact || "中影响",
+    impactEn: item.impactEn || "",
     tags: Array.isArray(item.tags) ? item.tags.map(cleanFilterLabel).filter(Boolean) : [],
+    tagsEn: Array.isArray(item.tagsEn) ? item.tagsEn.map(cleanFilterLabel).filter(Boolean) : [],
     image: item.image || "",
     url: item.url || "",
     publishedAt: item.publishedAt || null,
@@ -1799,6 +2365,32 @@ function scheduleFetchRunPolling(runId) {
   };
 
   fetchRunPollTimer = setTimeout(poll, 1200);
+}
+
+async function loadSourceStats() {
+  if (window.location.protocol === "file:") {
+    renderBriefInfo();
+    return;
+  }
+
+  try {
+    const response = await fetch("/api/sources/stats", {
+      headers: { accept: "application/json" },
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    state.sourceStats = {
+      enabledCount: Number(data.stats?.enabledCount || 0),
+      totalCount: Number(data.stats?.totalCount || 0),
+      publicDailyCount: Number(data.stats?.publicDailyCount || 0),
+    };
+  } catch (error) {
+    console.warn("source stats load failed:", error);
+  } finally {
+    renderBriefInfo();
+  }
 }
 
 async function loadLiveNews({ refresh = false } = {}) {
@@ -2696,7 +3288,7 @@ document.addEventListener("click", async (event) => {
   if (radarCard) {
     const radarItems = buildRadarItems(state.items);
     const idx = parseInt(radarCard.dataset.radar, 10);
-    if (radarItems[idx]) showRadarDetail(radarItems[idx].title);
+    if (radarItems[idx]) showRadarDetail(radarItems[idx].key);
     return;
   }
 
@@ -2982,12 +3574,12 @@ document.querySelector("#copyDaily").addEventListener("click", async () => {
     || dailyReport.innerText.trim();
   try {
     await navigator.clipboard.writeText(text);
-    document.querySelector("#copyDaily").textContent = "已复制";
+    document.querySelector("#copyDaily").textContent = t("daily.copied");
     setTimeout(() => {
-      document.querySelector("#copyDaily").textContent = "复制日报";
+      document.querySelector("#copyDaily").textContent = t("daily.copy");
     }, 1400);
   } catch {
-    document.querySelector("#copyDaily").textContent = "复制失败";
+    document.querySelector("#copyDaily").textContent = t("daily.copyFailed");
   }
 });
 
@@ -3057,11 +3649,11 @@ document.querySelector("#feedbackForm").addEventListener("submit", async (event)
       }
 
       form.reset();
-      document.querySelector("#feedbackNote").textContent = "已收到，感谢您的反馈。";
+      document.querySelector("#feedbackNote").textContent = t("feedback.received");
       return;
     } catch (err) {
       console.error("feedback submit error:", err);
-      document.querySelector("#feedbackNote").textContent = "数据库提交失败，已保存到本地草稿。";
+      document.querySelector("#feedbackNote").textContent = t("feedback.savedDraft");
       const drafts = JSON.parse(localStorage.getItem("immigrationFeedback") || "[]");
       drafts.push({ ...formData, savedAt: new Date().toISOString() });
       localStorage.setItem("immigrationFeedback", JSON.stringify(drafts));
@@ -3073,6 +3665,7 @@ document.querySelector("#feedbackForm").addEventListener("submit", async (event)
   const drafts = JSON.parse(localStorage.getItem("immigrationFeedback") || "[]");
   drafts.push({ ...formData, savedAt: new Date().toISOString() });
   localStorage.setItem("immigrationFeedback", JSON.stringify(drafts));
+  document.querySelector("#feedbackNote").textContent = t("feedback.savedDraft");
   form.reset();
 });
 
@@ -3157,6 +3750,31 @@ function initThemeSwitch() {
 
 initThemeSwitch();
 
+function setLanguage(language) {
+  if (!supportedLanguages.has(language) || state.language === language) {
+    applyStaticTranslations();
+    return;
+  }
+  state.language = language;
+  state.category = "全部";
+  saveFilterCategory();
+  try {
+    localStorage.setItem(languageStorageKey, language);
+  } catch {
+    // ignore storage errors
+  }
+  renderContent();
+}
+
+function initLanguageSwitch() {
+  document.querySelectorAll("[data-lang-option]").forEach((button) => {
+    button.addEventListener("click", () => setLanguage(button.dataset.langOption));
+  });
+  applyStaticTranslations();
+}
+
+initLanguageSwitch();
+
 function updateAuthUI() {
   const authSection = document.querySelector("[data-auth]");
   const loginBtn = document.querySelector("#sidebarAuth");
@@ -3240,6 +3858,7 @@ async function boot() {
   const initialView = window.location.hash.replace("#", "") || "home";
   restoreFilterCategory();
   renderContent();
+  loadSourceStats();
   await checkAuth();
   updateAuthUI();
   setView(initialView);

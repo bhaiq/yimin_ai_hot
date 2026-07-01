@@ -362,11 +362,15 @@ async function initDb() {
           summary TEXT NULL COMMENT '文章摘要',
           url VARCHAR(1400) NULL COMMENT '文章原文链接',
           country VARCHAR(80) NOT NULL COMMENT '所属国家/地区',
+          country_en VARCHAR(120) NULL COMMENT '所属国家/地区英文名',
           category VARCHAR(120) NOT NULL COMMENT '分类（如政策、签证、生活等）',
+          category_en VARCHAR(160) NULL COMMENT '分类英文名',
           tags_json JSON NULL COMMENT '标签列表，JSON 数组格式',
+          tags_en_json JSON NULL COMMENT '英文标签列表，JSON 数组格式',
           image VARCHAR(1000) NULL COMMENT '文章配图 URL',
           heat INT NOT NULL DEFAULT 60 COMMENT '热度评分 0-100',
           impact VARCHAR(40) NOT NULL DEFAULT '中影响' COMMENT '影响力等级（高影响/中影响/低影响）',
+          impact_en VARCHAR(60) NULL COMMENT '影响力等级英文',
           published_at DATETIME NULL COMMENT '文章发布时间',
           fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '抓取入库时间',
           daily_excluded TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否排除出日报候选',
@@ -819,9 +823,36 @@ async function initDb() {
       const articleColumns = await mysqlRun(`
         SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
-          AND TABLE_NAME = 'yimin_articles'
-          AND COLUMN_NAME IN ('daily_excluded', 'daily_excluded_reason');
+          AND TABLE_NAME = 'yimin_articles';
       `);
+      if (!articleColumns.includes("country_en")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_articles
+          ADD COLUMN country_en VARCHAR(120) NULL COMMENT '所属国家/地区英文名'
+          AFTER country;
+        `);
+      }
+      if (!articleColumns.includes("category_en")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_articles
+          ADD COLUMN category_en VARCHAR(160) NULL COMMENT '分类英文名'
+          AFTER category;
+        `);
+      }
+      if (!articleColumns.includes("tags_en_json")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_articles
+          ADD COLUMN tags_en_json JSON NULL COMMENT '英文标签列表，JSON 数组格式'
+          AFTER tags_json;
+        `);
+      }
+      if (!articleColumns.includes("impact_en")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_articles
+          ADD COLUMN impact_en VARCHAR(60) NULL COMMENT '影响力等级英文'
+          AFTER impact;
+        `);
+      }
       if (!articleColumns.includes("daily_excluded")) {
         await mysqlExec(`
           ALTER TABLE yimin_articles
@@ -836,6 +867,7 @@ async function initDb() {
           AFTER daily_excluded;
         `);
       }
+      await backfillArticleEnglishLabels();
 
       const articleDailyIndex = await mysqlRun(`
         SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
@@ -1285,11 +1317,13 @@ function hasValidPublishedAt(item) {
 async function upsertArticle(item, sourceId, { dailyExcluded = false, dailyExcludedReason = null } = {}) {
   const rawJson = JSON.stringify(item);
   const tagsJson = JSON.stringify(item.tags || []);
+  const englishLabels = buildArticleEnglishLabels(item);
+  const tagsEnJson = JSON.stringify(englishLabels.tagsEn);
 
   await mysqlExec(`
     INSERT INTO yimin_articles (
-      source_id, dedupe_hash, title, summary, url, country, category,
-      tags_json, image, heat, impact, published_at,
+      source_id, dedupe_hash, title, summary, url, country, country_en, category, category_en,
+      tags_json, tags_en_json, image, heat, impact, impact_en, published_at,
       daily_excluded, daily_excluded_reason, raw_json
     )
     VALUES (
@@ -1299,11 +1333,15 @@ async function upsertArticle(item, sourceId, { dailyExcluded = false, dailyExclu
       ${sqlString(item.summary)},
       ${sqlString(item.url)},
       ${sqlString(item.country)},
+      ${sqlString(englishLabels.countryEn)},
       ${sqlString(item.category)},
+      ${sqlString(englishLabels.categoryEn)},
       CAST(${sqlString(tagsJson)} AS JSON),
+      CAST(${sqlString(tagsEnJson)} AS JSON),
       ${sqlString(item.image)},
       ${sqlNumber(item.heat, 60)},
       ${sqlString(item.impact)},
+      ${sqlString(englishLabels.impactEn)},
       ${sqlDate(item.publishedAt)},
       ${dailyExcluded ? 1 : 0},
       ${sqlString(dailyExcludedReason)},
@@ -1315,11 +1353,15 @@ async function upsertArticle(item, sourceId, { dailyExcluded = false, dailyExclu
       summary = VALUES(summary),
       url = VALUES(url),
       country = VALUES(country),
+      country_en = VALUES(country_en),
       category = VALUES(category),
+      category_en = VALUES(category_en),
       tags_json = VALUES(tags_json),
+      tags_en_json = VALUES(tags_en_json),
       image = VALUES(image),
       heat = VALUES(heat),
       impact = VALUES(impact),
+      impact_en = VALUES(impact_en),
       published_at = COALESCE(published_at, VALUES(published_at)),
       daily_excluded = CASE
         WHEN VALUES(published_at) IS NOT NULL THEN VALUES(daily_excluded)
@@ -1775,14 +1817,18 @@ async function listArticlesFromDb(limit = maxTotalItems) {
           'translated', translated,
           'source', source_name,
           'country', country,
+          'countryEn', COALESCE(country_en, ''),
           'category', category,
+          'categoryEn', COALESCE(category_en, ''),
           'time', COALESCE(DATE_FORMAT(published_at, '%H:%i'), '刚刚'),
           'publishedAt', IF(published_at IS NULL, NULL, DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s+08:00')),
           'fetchedAt', IF(fetched_at IS NULL, NULL, DATE_FORMAT(fetched_at, '%Y-%m-%dT%H:%i:%s+08:00')),
           'url', url,
           'heat', heat,
           'impact', impact,
+          'impactEn', COALESCE(impact_en, ''),
           'tags', CAST(tags_json AS JSON),
+          'tagsEn', COALESCE(CAST(tags_en_json AS JSON), JSON_ARRAY()),
           'image', image
         )
       ), JSON_ARRAY())
@@ -1850,14 +1896,18 @@ async function listRecentArticlesFromDb(limit = Math.max(maxTotalItems * 2, 160)
           'translated', translated,
           'source', source_name,
           'country', country,
+          'countryEn', COALESCE(country_en, ''),
           'category', category,
+          'categoryEn', COALESCE(category_en, ''),
           'time', COALESCE(DATE_FORMAT(published_at, '%H:%i'), '刚刚'),
           'publishedAt', IF(published_at IS NULL, NULL, DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s+08:00')),
           'fetchedAt', IF(fetched_at IS NULL, NULL, DATE_FORMAT(fetched_at, '%Y-%m-%dT%H:%i:%s+08:00')),
           'url', url,
           'heat', heat,
           'impact', impact,
+          'impactEn', COALESCE(impact_en, ''),
           'tags', CAST(tags_json AS JSON),
+          'tagsEn', COALESCE(CAST(tags_en_json AS JSON), JSON_ARRAY()),
           'image', image
         )
       ), JSON_ARRAY())
@@ -1897,14 +1947,18 @@ async function listDailyCandidateArticlePageFromDb(window, offset, limit = daily
           'translated', translated,
           'source', source_name,
           'country', country,
+          'countryEn', COALESCE(country_en, ''),
           'category', category,
+          'categoryEn', COALESCE(category_en, ''),
           'time', COALESCE(DATE_FORMAT(published_at, '%H:%i'), '刚刚'),
           'publishedAt', IF(published_at IS NULL, NULL, DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s+08:00')),
           'fetchedAt', IF(fetched_at IS NULL, NULL, DATE_FORMAT(fetched_at, '%Y-%m-%dT%H:%i:%s+08:00')),
           'url', url,
           'heat', heat,
           'impact', impact,
+          'impactEn', COALESCE(impact_en, ''),
           'tags', CAST(tags_json AS JSON),
+          'tagsEn', COALESCE(CAST(tags_en_json AS JSON), JSON_ARRAY()),
           'image', image
         )
       ), JSON_ARRAY())
@@ -1969,6 +2023,22 @@ async function listSourceStatusesFromDb() {
       ) source_rows;
     `)) || []
   );
+}
+
+async function getSourceStatsFromDb() {
+  const row = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'totalCount', COUNT(*),
+      'enabledCount', SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END),
+      'publicDailyCount', SUM(CASE WHEN enabled = 1 AND public_daily_enabled = 1 THEN 1 ELSE 0 END)
+    ) AS stats
+    FROM yimin_sources;
+  `);
+  return {
+    totalCount: Number(row?.totalCount || 0),
+    enabledCount: Number(row?.enabledCount || 0),
+    publicDailyCount: Number(row?.publicDailyCount || 0),
+  };
 }
 
 async function listSourceDistributionSettings() {
@@ -2836,7 +2906,7 @@ function syncWxContacts() {
   return wxContactsSyncPromise;
 }
 
-async function sendWxTextCard(accessToken, userIds, title, description, url) {
+async function sendWxTextCard(accessToken, userIds, title, description, url, buttonText = "查看日报") {
   const toUser = userIds.join("|");
   if (!toUser) return { errcode: 0, errmsg: "no users" };
 
@@ -2847,10 +2917,39 @@ async function sendWxTextCard(accessToken, userIds, title, description, url) {
       touser: toUser,
       msgtype: "textcard",
       agentid: wxWorkConfig.agentId,
-      textcard: { title, description, url, btntxt: "查看日报" },
+      textcard: { title, description, url, btntxt: buttonText },
     }),
   });
   return res.json();
+}
+
+function pluralizeEnglishUnit(count, singular, plural = `${singular}s`) {
+  return Number(count) === 1 ? singular : plural;
+}
+
+function buildDailyPushTextCard(dailyDate, personalStats = null) {
+  const title = "移民热点日报 / Immigration Daily News";
+  const buttonText = "查看日报 / View Daily Brief";
+  const sourceCount = Number(personalStats?.sourceCount || 0);
+  const itemCount = Number(personalStats?.itemCount || 0);
+  let chineseDescription = `${dailyDate} 移民政策日报已生成，点击查看今日动态。`;
+  let englishDescription = `${dailyDate} Immigration Policy Daily Brief has been generated. Click to view today's updates.`;
+
+  if (sourceCount > 0) {
+    if (itemCount > 0) {
+      chineseDescription = `${dailyDate} 公共日报已生成，你关注的 ${sourceCount} 个信源有 ${itemCount} 条动态。`;
+      englishDescription = `${dailyDate} The public daily brief has been generated. Your ${sourceCount} followed ${pluralizeEnglishUnit(sourceCount, "source")} ${sourceCount === 1 ? "has" : "have"} ${itemCount} ${pluralizeEnglishUnit(itemCount, "update")} today.`;
+    } else {
+      chineseDescription = `${dailyDate} 公共日报已生成，你关注的 ${sourceCount} 个信源今日暂无新增。`;
+      englishDescription = `${dailyDate} The public daily brief has been generated. Your ${sourceCount} followed ${pluralizeEnglishUnit(sourceCount, "source")} ${sourceCount === 1 ? "has" : "have"} no new updates today.`;
+    }
+  }
+
+  return {
+    title,
+    description: `${chineseDescription}\n\n${englishDescription}`,
+    buttonText,
+  };
 }
 
 // ── Push task logic ──────────────────────────────────────────────────
@@ -3045,16 +3144,18 @@ async function executePushTask(taskId) {
 
   for (const logEntry of allLogs) {
     const dailyUrl = `${baseUrl}/d/${logEntry.token}`;
-    const title = "移民热点日报";
     const personalStats = subscriptionStats.get(logEntry.userid);
-    const description = personalStats?.sourceCount > 0
-      ? personalStats.itemCount > 0
-        ? `${dailyDate} 公共日报已生成，你关注的 ${personalStats.sourceCount} 个信源有 ${personalStats.itemCount} 条动态。`
-        : `${dailyDate} 公共日报已生成，你关注的 ${personalStats.sourceCount} 个信源今日暂无新增。`
-      : `${dailyDate} 移民政策公共日报已生成，点击查看今日动态。`;
+    const pushCard = buildDailyPushTextCard(dailyDate, personalStats);
 
     try {
-      const result = await sendWxTextCard(accessToken, [logEntry.userid], title, description, dailyUrl);
+      const result = await sendWxTextCard(
+        accessToken,
+        [logEntry.userid],
+        pushCard.title,
+        pushCard.description,
+        dailyUrl,
+        pushCard.buttonText,
+      );
 
       if (result.errcode === 0) {
         await mysqlExec(`
@@ -3924,6 +4025,124 @@ function inferTags(item, source) {
   });
 
   return [...tags].filter(Boolean).slice(0, 5);
+}
+
+const englishLabelMap = new Map([
+  ["高影响", "High Impact"],
+  ["中影响", "Medium Impact"],
+  ["低影响", "Low Impact"],
+  ["美国", "United States"],
+  ["加拿大", "Canada"],
+  ["英国", "United Kingdom"],
+  ["欧盟", "European Union"],
+  ["欧洲", "Europe"],
+  ["希腊", "Greece"],
+  ["西班牙", "Spain"],
+  ["土耳其", "Turkey"],
+  ["香港", "Hong Kong"],
+  ["葡萄牙", "Portugal"],
+  ["巴拿马", "Panama"],
+  ["多米尼克", "Dominica"],
+  ["瓦努阿图", "Vanuatu"],
+  ["圣基茨", "St. Kitts"],
+  ["圣卢西亚", "Saint Lucia"],
+  ["安提瓜", "Antigua"],
+  ["泰国", "Thailand"],
+  ["澳新", "Australia / New Zealand"],
+  ["澳大利亚", "Australia"],
+  ["新西兰", "New Zealand"],
+  ["全球", "Global"],
+  ["all", "Global"],
+  ["more", "More"],
+  ["all-bal", "Global"],
+  ["政策", "Policy"],
+  ["签证", "Visa"],
+  ["排期", "Visa Bulletin"],
+  ["雇主担保", "Employer Sponsorship"],
+  ["官方", "Official"],
+  ["官方机构", "Official Agency"],
+  ["投资", "Investment"],
+  ["工签", "Work Permit"],
+  ["留学", "Study Abroad"],
+  ["土耳其官方新闻", "Turkey Official News"],
+  ["希腊官方网站", "Greece Official Website"],
+  ["Home Office Media Blog", "Home Office Media Blog"],
+  ["美国/全球企业移民", "US / Global Corporate Immigration"],
+  ["香港政府新闻", "Hong Kong Government News"],
+  ["EB-5", "EB-5"],
+  ["NIW", "NIW"],
+  ["EB-1", "EB-1"],
+  ["EE", "Express Entry"],
+  ["PNP", "PNP"],
+]);
+
+function translateArticleLabelToEnglish(value) {
+  const text = sanitizeTextArtifacts(value).trim();
+  if (!text) return "";
+  return englishLabelMap.get(text) || text;
+}
+
+function normalizeTagsArray(value) {
+  if (Array.isArray(value)) return value;
+  if (!value) return [];
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function buildArticleEnglishLabels(item) {
+  const tags = normalizeTagsArray(item.tags || item.tags_json || item.tagsJson);
+  return {
+    countryEn: translateArticleLabelToEnglish(item.country),
+    categoryEn: translateArticleLabelToEnglish(item.category),
+    impactEn: translateArticleLabelToEnglish(item.impact),
+    tagsEn: tags.map(translateArticleLabelToEnglish).filter(Boolean),
+  };
+}
+
+async function backfillArticleEnglishLabels() {
+  while (true) {
+    const rows = (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(
+        JSON_OBJECT(
+          'id', id,
+          'country', country,
+          'category', category,
+          'impact', impact,
+          'tags', CAST(tags_json AS JSON)
+        )
+      ), JSON_ARRAY())
+      FROM (
+        SELECT id, country, category, impact, tags_json
+        FROM yimin_articles
+        WHERE country_en IS NULL
+           OR category_en IS NULL
+           OR impact_en IS NULL
+           OR tags_en_json IS NULL
+        ORDER BY id
+        LIMIT 500
+      ) missing_labels;
+    `)) || [];
+    if (!rows.length) return;
+
+    for (const row of rows) {
+      const labels = buildArticleEnglishLabels(row);
+      await mysqlExec(`
+        UPDATE yimin_articles
+        SET country_en = ${sqlString(labels.countryEn)},
+            category_en = ${sqlString(labels.categoryEn)},
+            impact_en = ${sqlString(labels.impactEn)},
+            tags_en_json = CAST(${sqlString(JSON.stringify(labels.tagsEn))} AS JSON)
+        WHERE id = ${sqlNumber(row.id)};
+      `);
+    }
+  }
 }
 
 function calculateHeat(item, source) {
@@ -7028,6 +7247,15 @@ const server = createServer(async (req, res) => {
         ok: true,
         configuredSources: await readSources(),
         sources: await listSourceStatusesFromDb(),
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/sources/stats" && req.method === "GET") {
+      await initDb();
+      sendJson(res, 200, {
+        ok: true,
+        stats: await getSourceStatsFromDb(),
       });
       return;
     }

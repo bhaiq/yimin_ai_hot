@@ -21,87 +21,92 @@
               <small>Immigration Hot</small>
             </span>
           </a>
-          <button class="brief-info-button" type="button" data-brief-info-open aria-label="查看移民早报说明">
+          <button class="brief-info-button" type="button" data-brief-info-open aria-label="查看移民早报说明" data-i18n-aria-label="briefInfo.aria">
             <span aria-hidden="true">i</span>
-            <span>说明</span>
+            <span data-i18n="briefInfo.button">说明</span>
           </button>
         </div>
 
         <nav class="nav-group" data-nav>
           <button class="nav-item active" data-view="home" type="button">
             <span class="nav-icon">⌁</span>
-            <span>精选热点</span>
+            <span data-i18n="nav.home">精选热点</span>
           </button>
           <button class="nav-item" data-view="all" type="button">
             <span class="nav-icon">▦</span>
-            <span>全部动态</span>
+            <span data-i18n="nav.all">全部动态</span>
           </button>
           <button class="nav-item" data-view="daily" type="button">
             <span class="nav-icon">◷</span>
-            <span>移民日报</span>
+            <span data-i18n="nav.daily">移民日报</span>
           </button>
           <button class="nav-item" data-view="radar" type="button">
             <span class="nav-icon">◎</span>
-            <span>政策雷达</span>
+            <span data-i18n="nav.radar">政策雷达</span>
           </button>
           <button class="nav-item" data-view="feedback" type="button">
             <span class="nav-icon">✎</span>
-            <span>反馈建议</span>
+            <span data-i18n="nav.feedback">反馈建议</span>
           </button>
           <button class="nav-item" data-view="changelog" type="button">
             <span class="nav-icon">↻</span>
-            <span>更新日志</span>
+            <span data-i18n="nav.changelog">更新日志</span>
           </button>
           <button class="nav-item" data-view="subscriptions" type="button">
             <span class="nav-icon">◇</span>
-            <span>我的关注</span>
+            <span data-i18n="nav.subscriptions">我的关注</span>
           </button>
         </nav>
 
         <div class="sidebar-section" data-auth>
-          <p class="section-label">工具</p>
+          <p class="section-label" data-i18n="nav.tools">工具</p>
           <nav class="nav-group compact" data-nav>
             <button class="nav-item" data-view="market" type="button">
               <span class="nav-icon">✦</span>
-              <span>市场素材</span>
+              <span data-i18n="nav.market">市场素材</span>
             </button>
             <button class="nav-item" data-view="sources" type="button">
               <span class="nav-icon">＋</span>
-              <span>信源提报</span>
+              <span data-i18n="nav.sources">信源提报</span>
             </button>
             <button class="nav-item" data-view="review" type="button">
               <span class="nav-icon">✓</span>
-              <span>信源审核</span>
+              <span data-i18n="nav.review">信源审核</span>
             </button>
             <button class="nav-item" data-view="sso-stats" type="button">
               <span class="nav-icon">※</span>
-              <span>访问统计</span>
+              <span data-i18n="nav.ssoStats">访问统计</span>
             </button>
             <button class="nav-item" data-view="department-subscriptions" type="button">
               <span class="nav-icon">⌘</span>
-              <span>部门关注</span>
+              <span data-i18n="nav.departmentSubscriptions">部门关注</span>
             </button>
             <button class="nav-item" data-view="feedback-review" type="button">
               <span class="nav-icon">☷</span>
-              <span>反馈意见查看</span>
+              <span data-i18n="nav.feedbackReview">反馈意见查看</span>
             </button>
             <button class="nav-item" data-view="about" type="button">
               <span class="nav-icon">?</span>
-              <span>关于本站</span>
+              <span data-i18n="nav.about">关于本站</span>
             </button>
           </nav>
         </div>
 
         <div class="theme-switch" data-theme-switch>
-          <label title="使用深色主题"><input type="radio" name="theme" value="dark">深色</label>
-          <label title="跟随系统主题"><input type="radio" name="theme" value="system">跟随系统</label>
-          <label title="使用浅色主题"><input type="radio" name="theme" value="light">浅色</label>
+          <label title="使用深色主题" data-i18n-title="theme.darkTitle"><input type="radio" name="theme" value="dark"><span data-i18n="theme.dark">深色</span></label>
+          <label title="跟随系统主题" data-i18n-title="theme.systemTitle"><input type="radio" name="theme" value="system"><span data-i18n="theme.system">跟随系统</span></label>
+          <label title="使用浅色主题" data-i18n-title="theme.lightTitle"><input type="radio" name="theme" value="light"><span data-i18n="theme.light">浅色</span></label>
+        </div>
+
+        <div class="language-switch" data-language-switch aria-label="语言切换" data-i18n-aria-label="language.aria">
+          <button type="button" data-lang-option="zh">中文</button>
+          <button type="button" data-lang-option="en">English</button>
         </div>
 
         <div class="sidebar-auth" id="sidebarAuth">
           <button class="nav-item compact" id="loginBtn" type="button" data-view="login">
             <span class="nav-icon">⚲</span>
-            <span>登录</span>
+            <span data-i18n="common.login">登录</span>
           </button>
         </div>
         <div class="sidebar-auth hidden" id="sidebarUser">
@@ -109,13 +114,13 @@
             <span class="user-avatar" id="userAvatar">A</span>
             <span id="userName">admin</span>
           </div>
-          <button class="ghost-button compact" id="logoutBtn" type="button">登出</button>
+          <button class="ghost-button compact" id="logoutBtn" type="button" data-i18n="common.logout">登出</button>
         </div>
 
         <div class="source-card">
           <span class="pulse" aria-hidden="true"></span>
           <div>
-            <strong>今日监测</strong>
+            <strong data-i18n="status.todayMonitor">今日监测</strong>
             <small id="monitorStatus">演示数据 · 启动服务后自动抓取</small>
           </div>
         </div>
@@ -127,12 +132,12 @@
             <span class="brand-mark">移</span>
             <strong>移民热点</strong>
           </a>
-          <button class="brief-info-button compact" type="button" data-brief-info-open aria-label="查看移民早报说明">
+          <button class="brief-info-button compact" type="button" data-brief-info-open aria-label="查看移民早报说明" data-i18n-aria-label="briefInfo.aria">
             <span aria-hidden="true">i</span>
-            <span>说明</span>
+            <span data-i18n="briefInfo.button">说明</span>
           </button>
         </div>
-        <button class="icon-button" id="menuToggle" type="button" aria-label="展开导航">
+        <button class="icon-button" id="menuToggle" type="button" aria-label="展开导航" data-i18n-aria-label="nav.expand">
           ☰
         </button>
       </header>
@@ -145,18 +150,19 @@
               id="searchInput"
               type="search"
               placeholder="搜索国家、项目、签证、机构..."
+              data-i18n-placeholder="search.placeholder"
               autocomplete="off"
             />
           </div>
           <div class="filter-strip" id="filterStrip" aria-label="热点分类"></div>
-          <button class="refresh-button" id="refreshNews" type="button" hidden>刷新</button>
+          <button class="refresh-button" id="refreshNews" type="button" hidden data-i18n="common.refresh">刷新</button>
         </section>
 
         <section class="view active" id="view-home" aria-labelledby="homeTitle">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">精选热点</p>
-              <h1 id="homeTitle">今天值得移民顾问先看的动态</h1>
+              <p class="eyebrow" data-i18n="home.eyebrow">精选热点</p>
+              <h1 id="homeTitle" data-i18n="home.title">今天值得移民顾问先看的动态</h1>
             </div>
             <time id="todayDate" datetime=""></time>
           </div>
@@ -165,18 +171,18 @@
             <div class="lead-story" id="leadStory">正在加载...</div>
 
             <aside class="brief-panel" aria-label="今日摘要">
-              <h2>今日速览</h2>
+              <h2 data-i18n="home.brief">今日速览</h2>
               <div class="brief-stat">
                 <strong id="statHigh">0</strong>
-                <span>条高优先级</span>
+                <span data-i18n="home.highPriority">条高优先级</span>
               </div>
               <div class="brief-stat">
                 <strong id="statCountries">0</strong>
-                <span>个国家/地区</span>
+                <span data-i18n="home.countries">个国家/地区</span>
               </div>
               <div class="brief-stat">
                 <strong id="statCategories">0</strong>
-                <span>类客户影响</span>
+                <span data-i18n="home.categories">类客户影响</span>
               </div>
             </aside>
           </div>
@@ -184,14 +190,14 @@
           <div class="content-layout">
             <section>
               <div class="subhead">
-                <h2>实时热点</h2>
+                <h2 data-i18n="home.liveHotspots">实时热点</h2>
                 <span id="homeCount">0 条</span>
               </div>
               <div class="feed-list" id="featuredFeed"></div>
             </section>
 
             <aside class="side-panel">
-              <h2>项目快照</h2>
+              <h2 data-i18n="home.snapshot">项目快照</h2>
               <div class="snapshot-list" id="snapshotList"></div>
             </aside>
           </div>
@@ -200,8 +206,8 @@
         <section class="view" id="view-all" aria-labelledby="allTitle">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">全部动态</p>
-              <h1 id="allTitle">移民热点时间线</h1>
+              <p class="eyebrow" data-i18n="all.eyebrow">全部动态</p>
+              <h1 id="allTitle" data-i18n="all.title">移民热点时间线</h1>
             </div>
             <span class="muted" id="allCount">0 条</span>
           </div>
@@ -211,12 +217,12 @@
         <section class="view" id="view-daily" aria-labelledby="dailyTitle">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">移民日报</p>
-              <h1 id="dailyTitle">今日政策简报</h1>
+              <p class="eyebrow" data-i18n="daily.eyebrow">移民日报</p>
+              <h1 id="dailyTitle" data-i18n="daily.title">今日政策简报</h1>
             </div>
             <div class="heading-actions">
-              <button class="ghost-button" type="button" data-view="subscriptions">管理我的关注</button>
-              <button class="ghost-button" id="copyDaily" type="button">复制日报</button>
+              <button class="ghost-button" type="button" data-view="subscriptions" data-i18n="daily.manageSubscriptions">管理我的关注</button>
+              <button class="ghost-button" id="copyDaily" type="button" data-i18n="daily.copy">复制日报</button>
             </div>
           </div>
           <article class="daily-report" id="dailyReport"></article>
@@ -225,22 +231,22 @@
         <section class="view utility-view wide-view" id="view-subscriptions" aria-labelledby="subscriptionsTitle">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">个性化日报</p>
-              <h1 id="subscriptionsTitle">管理我的关注</h1>
+              <p class="eyebrow" data-i18n="subscriptions.eyebrow">个性化日报</p>
+              <h1 id="subscriptionsTitle" data-i18n="subscriptions.title">管理我的关注</h1>
             </div>
           </div>
           <div class="subscription-panel">
             <div class="subscription-intro">
               <div>
                 <strong id="subscriptionIdentity">正在识别企业微信身份...</strong>
-                <p>公共日报会照常发送。这里选择的信源会作为你的专属关注补充，不会额外为每个人重复生成整份 AI 日报。</p>
+                <p data-i18n="subscriptions.intro">公共日报会照常发送。这里选择的信源会作为你的专属关注补充，不会额外为每个人重复生成整份 AI 日报。</p>
               </div>
               <span class="subscription-count" id="subscriptionCount">0 个已关注</span>
             </div>
             <div class="subscription-toolbar">
               <label class="subscription-search">
                 <span aria-hidden="true">⌕</span>
-                <input id="subscriptionSearch" type="search" placeholder="搜索信源名称" autocomplete="off">
+                <input id="subscriptionSearch" type="search" placeholder="搜索信源名称" data-i18n-placeholder="subscriptions.search" autocomplete="off">
               </label>
               <select id="subscriptionCountry" aria-label="按国家筛选">
                 <option value="">全部国家/地区</option>
@@ -256,7 +262,7 @@
             <div class="subscription-list" id="subscriptionList"></div>
             <div class="subscription-footer">
               <p class="form-note" id="subscriptionNote">保存后，从下一次打开日报起生效。</p>
-              <button class="primary-button" id="saveSubscriptions" type="button">保存关注</button>
+              <button class="primary-button" id="saveSubscriptions" type="button" data-i18n="subscriptions.save">保存关注</button>
             </div>
           </div>
         </section>
@@ -275,8 +281,8 @@
         <section class="view" id="view-radar" aria-labelledby="radarTitle">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">政策雷达</p>
-              <h1 id="radarTitle">项目经理关注面板</h1>
+              <p class="eyebrow" data-i18n="radar.eyebrow">政策雷达</p>
+              <h1 id="radarTitle" data-i18n="radar.title">项目经理关注面板</h1>
             </div>
           </div>
           <div class="radar-grid" id="radarGrid"></div>
@@ -429,57 +435,57 @@
         <section class="view utility-view" id="view-feedback" aria-labelledby="feedbackTitle">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">反馈</p>
-              <h1 id="feedbackTitle">感谢您的宝贵意见</h1>
+              <p class="eyebrow" data-i18n="feedback.eyebrow">反馈</p>
+              <h1 id="feedbackTitle" data-i18n="feedback.title">感谢您的宝贵意见</h1>
             </div>
           </div>
           <form class="form-panel" id="feedbackForm">
             <div class="form-grid two">
               <label>
-                <span>反馈类型</span>
+                <span data-i18n="feedback.type">反馈类型</span>
                 <select name="type">
-                  <option>内容准确性</option>
-                  <option>信息源补充</option>
-                  <option>页面体验</option>
-                  <option>日报质量</option>
-                  <option>业务流程</option>
+                  <option data-i18n="feedback.typeAccuracy">内容准确性</option>
+                  <option data-i18n="feedback.typeSource">信息源补充</option>
+                  <option data-i18n="feedback.typeExperience">页面体验</option>
+                  <option data-i18n="feedback.typeDaily">日报质量</option>
+                  <option data-i18n="feedback.typeWorkflow">业务流程</option>
                 </select>
               </label>
               <label>
-                <span>相关页面</span>
+                <span data-i18n="feedback.module">相关页面</span>
                 <select name="module">
-                  <option>移民日报</option>
-                  <option>精选热点</option>
-                  <option>全部动态</option>
-                  <option>政策雷达</option>
-                  <option>市场素材</option>
-                  <option>其他</option>
+                  <option data-i18n="feedback.moduleDaily">移民日报</option>
+                  <option data-i18n="feedback.moduleHome">精选热点</option>
+                  <option data-i18n="feedback.moduleAll">全部动态</option>
+                  <option data-i18n="feedback.moduleRadar">政策雷达</option>
+                  <option data-i18n="feedback.moduleMarket">市场素材</option>
+                  <option data-i18n="feedback.moduleOther">其他</option>
                 </select>
               </label>
             </div>
             <div class="form-grid two">
               <label>
-                <span>优先级</span>
+                <span data-i18n="feedback.priority">优先级</span>
                 <select name="priority">
-                  <option value="normal">一般建议</option>
-                  <option value="high">影响工作</option>
-                  <option value="urgent">需要尽快处理</option>
+                  <option value="normal" data-i18n="feedback.priorityNormal">一般建议</option>
+                  <option value="high" data-i18n="feedback.priorityHigh">影响工作</option>
+                  <option value="urgent" data-i18n="feedback.priorityUrgent">需要尽快处理</option>
                 </select>
               </label>
               <label>
-                <span>联系方式（选填）</span>
-                <input name="contact" placeholder="邮箱、电话或企业微信" />
+                <span data-i18n="feedback.contact">联系方式（选填）</span>
+                <input name="contact" placeholder="邮箱、电话或企业微信" data-i18n-placeholder="feedback.contactPlaceholder" />
               </label>
             </div>
             <label>
-              <span>具体说明</span>
-              <textarea name="message" rows="6" placeholder="请描述遇到的问题、希望补充的信息，或你认为更好用的方式。" required></textarea>
+              <span data-i18n="feedback.message">具体说明</span>
+              <textarea name="message" rows="6" placeholder="请描述遇到的问题、希望补充的信息，或你认为更好用的方式。" data-i18n-placeholder="feedback.messagePlaceholder" required></textarea>
             </label>
             <div class="feedback-actions">
-              <button class="primary-button" type="submit">提交反馈</button>
-              <button class="ghost-button" type="reset">清空</button>
+              <button class="primary-button" type="submit" data-i18n="feedback.submit">提交反馈</button>
+              <button class="ghost-button" type="reset" data-i18n="feedback.reset">清空</button>
             </div>
-            <p class="form-note" id="feedbackNote">提交后我们会尽快查看。</p>
+            <p class="form-note" id="feedbackNote" data-i18n="feedback.note">提交后我们会尽快查看。</p>
           </form>
         </section>
 
@@ -517,43 +523,43 @@
 
     <div class="brief-info-overlay" id="briefInfoModal" aria-hidden="true">
       <section class="brief-info-dialog" role="dialog" aria-modal="true" aria-labelledby="briefInfoTitle">
-        <button class="brief-info-close" type="button" data-brief-info-close aria-label="关闭移民早报说明">×</button>
+        <button class="brief-info-close" type="button" data-brief-info-close aria-label="关闭移民早报说明" data-i18n-aria-label="briefInfo.closeAria">×</button>
         <div class="brief-info-heading">
           <span class="brief-info-icon" aria-hidden="true">i</span>
           <div>
-            <p class="eyebrow">使用说明</p>
-            <h2 id="briefInfoTitle">关于移民早报的说明</h2>
+            <p class="eyebrow" data-i18n="briefInfo.eyebrow">使用说明</p>
+            <h2 id="briefInfoTitle" data-i18n="briefInfo.title">关于移民早报的说明</h2>
           </div>
         </div>
 
         <div class="brief-info-body">
-          <p>「移民早报」是由系统辅助生成的移民政策信息简报。</p>
-          <p>我们会持续采集来自政策官网、行业协会、知名律所等 <strong>80+ 个公开信息源</strong> 的最新动态，并通过 AI 对内容进行去重、聚合、提取和整理，帮助大家快速了解每日重点政策变化。</p>
+          <p id="briefInfoIntro"></p>
+          <p id="briefInfoSourceText"></p>
 
           <div class="brief-delivery">
             <div>
-              <span>推送时间</span>
-              <strong>每天早上 8:50</strong>
+              <span data-i18n="briefInfo.deliveryTime">推送时间</span>
+              <strong data-i18n="briefInfo.deliveryTimeValue">每天早上 8:50</strong>
             </div>
             <div>
-              <span>推送方式</span>
-              <strong>通过「企业微信 - 移民早报」送达每个人眼前</strong>
+              <span data-i18n="briefInfo.deliveryMethod">推送方式</span>
+              <strong data-i18n="briefInfo.deliveryMethodValue">通过「企业微信 - 移民早报」送达每个人眼前</strong>
             </div>
           </div>
 
           <div class="brief-info-notice">
-            <h3>需要说明的是</h3>
+            <h3 data-i18n="briefInfo.noticeTitle">需要说明的是</h3>
             <ol>
-              <li>内容来源于公开渠道，不是 AI 凭空生成；</li>
-              <li>AI 主要负责信息整理和摘要提炼，用于提升阅读效率；</li>
-              <li>具体业务判断仍需结合原文链接、官方文件和专业判断；</li>
-              <li>如涉及客户沟通、方案调整或重大政策解读，请以官方原文和业务负责人确认为准。</li>
+              <li data-i18n="briefInfo.notice1">内容来源于公开渠道，不是 AI 凭空生成；</li>
+              <li data-i18n="briefInfo.notice2">AI 主要负责信息整理和摘要提炼，用于提升阅读效率；</li>
+              <li data-i18n="briefInfo.notice3">具体业务判断仍需结合原文链接、官方文件和专业判断；</li>
+              <li data-i18n="briefInfo.notice4">如涉及客户沟通、方案调整或重大政策解读，请以官方原文和业务负责人确认为准。</li>
             </ol>
           </div>
         </div>
 
         <div class="brief-info-actions">
-          <button class="primary-button" type="button" data-brief-info-close>我知道了</button>
+          <button class="primary-button" type="button" data-brief-info-close data-i18n="briefInfo.gotIt">我知道了</button>
         </div>
       </section>
     </div>
