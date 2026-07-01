@@ -65,6 +65,7 @@ const i18n = {
     "common.unknownSource": "未知信源",
     "common.untitledUpdate": "未命名动态",
     "common.readOriginal": "查看原文获取完整信息。",
+    "common.viewOriginal": "查看原文 →",
     "common.justNow": "刚刚",
     "common.noData": "暂无数据",
     "common.noMatchingHotspots": "没有匹配的热点，换个关键词试试。",
@@ -218,6 +219,7 @@ const i18n = {
     "common.unknownSource": "Unknown source",
     "common.untitledUpdate": "Untitled update",
     "common.readOriginal": "Open the original article for full details.",
+    "common.viewOriginal": "View Original →",
     "common.justNow": "Just now",
     "common.noData": "No data",
     "common.noMatchingHotspots": "No matching updates. Try another keyword.",
@@ -3904,7 +3906,7 @@ function showArticleModal(cardEl, url) {
         <p>${escapeHtml(summary)}</p>
       </div>
       <div class="modal-actions">
-        <a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer" class="modal-link">查看原文 →</a>
+        <a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer" class="modal-link">${escapeHtml(t("common.viewOriginal"))}</a>
       </div>
     </div>
   `;
