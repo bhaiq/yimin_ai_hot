@@ -2906,7 +2906,7 @@ function syncWxContacts() {
   return wxContactsSyncPromise;
 }
 
-async function sendWxTextCard(accessToken, userIds, title, description, url, buttonText = "查看/View") {
+async function sendWxTextCard(accessToken, userIds, title, description, url, buttonText = "View") {
   const toUser = userIds.join("|");
   if (!toUser) return { errcode: 0, errmsg: "no users" };
 
@@ -2929,7 +2929,7 @@ function pluralizeEnglishUnit(count, singular, plural = `${singular}s`) {
 
 function buildDailyPushTextCard(dailyDate, personalStats = null) {
   const title = "移民热点日报 / Immigration Daily News";
-  const buttonText = "查看/View";
+  const buttonText = "View";
   const sourceCount = Number(personalStats?.sourceCount || 0);
   const itemCount = Number(personalStats?.itemCount || 0);
   let lines = [
