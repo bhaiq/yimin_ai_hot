@@ -99,6 +99,7 @@ let dbReadyPromise = null;
 let activeFetchRun = null;
 let activeArticleTranslationPromise = null;
 let activeArticleRelevancePromise = null;
+const dailyLocalizationGenerationPromises = new Map();
 const departmentDailyGenerationPromises = new Map();
 
 async function loadEnv() {
@@ -6005,41 +6006,58 @@ async function getDailyReportLocalization(baseReport, language, { refresh = fals
     }
   }
 
-  let markdown;
-  let model = deepseekConfig.model;
-  try {
-    markdown = await callDeepSeek(buildEnglishDailyPrompt(baseRow, events), {
-      systemPrompt: "You are an immigration policy daily brief editor. Use only the user's provided material. Do not invent policies, dates, fees, eligibility rules, impacts, or conclusions. Output polished professional English Markdown only.",
-    });
-  } catch (error) {
-    const firstError = error instanceof Error ? error.message : String(error);
-    try {
-      markdown = await callDeepSeek(buildEnglishDailyTranslationPrompt(baseRow), {
-        systemPrompt: "You are a professional English editor translating immigration industry briefings. Preserve facts and links exactly. Output English Markdown only.",
-      });
-      model = `${deepseekConfig.model}:translation-fallback`;
-    } catch (translationError) {
-      model = "fallback";
-      markdown = buildFallbackEnglishDailyMarkdown(
-        attachDailyWindowLabel(baseRow),
-        events,
-        translationError instanceof Error ? translationError.message : firstError,
-      );
-    }
+  const generationKey = `${baseRow.id}:${normalizedLanguage}:${inputHash}`;
+  if (dailyLocalizationGenerationPromises.has(generationKey)) {
+    const localization = await dailyLocalizationGenerationPromises.get(generationKey);
+    return mergeDailyLocalization(baseRow, localization);
   }
 
-  markdown = sanitizeTextArtifacts(markdown);
-  const title = extractMarkdownTitle(markdown, `Immigration Daily Brief (${baseRow.date})`);
-  const localization = {
-    language: normalizedLanguage,
-    title,
-    contentMarkdown: markdown,
-    html: markdownToHtml(markdown),
-    inputHash,
-    model,
-    generatedAt: formatShanghaiDateTimeISO(new Date()),
-  };
-  await saveDailyLocalization(baseRow.id, normalizedLanguage, localization);
+  const generationPromise = (async () => {
+    let markdown;
+    let model = deepseekConfig.model;
+    try {
+      markdown = await callDeepSeek(buildEnglishDailyPrompt(baseRow, events), {
+        systemPrompt: "You are an immigration policy daily brief editor. Use only the user's provided material. Do not invent policies, dates, fees, eligibility rules, impacts, or conclusions. Output polished professional English Markdown only.",
+      });
+    } catch (error) {
+      const firstError = error instanceof Error ? error.message : String(error);
+      try {
+        markdown = await callDeepSeek(buildEnglishDailyTranslationPrompt(baseRow), {
+          systemPrompt: "You are a professional English editor translating immigration industry briefings. Preserve facts and links exactly. Output English Markdown only.",
+        });
+        model = `${deepseekConfig.model}:translation-fallback`;
+      } catch (translationError) {
+        model = "fallback";
+        markdown = buildFallbackEnglishDailyMarkdown(
+          attachDailyWindowLabel(baseRow),
+          events,
+          translationError instanceof Error ? translationError.message : firstError,
+        );
+      }
+    }
+
+    markdown = sanitizeTextArtifacts(markdown);
+    const title = extractMarkdownTitle(markdown, `Immigration Daily Brief (${baseRow.date})`);
+    const localization = {
+      language: normalizedLanguage,
+      title,
+      contentMarkdown: markdown,
+      html: markdownToHtml(markdown),
+      inputHash,
+      model,
+      generatedAt: formatShanghaiDateTimeISO(new Date()),
+    };
+    await saveDailyLocalization(baseRow.id, normalizedLanguage, localization);
+    return localization;
+  })();
+
+  dailyLocalizationGenerationPromises.set(generationKey, generationPromise);
+  let localization;
+  try {
+    localization = await generationPromise;
+  } finally {
+    dailyLocalizationGenerationPromises.delete(generationKey);
+  }
   return mergeDailyLocalization(baseRow, localization);
 }
 
