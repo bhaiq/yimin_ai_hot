@@ -2906,7 +2906,7 @@ function syncWxContacts() {
   return wxContactsSyncPromise;
 }
 
-async function sendWxTextCard(accessToken, userIds, title, description, url, buttonText = "查看日报 / View") {
+async function sendWxTextCard(accessToken, userIds, title, description, url, buttonText = "查看/View") {
   const toUser = userIds.join("|");
   if (!toUser) return { errcode: 0, errmsg: "no users" };
 
@@ -2929,35 +2929,28 @@ function pluralizeEnglishUnit(count, singular, plural = `${singular}s`) {
 
 function buildDailyPushTextCard(dailyDate, personalStats = null) {
   const title = "移民热点日报 / Immigration Daily News";
-  const buttonText = "查看日报 / View";
+  const buttonText = "查看/View";
   const sourceCount = Number(personalStats?.sourceCount || 0);
   const itemCount = Number(personalStats?.itemCount || 0);
   let lines = [
     dailyDate,
-    "公共日报已生成",
-    "点击查看今日动态",
-    "",
-    "Daily brief is ready",
-    "Open to view today's updates",
+    "公共日报已生成 / Daily brief is ready",
+    "点击查看今日动态 / Open to view updates",
   ];
 
   if (sourceCount > 0) {
     if (itemCount > 0) {
       lines = [
         dailyDate,
-        "公共日报已生成",
+        "公共日报已生成 / Daily brief is ready",
         `你的关注：${sourceCount} 个信源 · ${itemCount} 条动态`,
-        "",
-        "Daily brief is ready",
         `Following: ${sourceCount} ${pluralizeEnglishUnit(sourceCount, "source")} · ${itemCount} ${pluralizeEnglishUnit(itemCount, "update")}`,
       ];
     } else {
       lines = [
         dailyDate,
-        "公共日报已生成",
+        "公共日报已生成 / Daily brief is ready",
         `你的关注：${sourceCount} 个信源 · 今日暂无新增`,
-        "",
-        "Daily brief is ready",
         `Following: ${sourceCount} ${pluralizeEnglishUnit(sourceCount, "source")} · No new updates today`,
       ];
     }
