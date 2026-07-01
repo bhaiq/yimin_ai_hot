@@ -19,6 +19,7 @@ const dailyAnalysisBatchSize = Math.max(10, Number(process.env.DAILY_ANALYSIS_BA
 const dailyAnalysisConcurrency = Math.max(1, Number(process.env.DAILY_ANALYSIS_CONCURRENCY || 3));
 const dailyFinalPromptMaxChars = Math.max(20000, Number(process.env.DAILY_FINAL_PROMPT_MAX_CHARS || 80000));
 const dailyAnalysisVersion = "daily-analysis-v2";
+const dailyLocalizationVersion = "daily-localization-v1";
 const articleTranslationVersion = "article-translation-v1";
 const articleTranslationBatchSize = Math.max(5, Number(process.env.ARTICLE_TRANSLATION_BATCH_SIZE || 30));
 const articleTranslationConcurrency = Math.max(1, Number(process.env.ARTICLE_TRANSLATION_CONCURRENCY || 2));
@@ -417,6 +418,23 @@ async function initDb() {
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
           UNIQUE KEY uk_yimin_daily_reports_date (report_date)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI 每日移民报告表';
+
+        CREATE TABLE IF NOT EXISTS yimin_daily_report_localizations (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          report_id BIGINT NOT NULL COMMENT '主日报 ID',
+          language VARCHAR(10) NOT NULL COMMENT '本地化语言（如 en）',
+          title VARCHAR(200) NOT NULL COMMENT '本地化标题',
+          content_markdown LONGTEXT NOT NULL COMMENT '本地化 Markdown 原文',
+          content_html LONGTEXT NOT NULL COMMENT '本地化 HTML 内容',
+          input_hash CHAR(64) NOT NULL COMMENT '生成输入哈希',
+          model VARCHAR(120) NULL COMMENT '生成所用 AI 模型名称',
+          generated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '生成时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_daily_report_localization (report_id, language),
+          INDEX idx_daily_report_localizations_language (language),
+          CONSTRAINT fk_daily_report_localizations_report FOREIGN KEY (report_id) REFERENCES yimin_daily_reports(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='日报多语言本地化内容表';
 
         CREATE TABLE IF NOT EXISTS yimin_daily_report_items (
           id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
@@ -5635,10 +5653,14 @@ async function saveDailyReportItems(reportDate, context) {
   }
 }
 
-async function callDeepSeek(prompt) {
+async function callDeepSeek(prompt, options = {}) {
   if (!deepseekConfig.apiKey) {
     throw new Error("DeepSeek API key is not configured");
   }
+
+  const systemPrompt = options.systemPrompt
+    || "你是移民政策日报编辑，只能基于用户提供的信息进行归纳，不能编造政策、日期、费用或结论。输出必须使用简体中文，遇到英文或其他语言的源材料必须翻译为中文，不要保留原文。";
+  const temperature = Number.isFinite(Number(options.temperature)) ? Number(options.temperature) : 0.25;
 
   const response = await fetch(`${deepseekConfig.baseUrl.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
@@ -5648,12 +5670,11 @@ async function callDeepSeek(prompt) {
     },
     body: JSON.stringify({
       model: deepseekConfig.model,
-      temperature: 0.25,
+      temperature,
       messages: [
         {
           role: "system",
-          content:
-            "你是移民政策日报编辑，只能基于用户提供的信息进行归纳，不能编造政策、日期、费用或结论。输出必须使用简体中文，遇到英文或其他语言的源材料必须翻译为中文，不要保留原文。",
+          content: systemPrompt,
         },
         {
           role: "user",
@@ -5699,8 +5720,350 @@ function attachDailyWindowLabel(report) {
   };
 }
 
-async function getDailyReport(date = getShanghaiDate(), { refresh = false, windowMode = "calendar" } = {}) {
+function normalizeDailyLanguage(value) {
+  return String(value || "").trim().toLowerCase() === "en" ? "en" : "zh";
+}
+
+function extractMarkdownTitle(markdown, fallback) {
+  const firstHeading = String(markdown || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => /^#\s+/.test(line));
+  return sanitizeTextArtifacts(firstHeading ? firstHeading.replace(/^#\s+/, "") : fallback);
+}
+
+async function loadDailyReportBaseRow(date) {
+  return mysqlJson(`
+    SELECT JSON_OBJECT(
+      'id', id,
+      'date', DATE_FORMAT(report_date, '%Y-%m-%d'),
+      'title', title,
+      'contentMarkdown', content_markdown,
+      'html', content_html,
+      'sourceItemCount', source_item_count,
+      'relevantItemCount', relevant_item_count,
+      'eventCount', event_count,
+      'model', model,
+      'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'windowMode', window_mode,
+      'windowStart', IF(window_start_at IS NULL, NULL, DATE_FORMAT(window_start_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+      'windowEnd', IF(window_end_at IS NULL, NULL, DATE_FORMAT(window_end_at, '%Y-%m-%dT%H:%i:%s+08:00'))
+    )
+    FROM yimin_daily_reports
+    WHERE report_date = ${sqlString(date)}
+    LIMIT 1;
+  `);
+}
+
+async function loadDailyLocalizationEvents(reportId) {
+  return (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+      'eventKey', event_key,
+      'section', section,
+      'title', title,
+      'summary', summary,
+      'country', country,
+      'category', category,
+      'importance', importance,
+      'articleCount', article_count,
+      'sourceCount', source_count,
+      'representativeUrl', representative_url,
+      'articleHashes', article_hashes_json
+    )), JSON_ARRAY())
+    FROM (
+      SELECT *
+      FROM yimin_daily_report_events
+      WHERE report_id = ${sqlNumber(reportId)}
+      ORDER BY FIELD(section, 'today_new', 'important', 'continuing', 'repeated'), importance DESC, id ASC
+    ) ordered_events;
+  `)) || [];
+}
+
+function getDailyLocalizationInputHash(baseReport, events, language) {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      version: dailyLocalizationVersion,
+      language,
+      date: baseReport.date,
+      windowMode: baseReport.windowMode,
+      windowStart: baseReport.windowStart,
+      windowEnd: baseReport.windowEnd,
+      sourceItemCount: baseReport.sourceItemCount,
+      relevantItemCount: baseReport.relevantItemCount,
+      eventCount: baseReport.eventCount,
+      events: events.map((event) => ({
+        eventKey: event.eventKey,
+        section: event.section,
+        title: event.title,
+        summary: event.summary,
+        country: event.country,
+        category: event.category,
+        importance: event.importance,
+        articleCount: event.articleCount,
+        sourceCount: event.sourceCount,
+        representativeUrl: event.representativeUrl,
+      })),
+      sourceMarkdownHash: createHash("sha256").update(String(baseReport.contentMarkdown || "")).digest("hex"),
+    }))
+    .digest("hex");
+}
+
+async function loadDailyLocalization(reportId, language) {
+  return mysqlJson(`
+    SELECT JSON_OBJECT(
+      'language', language,
+      'title', title,
+      'contentMarkdown', content_markdown,
+      'html', content_html,
+      'inputHash', input_hash,
+      'model', model,
+      'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s+08:00')
+    )
+    FROM yimin_daily_report_localizations
+    WHERE report_id = ${sqlNumber(reportId)}
+      AND language = ${sqlString(language)}
+    LIMIT 1;
+  `);
+}
+
+async function saveDailyLocalization(reportId, language, localization) {
+  await mysqlExec(`
+    INSERT INTO yimin_daily_report_localizations (
+      report_id, language, title, content_markdown, content_html,
+      input_hash, model, generated_at
+    )
+    VALUES (
+      ${sqlNumber(reportId)},
+      ${sqlString(language)},
+      ${sqlString(localization.title)},
+      ${sqlString(localization.contentMarkdown)},
+      ${sqlString(localization.html)},
+      ${sqlString(localization.inputHash)},
+      ${sqlString(localization.model)},
+      CURRENT_TIMESTAMP
+    )
+    ON DUPLICATE KEY UPDATE
+      title = VALUES(title),
+      content_markdown = VALUES(content_markdown),
+      content_html = VALUES(content_html),
+      input_hash = VALUES(input_hash),
+      model = VALUES(model),
+      generated_at = CURRENT_TIMESTAMP,
+      updated_at = CURRENT_TIMESTAMP;
+  `);
+}
+
+function mergeDailyLocalization(baseReport, localization) {
+  const contentMarkdown = sanitizeTextArtifacts(localization.contentMarkdown || "");
+  return attachDailyWindowLabel({
+    date: baseReport.date,
+    title: sanitizeTextArtifacts(localization.title || baseReport.title),
+    contentMarkdown,
+    html: markdownToHtml(contentMarkdown),
+    sourceItemCount: baseReport.sourceItemCount,
+    relevantItemCount: baseReport.relevantItemCount,
+    eventCount: baseReport.eventCount,
+    model: localization.model || baseReport.model,
+    generatedAt: localization.generatedAt,
+    windowMode: baseReport.windowMode,
+    windowStart: baseReport.windowStart,
+    windowEnd: baseReport.windowEnd,
+    language: localization.language || "en",
+  });
+}
+
+function formatDailyLocalizationEvents(events) {
+  if (!events.length) {
+    return "No grouped immigration events were saved for this report.";
+  }
+
+  return events.map((event, index) => [
+    `${index + 1}. [${event.section}] ${sanitizeTextArtifacts(event.title)}`,
+    `Country/category: ${sanitizeTextArtifacts(event.country)} / ${sanitizeTextArtifacts(event.category)}`,
+    `Importance: ${event.importance}; article count: ${event.articleCount}; source count: ${event.sourceCount}`,
+    `Summary: ${truncate(event.summary, 360)}`,
+    `Representative link: ${event.representativeUrl || ""}`,
+  ].join("\n")).join("\n\n");
+}
+
+function buildEnglishDailyPrompt(baseReport, events) {
+  return `You are a senior immigration industry analyst. Generate an English immigration daily brief based only on the grouped event material below.
+
+Date: ${baseReport.date}
+Reporting window: ${baseReport.windowStart || ""} to ${baseReport.windowEnd || ""}
+Window mode: ${baseReport.windowMode === "last24h" ? "last 24 hours morning brief" : "calendar-day daily brief"}
+Candidate article count: ${baseReport.sourceItemCount}
+Relevant article count: ${baseReport.relevantItemCount}
+Grouped event count: ${baseReport.eventCount}
+
+Grouped event material:
+${formatDailyLocalizationEvents(events)}
+
+Section rules:
+- today_new means facts that did not appear in the last 7 days of daily reports.
+- important means relevant recent changes that are not today's new facts but have not been used recently.
+- continuing means items that need monitoring but should not be packaged as fresh news.
+- repeated means stale or recently repeated items that should not be used in today's headline summary.
+
+Write concise, professional Markdown in English with exactly these six sections:
+## 1. Executive Summary
+Only summarize today_new facts. If there are no today_new facts, state that there are no confirmed major new immigration facts for this issue.
+
+## 2. New Today
+List new facts with country or region, program or policy area, affected audience, and original links.
+
+## 3. Important Changes
+List recent important changes that are not today_new.
+
+## 4. Continuing Watch
+List follow-up items and explain why they should not be repackaged as fresh news.
+
+## 5. Do Not Repackage
+List stale or repeated items that should stay out of the headline summary.
+
+## 6. Suggested Actions
+Give 1-2 practical actions each for sales, copywriting, and project managers.
+
+Hard requirements:
+- Do not invent policies, dates, fees, eligibility rules, impacts, or conclusions.
+- Do not move continuing or repeated items into the Executive Summary.
+- Preserve original links when a link is available.
+- Translate Chinese event titles and summaries naturally into English.
+- Output English only.`;
+}
+
+function buildEnglishDailyTranslationPrompt(baseReport) {
+  return `Translate the following Chinese immigration daily brief into natural professional English Markdown.
+
+Rules:
+- Preserve the factual meaning, Markdown structure, and original links.
+- Do not add new facts, dates, fees, policy interpretations, or conclusions.
+- Make headings and action recommendations read naturally in English.
+- Output English only.
+
+Chinese daily brief:
+${baseReport.contentMarkdown || ""}`;
+}
+
+function buildFallbackEnglishDailyMarkdown(baseReport, events, reason = "") {
+  const sectionEvents = (section) => events.filter((event) => event.section === section);
+  const formatLine = (event) => {
+    const link = event.representativeUrl ? ` ([source](${event.representativeUrl}))` : "";
+    return `- ${event.country || "Unknown"} | ${event.category || "Uncategorized"}: ${event.title || "Untitled update"} - ${event.summary || ""}${link}`;
+  };
+  const todayNew = sectionEvents("today_new");
+  const important = sectionEvents("important");
+  const continuing = sectionEvents("continuing");
+  const repeated = sectionEvents("repeated");
+
+  return `# Immigration Daily Brief | ${baseReport.date}
+
+> Reporting window: ${baseReport.windowLabel || baseReport.date}
+${reason ? `\n> English generation fallback: ${reason}\n` : ""}
+## 1. Executive Summary
+
+${todayNew.length ? `This issue includes ${todayNew.length} confirmed new immigration-related update${todayNew.length === 1 ? "" : "s"}.` : "There are no confirmed major new immigration facts for this issue."}
+
+## 2. New Today
+
+${todayNew.length ? todayNew.map(formatLine).join("\n") : "- None."}
+
+## 3. Important Changes
+
+${important.length ? important.map(formatLine).join("\n") : "- No additional important changes."}
+
+## 4. Continuing Watch
+
+${continuing.length ? continuing.map(formatLine).join("\n") : "- None."}
+
+## 5. Do Not Repackage
+
+${repeated.length ? repeated.map(formatLine).join("\n") : "- None."}
+
+## 6. Suggested Actions
+
+- Sales: Use only confirmed new facts in client-facing updates.
+- Copywriting: Keep continuing or repeated items as background follow-up, not headline news.
+- Project managers: Check original sources before changing client plans or internal guidance.`;
+}
+
+async function getDailyReportLocalization(baseReport, language, { refresh = false } = {}) {
+  const normalizedLanguage = normalizeDailyLanguage(language);
+  if (normalizedLanguage === "zh") {
+    return attachDailyWindowLabel(baseReport);
+  }
+
+  const baseRow = await loadDailyReportBaseRow(baseReport.date);
+  if (!baseRow) return null;
+
+  const events = await loadDailyLocalizationEvents(baseRow.id);
+  const inputHash = getDailyLocalizationInputHash(baseRow, events, normalizedLanguage);
+  if (!refresh) {
+    const cached = await loadDailyLocalization(baseRow.id, normalizedLanguage);
+    if (cached?.inputHash === inputHash) {
+      return mergeDailyLocalization(baseRow, cached);
+    }
+  }
+
+  let markdown;
+  let model = deepseekConfig.model;
+  try {
+    markdown = await callDeepSeek(buildEnglishDailyPrompt(baseRow, events), {
+      systemPrompt: "You are an immigration policy daily brief editor. Use only the user's provided material. Do not invent policies, dates, fees, eligibility rules, impacts, or conclusions. Output polished professional English Markdown only.",
+    });
+  } catch (error) {
+    const firstError = error instanceof Error ? error.message : String(error);
+    try {
+      markdown = await callDeepSeek(buildEnglishDailyTranslationPrompt(baseRow), {
+        systemPrompt: "You are a professional English editor translating immigration industry briefings. Preserve facts and links exactly. Output English Markdown only.",
+      });
+      model = `${deepseekConfig.model}:translation-fallback`;
+    } catch (translationError) {
+      model = "fallback";
+      markdown = buildFallbackEnglishDailyMarkdown(
+        attachDailyWindowLabel(baseRow),
+        events,
+        translationError instanceof Error ? translationError.message : firstError,
+      );
+    }
+  }
+
+  markdown = sanitizeTextArtifacts(markdown);
+  const title = extractMarkdownTitle(markdown, `Immigration Daily Brief (${baseRow.date})`);
+  const localization = {
+    language: normalizedLanguage,
+    title,
+    contentMarkdown: markdown,
+    html: markdownToHtml(markdown),
+    inputHash,
+    model,
+    generatedAt: formatShanghaiDateTimeISO(new Date()),
+  };
+  await saveDailyLocalization(baseRow.id, normalizedLanguage, localization);
+  return mergeDailyLocalization(baseRow, localization);
+}
+
+async function prebuildDailyLocalizations(report) {
+  try {
+    await getDailyReportLocalization(report, "en", { refresh: true });
+  } catch (error) {
+    console.error("English daily report prebuild failed:", error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function getDailyReport(date = getShanghaiDate(), { refresh = false, windowMode = "calendar", language = "zh", prebuildLocalizations = true } = {}) {
   await initDb();
+
+  const normalizedLanguage = normalizeDailyLanguage(language);
+  if (normalizedLanguage !== "zh") {
+    const baseReport = await getDailyReport(date, {
+      refresh,
+      windowMode,
+      language: "zh",
+      prebuildLocalizations: false,
+    });
+    return getDailyReportLocalization(baseReport, normalizedLanguage, { refresh });
+  }
 
   if (!refresh) {
     const existing = await mysqlJson(`
@@ -5728,7 +6091,7 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
         existing.contentMarkdown = sanitizeTextArtifacts(existing.contentMarkdown);
         existing.html = markdownToHtml(existing.contentMarkdown);
       }
-      return attachDailyWindowLabel(existing);
+      return attachDailyWindowLabel({ ...existing, language: "zh" });
     }
   }
 
@@ -5790,7 +6153,7 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
   `);
   await saveDailyReportItems(date, dailyContext);
 
-  return attachDailyWindowLabel({
+  const report = attachDailyWindowLabel({
     date,
     title,
     contentMarkdown: markdown,
@@ -5803,7 +6166,12 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
     windowStart: formatShanghaiDateTimeISO(dailyContext.window.start),
     windowEnd: formatShanghaiDateTimeISO(dailyContext.window.end),
     generatedAt: formatShanghaiDateTimeISO(new Date()),
+    language: "zh",
   });
+  if (prebuildLocalizations) {
+    await prebuildDailyLocalizations(report);
+  }
+  return report;
 }
 
 async function serveStatic(req, res) {
@@ -7388,6 +7756,7 @@ const server = createServer(async (req, res) => {
       const report = await getDailyReport(url.searchParams.get("date") || getShanghaiDate(), {
         refresh: url.searchParams.get("refresh") === "1",
         windowMode: getDailyWindowModeFromSearch(url.searchParams),
+        language: normalizeDailyLanguage(url.searchParams.get("lang")),
       });
       sendJson(res, 200, {
         ok: true,

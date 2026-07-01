@@ -1517,7 +1517,7 @@ function renderDaily() {
       <div class="daily-layout">
         <div class="daily-main">
           <div class="daily-meta">
-            <strong>${escapeHtml(state.language === "en" ? t("daily.defaultTitle") : (state.dailyReport.title || t("daily.defaultTitle")))}</strong>
+            <strong>${escapeHtml(state.dailyReport.title || t("daily.defaultTitle"))}</strong>
             <span>${escapeHtml(t("daily.meta", {
               model: state.dailyReport.model || "AI",
               sourceCount: state.dailyReport.sourceItemCount || 0,
@@ -2533,6 +2533,7 @@ async function loadDailyReport({ refresh = false, date } = {}) {
     const params = new URLSearchParams();
     if (refresh) params.set("refresh", "1");
     if (date) params.set("date", date);
+    if (state.language === "en") params.set("lang", "en");
     const qs = params.toString();
     const response = await fetch(`/api/daily${qs ? `?${qs}` : ""}`, {
       headers: { accept: "application/json" },
@@ -3757,8 +3758,13 @@ function setLanguage(language) {
     applyStaticTranslations();
     return;
   }
+  const shouldReloadDaily = state.view === "daily";
+  const dailyDate = state.dailyDate;
   state.language = language;
   state.category = "全部";
+  if (shouldReloadDaily) {
+    state.dailyReport = null;
+  }
   saveFilterCategory();
   try {
     localStorage.setItem(languageStorageKey, language);
@@ -3766,6 +3772,9 @@ function setLanguage(language) {
     // ignore storage errors
   }
   renderContent();
+  if (shouldReloadDaily) {
+    loadDailyReport({ date: dailyDate || undefined });
+  }
 }
 
 function initLanguageSwitch() {

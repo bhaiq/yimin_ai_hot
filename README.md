@@ -27,7 +27,7 @@ http://127.0.0.1:4173
 - 实时 RSS 抓取 API：`/api/news`
 - 后台抓取队列：`/api/news?refresh=1` 会立即返回已有文章和 `fetchRun`，实际抓取按 `FEED_FETCH_CONCURRENCY` 限制并发，进度可查 `/api/fetch-runs/latest`
 - 信源列表：`/api/sources`
-- DeepSeek 分批分析、事件聚合后生成并入库的日报：`/api/daily`
+- DeepSeek 分批分析、事件聚合后生成并入库的日报：`/api/daily`；英文版通过 `/api/daily?lang=en` 读取，复用同一天事件素材生成并缓存，不新增主日报记录
 - 日报完整资讯附录：`/api/daily/items`，分页追溯全部候选文章
 - 日报会记录引用明细，今日总结只使用近 7 天未出现过的当天新增事实
 - 信源提报与公开反馈入库；静态打开时回退到本地草稿
@@ -69,6 +69,7 @@ http://127.0.0.1:4173
 - `yimin_articles`：抓取到的文章和热度标签
 - `yimin_fetch_runs`：每次抓取记录
 - `yimin_daily_reports`：DeepSeek 生成的日报
+- `yimin_daily_report_localizations`：日报英文等多语言本地化内容，按 `report_id + language` 缓存，不影响主日报统计
 - `yimin_daily_report_items`：日报引用文章明细，用于近 7 天去重和旧信息降级
 - `yimin_article_daily_analysis`：文章级日报分析缓存，内容未变化时不重复调用 AI
 - `yimin_daily_report_events`：日报事件聚合结果，一项事件可关联多篇来源文章
@@ -166,6 +167,6 @@ curl -X POST https://你的域名/api/daily/departments/generate
 建议每日定时任务顺序：
 
 1. `7:00` 请求 `/api/wx/sync-contacts`
-2. `8:00` 请求 `/api/daily?refresh=1` 生成公共日报
+2. `8:00` 请求 `/api/daily?refresh=1` 生成公共日报，并在成功后预生成英文版缓存
 3. 公共日报成功后请求 `/api/daily/departments/generate`
 4. `8:50` 请求 `/api/push/daily`
