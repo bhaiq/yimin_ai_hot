@@ -5997,14 +5997,15 @@ async function getDailyReportLocalization(baseReport, language, { refresh = fals
   const baseRow = await loadDailyReportBaseRow(baseReport.date);
   if (!baseRow) return null;
 
-  const events = await loadDailyLocalizationEvents(baseRow.id);
-  const inputHash = getDailyLocalizationInputHash(baseRow, events, normalizedLanguage);
   if (!refresh) {
     const cached = await loadDailyLocalization(baseRow.id, normalizedLanguage);
-    if (cached?.inputHash === inputHash) {
+    if (cached?.contentMarkdown) {
       return mergeDailyLocalization(baseRow, cached);
     }
   }
+
+  const events = await loadDailyLocalizationEvents(baseRow.id);
+  const inputHash = getDailyLocalizationInputHash(baseRow, events, normalizedLanguage);
 
   const generationKey = `${baseRow.id}:${normalizedLanguage}:${inputHash}`;
   if (dailyLocalizationGenerationPromises.has(generationKey)) {
