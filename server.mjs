@@ -18,8 +18,8 @@ const dailyCandidatePageSize = Math.max(50, Number(process.env.DAILY_CANDIDATE_P
 const dailyAnalysisBatchSize = Math.max(10, Number(process.env.DAILY_ANALYSIS_BATCH_SIZE || 30));
 const dailyAnalysisConcurrency = Math.max(1, Number(process.env.DAILY_ANALYSIS_CONCURRENCY || 3));
 const dailyFinalPromptMaxChars = Math.max(20000, Number(process.env.DAILY_FINAL_PROMPT_MAX_CHARS || 80000));
-const dailyAnalysisVersion = "daily-analysis-v2";
-const dailyLocalizationVersion = "daily-localization-v1";
+const dailyAnalysisVersion = "daily-analysis-v3";
+const dailyLocalizationVersion = "daily-localization-v2";
 const articleTranslationVersion = "article-translation-v1";
 const articleTranslationBatchSize = Math.max(5, Number(process.env.ARTICLE_TRANSLATION_BATCH_SIZE || 30));
 const articleTranslationConcurrency = Math.max(1, Number(process.env.ARTICLE_TRANSLATION_CONCURRENCY || 2));
@@ -4071,6 +4071,13 @@ const englishLabelMap = new Map([
   ["土耳其", "Turkey"],
   ["香港", "Hong Kong"],
   ["葡萄牙", "Portugal"],
+  ["韩国", "South Korea"],
+  ["日本", "Japan"],
+  ["新加坡", "Singapore"],
+  ["德国", "Germany"],
+  ["法国", "France"],
+  ["意大利", "Italy"],
+  ["爱尔兰", "Ireland"],
   ["巴拿马", "Panama"],
   ["多米尼克", "Dominica"],
   ["瓦努阿图", "Vanuatu"],
@@ -5103,6 +5110,7 @@ function buildDailyAnalysisPrompt(items) {
 - 即使出现 immigration/immigrant/alien/border/CBP/ICE 等词，只要主要内容是刑事执法个案、酒驾或死亡事件、海关查扣、假冒商品、普通公共活动、健康日宣传、天气安排、食品安全、农业渔业、一般劳工关系或普通社会新闻，也必须 relevant=false。
 - 官方机构发布但与签证、身份、申请资格、审理流程、项目政策无关时 relevant=false。
 - 普通旅游、房产、娱乐、体育、一般商业或科技新闻且没有明确移民申请影响时 relevant=false。
+- “职业机会/就业机会/招聘/岗位列表/职位发布/Career Opportunities/Job Opportunities/Job Posting”等招聘或求职信息，除非明确宣布工签、雇主担保、短缺职业配额、移民就业合规等政策变化，否则必须 relevant=false。
 - canonicalTopic 对同一政策或同一事件的不同媒体报道应尽量使用相同表述。
 - 不得编造原文没有的政策、日期、费用或影响。
 - 外文内容翻译成简体中文。
@@ -5523,6 +5531,7 @@ ${eventMaterial}
 内容相关性过滤：
 - 只保留与移民、签证、永久居留、国籍、边境/入境、工签/雇主担保、留学签证、投资移民、难民/庇护、移民机构政策、移民相关就业或教育合规直接相关的资讯。
 - 如果某条资讯明显只是宏观政治、普通旅游、城市生活、房产、商业新闻、体育娱乐、科技产品、灾害事故等，且标题和摘要都看不出与移民客户、移民项目或签证政策有关，必须剔除，不得出现在任何章节。
+- “职业机会/就业机会/招聘/岗位列表/职位发布/Career Opportunities/Job Opportunities/Job Posting”等招聘或求职信息不得进入日报；只有当内容明确涉及工签、雇主担保、短缺职业配额、移民就业合规等政策变化时才可保留。
 - 无法确认是否相关、或可能间接影响移民客户/项目判断的资讯，可以保留。
 - 不要输出“已剔除内容”列表，也不要解释剔除过程。
 
@@ -5553,6 +5562,7 @@ ${eventMaterial}
 - 不要把【延续关注】或【不建议重复】写进“今日总结”。
 - 不要编造政策、日期、费用、影响范围。
 - 明显与移民类内容不相关的信息必须剔除；无法确认是否相关的信息可以保留。
+- 职业机会、招聘岗位、职位列表、求职公告不得出现在任何章节，除非它本身是移民就业/签证政策变化。
 - 发布时间早于“日报可选时间范围”的信息必须剔除；无法确认发布时间但抓取时间较新的信息可以保留。
 - 如果某条信息近 7 天已经出现，只能放在“延续关注”或“不建议重复”。
 - 同一章节内如使用数字编号，必须连续递增，不要每条都写成”1.”。
@@ -5888,7 +5898,7 @@ function formatDailyLocalizationEvents(events) {
 }
 
 function buildEnglishDailyPrompt(baseReport, events) {
-  return `You are a senior immigration industry analyst. Generate an English immigration daily brief based only on the grouped event material below.
+  return `You are a senior immigration industry analyst. Generate an English immigration daily brief that matches the Chinese public daily brief's factual scope and editorial rules.
 
 Date: ${baseReport.date}
 Reporting window: ${baseReport.windowStart || ""} to ${baseReport.windowEnd || ""}
@@ -5897,8 +5907,24 @@ Candidate article count: ${baseReport.sourceItemCount}
 Relevant article count: ${baseReport.relevantItemCount}
 Grouped event count: ${baseReport.eventCount}
 
+Chinese public daily brief (authoritative factual scope):
+${truncate(baseReport.contentMarkdown || "", 16000)}
+
 Grouped event material:
 ${formatDailyLocalizationEvents(events)}
+
+Consistency rules:
+- The Chinese public daily brief is the source of truth for what domestic and overseas colleagues should see.
+- Do not add facts, countries, policies, dates, fees, risks, or action recommendations that are absent from the Chinese public daily brief or its saved grouped events.
+- Do not remove or downgrade material that the Chinese public daily includes as a major new fact unless it is clearly duplicated inside the same English section.
+- Preserve the same section meaning and freshness classification as the Chinese brief: today's new facts stay in Executive Summary/New Today; continuing or repeated items must not become headline news.
+- Use grouped event material only to preserve original links, country/category context, and section labels. Do not use it to introduce a separate English editorial selection.
+
+Content relevance rules, identical to the Chinese daily:
+- Keep only updates directly relevant to immigration, visas, permanent residence, nationality, border/entry, work permits/employer sponsorship, study visas, investment immigration, asylum/refugee policy, immigration agency policy, immigration-related employment compliance, or immigration-related education compliance.
+- Exclude general politics, ordinary tourism, city life, real estate, general business, sports/entertainment, technology products, disasters/incidents, and other non-immigration content when the title and summary do not show a clear immigration client, program, or visa-policy impact.
+- Exclude career opportunity, job opportunity, recruitment, job listing, and job posting content unless the item itself announces a work visa, employer sponsorship, shortage occupation quota, or immigration employment-compliance policy change.
+- Use only material within the reporting window represented by the Chinese public daily.
 
 Section rules:
 - today_new means facts that did not appear in the last 7 days of daily reports.
@@ -5928,6 +5954,7 @@ Give 1-2 practical actions each for sales, copywriting, and project managers.
 Hard requirements:
 - Do not invent policies, dates, fees, eligibility rules, impacts, or conclusions.
 - Do not move continuing or repeated items into the Executive Summary.
+- Do not include career opportunities, recruitment posts, job lists, or job postings in any section unless they are immigration employment/visa policy changes.
 - Preserve original links when a link is available.
 - Translate Chinese event titles and summaries naturally into English.
 - Output English only.`;
@@ -5939,6 +5966,8 @@ function buildEnglishDailyTranslationPrompt(baseReport) {
 Rules:
 - Preserve the factual meaning, Markdown structure, and original links.
 - Do not add new facts, dates, fees, policy interpretations, or conclusions.
+- Preserve the Chinese brief's inclusion/exclusion decisions and freshness classification; do not promote continuing or repeated items into headline news.
+- Exclude career opportunities, recruitment posts, job lists, or job postings unless the Chinese brief explicitly treats them as immigration employment/visa policy changes.
 - Make headings and action recommendations read naturally in English.
 - Output English only.
 
