@@ -2906,7 +2906,7 @@ function syncWxContacts() {
   return wxContactsSyncPromise;
 }
 
-async function sendWxTextCard(accessToken, userIds, title, description, url, buttonText = "查看日报") {
+async function sendWxTextCard(accessToken, userIds, title, description, url, buttonText = "查看日报 / View") {
   const toUser = userIds.join("|");
   if (!toUser) return { errcode: 0, errmsg: "no users" };
 
@@ -2929,25 +2929,43 @@ function pluralizeEnglishUnit(count, singular, plural = `${singular}s`) {
 
 function buildDailyPushTextCard(dailyDate, personalStats = null) {
   const title = "移民热点日报 / Immigration Daily News";
-  const buttonText = "查看日报 / View Daily Brief";
+  const buttonText = "查看日报 / View";
   const sourceCount = Number(personalStats?.sourceCount || 0);
   const itemCount = Number(personalStats?.itemCount || 0);
-  let chineseDescription = `${dailyDate} 移民政策日报已生成，点击查看今日动态。`;
-  let englishDescription = `${dailyDate} Immigration Policy Daily Brief has been generated. Click to view today's updates.`;
+  let lines = [
+    dailyDate,
+    "公共日报已生成",
+    "点击查看今日动态",
+    "",
+    "Daily brief is ready",
+    "Open to view today's updates",
+  ];
 
   if (sourceCount > 0) {
     if (itemCount > 0) {
-      chineseDescription = `${dailyDate} 公共日报已生成，你关注的 ${sourceCount} 个信源有 ${itemCount} 条动态。`;
-      englishDescription = `${dailyDate} The public daily brief has been generated. Your ${sourceCount} followed ${pluralizeEnglishUnit(sourceCount, "source")} ${sourceCount === 1 ? "has" : "have"} ${itemCount} ${pluralizeEnglishUnit(itemCount, "update")} today.`;
+      lines = [
+        dailyDate,
+        "公共日报已生成",
+        `你的关注：${sourceCount} 个信源 · ${itemCount} 条动态`,
+        "",
+        "Daily brief is ready",
+        `Following: ${sourceCount} ${pluralizeEnglishUnit(sourceCount, "source")} · ${itemCount} ${pluralizeEnglishUnit(itemCount, "update")}`,
+      ];
     } else {
-      chineseDescription = `${dailyDate} 公共日报已生成，你关注的 ${sourceCount} 个信源今日暂无新增。`;
-      englishDescription = `${dailyDate} The public daily brief has been generated. Your ${sourceCount} followed ${pluralizeEnglishUnit(sourceCount, "source")} ${sourceCount === 1 ? "has" : "have"} no new updates today.`;
+      lines = [
+        dailyDate,
+        "公共日报已生成",
+        `你的关注：${sourceCount} 个信源 · 今日暂无新增`,
+        "",
+        "Daily brief is ready",
+        `Following: ${sourceCount} ${pluralizeEnglishUnit(sourceCount, "source")} · No new updates today`,
+      ];
     }
   }
 
   return {
     title,
-    description: `${chineseDescription}\n\n${englishDescription}`,
+    description: lines.join("\n"),
     buttonText,
   };
 }
