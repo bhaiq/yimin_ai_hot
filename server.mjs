@@ -101,6 +101,7 @@ let dbReadyPromise = null;
 let activeFetchRun = null;
 let activeArticleTranslationPromise = null;
 let activeArticleRelevancePromise = null;
+const dailyReportGenerationPromises = new Map();
 const dailyLocalizationGenerationPromises = new Map();
 const departmentDailyGenerationPromises = new Map();
 const allDepartmentDailyGenerationPromises = new Map();
@@ -6359,6 +6360,72 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
   return report;
 }
 
+async function readCachedDailyReport(date, { language = "zh" } = {}) {
+  await initDb();
+
+  const normalizedLanguage = normalizeDailyLanguage(language);
+  const baseRow = await loadDailyReportBaseRow(date);
+  if (!baseRow || baseRow.model === "fallback") {
+    return null;
+  }
+
+  if (baseRow.contentMarkdown) {
+    baseRow.contentMarkdown = sanitizeTextArtifacts(baseRow.contentMarkdown);
+    baseRow.html = markdownToHtml(baseRow.contentMarkdown);
+  }
+
+  const baseReport = attachDailyWindowLabel({ ...baseRow, language: "zh" });
+  if (normalizedLanguage === "zh") {
+    return baseReport;
+  }
+
+  const cached = await loadDailyLocalization(baseRow.id, normalizedLanguage);
+  if (!cached?.contentMarkdown || cached.model === "fallback") {
+    return null;
+  }
+  return mergeDailyLocalization(baseRow, cached);
+}
+
+function startDailyReportInBackground(date, { refresh = false, windowMode = "calendar", language = "zh" } = {}) {
+  const normalizedLanguage = normalizeDailyLanguage(language);
+  const generationKey = `${date}:${normalizeDailyWindowMode(windowMode)}:${normalizedLanguage}:${refresh ? "refresh" : "cached"}`;
+  if (dailyReportGenerationPromises.has(generationKey)) {
+    return dailyReportGenerationPromises.get(generationKey);
+  }
+
+  const generationPromise = getDailyReport(date, {
+    refresh,
+    windowMode,
+    language: normalizedLanguage,
+    prebuildLocalizations: normalizedLanguage === "zh",
+  })
+    .catch((error) => {
+      console.error(
+        `Daily report generation failed for ${date}:`,
+        error instanceof Error ? error.message : String(error),
+      );
+      return {
+        ok: false,
+        date,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    })
+    .finally(() => {
+      dailyReportGenerationPromises.delete(generationKey);
+    });
+
+  dailyReportGenerationPromises.set(generationKey, generationPromise);
+  return generationPromise;
+}
+
+function isDailyReportGenerationRunning(date, { windowMode = "calendar", language = "zh" } = {}) {
+  const normalizedLanguage = normalizeDailyLanguage(language);
+  const normalizedWindowMode = normalizeDailyWindowMode(windowMode);
+  return ["refresh", "cached"].some((mode) => (
+    dailyReportGenerationPromises.has(`${date}:${normalizedWindowMode}:${normalizedLanguage}:${mode}`)
+  ));
+}
+
 async function serveStatic(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const decodedPath = decodeURIComponent(url.pathname);
@@ -8014,10 +8081,47 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/daily") {
-      const report = await getDailyReport(url.searchParams.get("date") || getShanghaiDate(), {
-        refresh: url.searchParams.get("refresh") === "1",
-        windowMode: getDailyWindowModeFromSearch(url.searchParams),
-        language: normalizeDailyLanguage(url.searchParams.get("lang")),
+      const date = url.searchParams.get("date") || getShanghaiDate();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: "date must use YYYY-MM-DD",
+        });
+        return;
+      }
+
+      const refresh = url.searchParams.get("refresh") === "1";
+      const sync = url.searchParams.get("sync") === "1";
+      const windowMode = getDailyWindowModeFromSearch(url.searchParams);
+      const language = normalizeDailyLanguage(url.searchParams.get("lang"));
+      if (!sync) {
+        if (!refresh) {
+          const cached = await readCachedDailyReport(date, { language });
+          if (cached) {
+            sendJson(res, 200, {
+              ok: true,
+              report: cached,
+            });
+            return;
+          }
+        }
+
+        startDailyReportInBackground(date, { refresh, windowMode, language });
+        sendJson(res, 202, {
+          ok: true,
+          date,
+          language,
+          running: true,
+          status: isDailyReportGenerationRunning(date, { windowMode, language }) ? "running" : "queued",
+          message: "日报生成已在后台开始，可稍后刷新日报页面查看结果；如需等待结果，请加 sync=1。",
+        });
+        return;
+      }
+
+      const report = await getDailyReport(date, {
+        refresh,
+        windowMode,
+        language,
       });
       sendJson(res, 200, {
         ok: true,

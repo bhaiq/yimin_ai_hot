@@ -27,7 +27,7 @@ http://127.0.0.1:4173
 - 实时 RSS 抓取 API：`/api/news`
 - 后台抓取队列：`/api/news?refresh=1` 会立即返回已有文章和 `fetchRun`，实际抓取按 `FEED_FETCH_CONCURRENCY` 限制并发，进度可查 `/api/fetch-runs/latest`
 - 信源列表：`/api/sources`
-- DeepSeek 分批分析、事件聚合后生成并入库的日报：`/api/daily`；英文版通过 `/api/daily?lang=en` 读取，复用同一天事件素材生成并缓存，不新增主日报记录
+- DeepSeek 分批分析、事件聚合后生成并入库的日报：`/api/daily`；`refresh=1` 或无缓存时默认异步后台生成，`sync=1` 才同步等待；英文版通过 `/api/daily?lang=en` 读取，复用同一天事件素材生成并缓存，不新增主日报记录
 - 日报完整资讯附录：`/api/daily/items`，分页追溯全部候选文章
 - 日报会记录引用明细，今日总结只使用近 7 天未出现过的当天新增事实
 - 信源提报与公开反馈入库；静态打开时回退到本地草稿
@@ -107,7 +107,7 @@ http://127.0.0.1:4173
 
 - ~~给后台增加信源审核开关，把 `source_submissions` 里的有效源转为启用源~~（已完成）
 - 将政策雷达从静态规则升级为基于文章主题和 AI 分类的数据库视图
-- 增加定时任务，按小时执行 `/api/news?refresh=1` 启动后台抓取；每天 7 点执行 `/api/daily?refresh=1` 生成过去 24 小时早报。若需要自然日完整日报，可调用 `/api/daily?refresh=1&window=calendar&date=YYYY-MM-DD`
+- 增加定时任务，按小时执行 `/api/news?refresh=1` 启动后台抓取；每天 7 点执行 `/api/daily?refresh=1` 后台生成过去 24 小时早报。若需要自然日完整日报，可调用 `/api/daily?refresh=1&window=calendar&date=YYYY-MM-DD`；人工调试需要等待完整结果时加 `sync=1`
 - ~~同步企业微信部门，增加部门默认订阅与个人覆盖规则~~（已完成）
 - ~~按直属部门生成 AI 部门重点，并按部门、日期、信源配置和文章集合缓存~~（已完成）
 - 个性化日报下一阶段：根据使用反馈完善部门提示词、负责人确认和重新生成管理能力
@@ -173,6 +173,6 @@ http://127.0.0.1:4173/api/daily/departments/generate?refresh=1
 建议每日定时任务顺序：
 
 1. `7:00` 请求 `/api/wx/sync-contacts`
-2. `8:00` 请求 `/api/daily?refresh=1` 生成公共日报，并在成功后预生成英文版缓存
+2. `8:00` 请求 `/api/daily?refresh=1` 后台生成公共日报，并在成功后预生成英文版缓存
 3. 公共日报成功后请求 `/api/daily/departments/generate`
 4. `8:50` 请求 `/api/push/daily`
