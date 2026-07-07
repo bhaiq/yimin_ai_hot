@@ -102,6 +102,7 @@ let activeArticleTranslationPromise = null;
 let activeArticleRelevancePromise = null;
 const dailyLocalizationGenerationPromises = new Map();
 const departmentDailyGenerationPromises = new Map();
+const allDepartmentDailyGenerationPromises = new Map();
 
 async function loadEnv() {
   const envPath = join(rootDir, ".env");
@@ -7475,6 +7476,38 @@ async function generateAllDepartmentDailyReports(date, { refresh = false } = {})
   };
 }
 
+function startAllDepartmentDailyReportsInBackground(date, { refresh = false } = {}) {
+  const generationKey = `${date}:${refresh ? "refresh" : "cached"}`;
+  if (allDepartmentDailyGenerationPromises.has(generationKey)) {
+    return allDepartmentDailyGenerationPromises.get(generationKey);
+  }
+
+  const generationPromise = generateAllDepartmentDailyReports(date, { refresh })
+    .catch((error) => {
+      console.error(
+        `Department daily batch generation failed for ${date}:`,
+        error instanceof Error ? error.message : String(error),
+      );
+      return {
+        ok: false,
+        date,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    })
+    .finally(() => {
+      allDepartmentDailyGenerationPromises.delete(generationKey);
+    });
+
+  allDepartmentDailyGenerationPromises.set(generationKey, generationPromise);
+  return generationPromise;
+}
+
+function isAllDepartmentDailyGenerationRunning(date) {
+  return ["refresh", "cached"].some((mode) => (
+    allDepartmentDailyGenerationPromises.has(`${date}:${mode}`)
+  ));
+}
+
 async function readRequestBody(req) {
   return new Promise((resolvePromise, reject) => {
     let body = "";
@@ -7977,9 +8010,21 @@ const server = createServer(async (req, res) => {
       }
 
       try {
-        const result = await generateAllDepartmentDailyReports(date, {
-          refresh: body.refresh === true || url.searchParams.get("refresh") === "1",
-        });
+        const refresh = body.refresh === true || url.searchParams.get("refresh") === "1";
+        const sync = body.sync === true || url.searchParams.get("sync") === "1";
+        if (!sync) {
+          startAllDepartmentDailyReportsInBackground(date, { refresh });
+          sendJson(res, 202, {
+            ok: true,
+            date,
+            running: true,
+            status: isAllDepartmentDailyGenerationRunning(date) ? "running" : "queued",
+            message: "部门日报生成已在后台开始，可稍后刷新日报页面查看结果；如需等待结果，请加 sync=1。",
+          });
+          return;
+        }
+
+        const result = await generateAllDepartmentDailyReports(date, { refresh });
         sendJson(res, result.failedCount ? 207 : 200, {
           ok: result.failedCount === 0,
           ...result,
