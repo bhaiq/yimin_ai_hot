@@ -160,6 +160,12 @@ curl -X POST https://你的域名/api/wx/sync-contacts
 curl -X POST https://你的域名/api/daily/departments/generate
 ```
 
+本地调试也可以直接访问：
+
+```text
+http://127.0.0.1:4173/api/daily/departments/generate?refresh=1
+```
+
 接口只处理已经配置默认关注信源的真实部门，并发生成数量为 2。当天已有部门日报记录时直接复用，不再重复生成；公共日报尚未生成时返回 `409`；部分部门失败时返回 `207` 和逐部门结果，其他部门仍会继续生成。需要人工强制覆盖当天记录时可请求 `?refresh=1`。
 
 手机端和 PC 网页端的 `/api/daily/department` 只读取已有部门日报，不触发懒生成。常规生成应由每日定时任务在公共日报成功后调用上述批量接口。

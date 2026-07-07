@@ -15,9 +15,10 @@ const requestTimeoutMs = Number(process.env.FEED_TIMEOUT_MS || 9000);
 const maxItemsPerSource = Number(process.env.MAX_ITEMS_PER_SOURCE || 16);
 const maxTotalItems = Number(process.env.MAX_TOTAL_ITEMS || 80);
 const dailyCandidatePageSize = Math.max(50, Number(process.env.DAILY_CANDIDATE_PAGE_SIZE || 200));
-const dailyAnalysisBatchSize = Math.max(10, Number(process.env.DAILY_ANALYSIS_BATCH_SIZE || 30));
-const dailyAnalysisConcurrency = Math.max(1, Number(process.env.DAILY_ANALYSIS_CONCURRENCY || 3));
+const dailyAnalysisBatchSize = Math.max(1, Number(process.env.DAILY_ANALYSIS_BATCH_SIZE || 10));
+const dailyAnalysisConcurrency = Math.max(1, Number(process.env.DAILY_ANALYSIS_CONCURRENCY || 1));
 const dailyFinalPromptMaxChars = Math.max(20000, Number(process.env.DAILY_FINAL_PROMPT_MAX_CHARS || 80000));
+const deepseekTimeoutMs = Math.max(1000, Number(process.env.DEEPSEEK_TIMEOUT_MS || 120000));
 const dailyAnalysisVersion = "daily-analysis-v3";
 const dailyLocalizationVersion = "daily-localization-v2";
 const articleTranslationVersion = "article-translation-v1";
@@ -1700,18 +1701,23 @@ async function listPendingArticleRelevanceAnalyses(limit = articleRelevanceMaxPe
         'heat', heat,
         'impact', impact,
         'tags', CAST(tags_json AS JSON),
-        'analysisContentHash', analysis_content_hash
+        'analysisContentHash', analysis_content_hash,
+        'analysisModel', analysis_model
       )
     ), JSON_ARRAY())
     FROM (
-      SELECT a.*, s.name AS source_name, ad.content_hash AS analysis_content_hash
+      SELECT a.*, s.name AS source_name, ad.content_hash AS analysis_content_hash, ad.model AS analysis_model
       FROM yimin_articles a
       JOIN yimin_sources s ON s.id = a.source_id
       LEFT JOIN yimin_article_daily_analysis ad
         ON ad.article_hash = a.dedupe_hash
        AND ad.analysis_version = ${sqlString(dailyAnalysisVersion)}
       ORDER BY
-        CASE WHEN ad.article_hash IS NULL THEN 0 ELSE 1 END,
+        CASE
+          WHEN ad.article_hash IS NULL THEN 0
+          WHEN ad.model = 'rules' THEN 1
+          ELSE 2
+        END,
         COALESCE(a.published_at, a.fetched_at) DESC,
         a.id DESC
       LIMIT ${sqlNumber(scanLimit, Math.max(articleRelevanceMaxPerRun * 3, articleRelevanceMaxPerRun))}
@@ -1719,7 +1725,7 @@ async function listPendingArticleRelevanceAnalyses(limit = articleRelevanceMaxPe
   `)) || [];
 
   return rows
-    .filter((item) => item.analysisContentHash !== getDailyAnalysisContentHash(item))
+    .filter((item) => item.analysisContentHash !== getDailyAnalysisContentHash(item) || item.analysisModel === "rules")
     .slice(0, limit);
 }
 
@@ -5140,9 +5146,47 @@ async function analyzeDailyArticleBatch(items) {
       });
     }
   } catch (error) {
-    console.error("Daily article analysis batch fallback:", error instanceof Error ? error.message : String(error));
+    if (items.length > 1 && shouldSplitDailyAnalysisBatch(error)) {
+      const mid = Math.ceil(items.length / 2);
+      console.warn(
+        `Daily article analysis batch retrying split ${items.length} -> ${mid}+${items.length - mid}: ${formatErrorMessage(error)}`,
+      );
+      const results = await runWithConcurrency(
+        [items.slice(0, mid), items.slice(mid)],
+        1,
+        (batch) => analyzeDailyArticleBatch(batch),
+      );
+      return results.flat();
+    }
+    console.error("Daily article analysis batch fallback:", formatErrorMessage(error));
   }
   return [...fallbackById.values()];
+}
+
+function shouldSplitDailyAnalysisBatch(error) {
+  const message = formatErrorMessage(error);
+  return /DeepSeek HTTP (408|409|425|429|5\d\d)\b/i.test(message)
+    || /timeout|timed out|aborted|fetch failed|network/i.test(message)
+    || /DeepSeek analysis did not return a JSON array|DeepSeek analysis JSON is not an array|Unexpected end of JSON input|DeepSeek returned empty content/i.test(message);
+}
+
+function formatErrorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function formatAiGenerationError(error) {
+  const message = formatErrorMessage(error || "DeepSeek generation failed");
+  const httpMatch = message.match(/^DeepSeek HTTP\s+(\d+)/i);
+  if (httpMatch) {
+    const status = Number(httpMatch[1]);
+    if (status === 504) return "DeepSeek HTTP 504: 网关超时";
+    if (status >= 500) return `DeepSeek HTTP ${status}: 服务暂时不可用`;
+    return truncate(stripHtmlTags(message), 240);
+  }
+  if (/timeout|timed out|aborted/i.test(message)) {
+    return "DeepSeek 请求超时";
+  }
+  return truncate(stripHtmlTags(message), 240);
 }
 
 async function loadCachedDailyAnalyses(items) {
@@ -5221,7 +5265,7 @@ async function getDailyArticleAnalyses(items) {
   for (const item of items) {
     const contentHash = getDailyAnalysisContentHash(item);
     const existing = cached.get(item.id);
-    if (existing?.contentHash === contentHash) {
+    if (existing?.contentHash === contentHash && existing.model !== "rules") {
       analyses.set(item.id, {
         ...existing,
         relevant: Boolean(Number(existing.relevant)),
@@ -5448,26 +5492,6 @@ ${documents.join("\n\n--- 批次分隔 ---\n\n")}`;
   }
 }
 
-async function buildDailyEventMaterial(events) {
-  const direct = formatDailyPromptEvents(events);
-  if (direct.length <= dailyFinalPromptMaxChars) return direct;
-
-  let documents = await runWithConcurrency(
-    chunkArray(events, 40),
-    dailyAnalysisConcurrency,
-    (chunk) => reduceDailyEventChunk(chunk),
-  );
-
-  while (documents.join("\n\n").length > dailyFinalPromptMaxChars && documents.length > 1) {
-    documents = await runWithConcurrency(
-      chunkArray(documents, 6),
-      dailyAnalysisConcurrency,
-      (group) => reduceDailyDigestDocuments(group),
-    );
-  }
-  return documents.join("\n\n");
-}
-
 function dailyItemLink(item) {
   const title = sanitizeTextArtifacts(item.title);
   return item.url ? `[${title}](${item.url})` : title;
@@ -5479,6 +5503,7 @@ function buildFallbackDailyMarkdown(date, context, reason = "") {
   const continuing = context.continuing || [];
   const repeated = context.repeated || [];
   const windowText = context.window?.label || date;
+  const cleanReason = reason ? formatAiGenerationError(reason) : "";
 
   return `# 移民热点日报 | ${date}
 
@@ -5488,7 +5513,7 @@ function buildFallbackDailyMarkdown(date, context, reason = "") {
 
 ${todayNew.length ? `本期发现 ${todayNew.length} 条未在近 7 天日报中出现的新增事实，重点集中在 ${[...new Set(todayNew.map((item) => item.country).filter(Boolean))].slice(0, 4).join("、") || "多个地区"}。` : "本期暂无可确认的重大新增事实，避免把旧热点包装成今日新闻。"}
 
-${reason ? `> AI 日报生成暂不可用：${reason}` : ""}
+${cleanReason ? `> AI 日报生成暂不可用：${cleanReason}` : ""}
 
 ## 二、今日新增
 
@@ -5567,6 +5592,43 @@ ${eventMaterial}
 - 如果某条信息近 7 天已经出现，只能放在“延续关注”或“不建议重复”。
 - 同一章节内如使用数字编号，必须连续递增，不要每条都写成”1.”。
 - 所有输出必须使用简体中文，遇到英文、希腊文或其他语言的标题和摘要必须翻译为中文，不得保留原文。`;
+}
+
+async function buildDailyEventMaterial(events) {
+  const direct = formatDailyPromptEvents(events);
+  if (direct.length <= dailyFinalPromptMaxChars) return direct;
+
+  let documents = await runWithConcurrency(
+    chunkArray(events, 40),
+    dailyAnalysisConcurrency,
+    (chunk) => reduceDailyEventChunk(chunk),
+  );
+
+  while (documents.join("\n\n").length > dailyFinalPromptMaxChars && documents.length > 1) {
+    documents = await runWithConcurrency(
+      chunkArray(documents, 6),
+      dailyAnalysisConcurrency,
+      (group) => reduceDailyDigestDocuments(group),
+    );
+  }
+
+  return documents.join("\n\n");
+}
+
+async function generateDailyMarkdown(date, dailyContext) {
+  try {
+    const markdown = await callDeepSeek(await buildDailyPrompt(date, dailyContext));
+    return {
+      markdown,
+      model: deepseekConfig.model,
+    };
+  } catch (error) {
+    console.warn(`Daily report DeepSeek failed: ${formatAiGenerationError(error)}`);
+    return {
+      markdown: buildFallbackDailyMarkdown(date, dailyContext, formatAiGenerationError(error)),
+      model: "fallback",
+    };
+  }
 }
 
 function getDailyContextItems(context) {
@@ -5673,8 +5735,9 @@ async function callDeepSeek(prompt, options = {}) {
     || "你是移民政策日报编辑，只能基于用户提供的信息进行归纳，不能编造政策、日期、费用或结论。输出必须使用简体中文，遇到英文或其他语言的源材料必须翻译为中文，不要保留原文。";
   const temperature = Number.isFinite(Number(options.temperature)) ? Number(options.temperature) : 0.25;
 
-  const response = await fetch(`${deepseekConfig.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+  const response = await fetch(getDeepSeekChatCompletionsUrl(), {
     method: "POST",
+    signal: AbortSignal.timeout(deepseekTimeoutMs),
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${deepseekConfig.apiKey}`,
@@ -5714,6 +5777,13 @@ async function callDeepSeek(prompt, options = {}) {
   );
 
   return sanitizeTextArtifacts(content);
+}
+
+function getDeepSeekChatCompletionsUrl() {
+  const baseUrl = deepseekConfig.baseUrl.replace(/\/+$/, "");
+  return baseUrl.endsWith("/chat/completions")
+    ? baseUrl
+    : `${baseUrl}/chat/completions`;
 }
 
 function attachDailyWindowLabel(report) {
@@ -6134,7 +6204,7 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
       LIMIT 1;
     `);
 
-    if (existing) {
+    if (existing && existing.model !== "fallback") {
       if (existing.contentMarkdown) {
         existing.contentMarkdown = sanitizeTextArtifacts(existing.contentMarkdown);
         existing.html = markdownToHtml(existing.contentMarkdown);
@@ -6148,18 +6218,9 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
   const relevantItemCount = dailyContext.relevantItems.length;
   const eventCount = dailyContext.events.length;
 
-  let markdown;
-  let model = deepseekConfig.model;
-  try {
-    markdown = await callDeepSeek(await buildDailyPrompt(date, dailyContext));
-  } catch (error) {
-    model = "fallback";
-    markdown = buildFallbackDailyMarkdown(
-      date,
-      dailyContext,
-      error instanceof Error ? error.message : String(error),
-    );
-  }
+  const generated = await generateDailyMarkdown(date, dailyContext);
+  let markdown = generated.markdown;
+  let model = generated.model;
   markdown = sanitizeTextArtifacts(markdown);
 
   const title = dailyContext.window.mode === "last24h" ? `移民热点早报（${date}）` : `移民热点日报（${date}）`;
@@ -6994,6 +7055,41 @@ ${articleMaterial || "暂无。"}
 - 全部使用简体中文。`;
 }
 
+async function generateDepartmentDailyMarkdown({ date, department, input }) {
+  try {
+    const markdown = await callDeepSeek(buildDepartmentDailyPrompt({
+      date,
+      department,
+      sources: input.sources,
+      items: input.items,
+      publicMarkdown: input.report.contentMarkdown,
+    }));
+    return {
+      markdown,
+      model: deepseekConfig.model,
+      status: "generated",
+      error: "",
+    };
+  } catch (error) {
+    const errorMessage = formatDepartmentDailyError(error);
+    console.warn(`Department daily DeepSeek failed for ${department.id}: ${errorMessage}`);
+    return {
+      markdown: buildDepartmentDailyFallbackMarkdown(department, input.items, errorMessage),
+      model: "fallback",
+      status: "fallback",
+      error: errorMessage,
+    };
+  }
+}
+
+function formatDepartmentDailyError(error) {
+  return formatAiGenerationError(error || "DeepSeek department daily generation failed");
+}
+
+function stripHtmlTags(value) {
+  return sanitizeTextArtifacts(value).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
 async function getDepartmentDailyInput(department, date) {
   const report = await mysqlJson(`
     SELECT JSON_OBJECT(
@@ -7237,6 +7333,7 @@ async function generateDepartmentDailyReport(department, date, { refresh = false
       && existing
       && existing.sourceConfigHash === input.sourceConfigHash
       && existing.inputHash === input.inputHash
+      && existing.status !== "fallback"
     ) {
       return normalizeDepartmentDailyReport(existing);
     }
@@ -7255,33 +7352,16 @@ async function generateDepartmentDailyReport(department, date, { refresh = false
       });
     }
 
-    let markdown;
-    let model = deepseekConfig.model;
-    let status = "generated";
-    let errorMessage = "";
-    try {
-      markdown = await callDeepSeek(buildDepartmentDailyPrompt({
-        date,
-        department,
-        sources: input.sources,
-        items: input.items,
-        publicMarkdown: input.report.contentMarkdown,
-      }));
-    } catch (error) {
-      status = "fallback";
-      model = "fallback";
-      errorMessage = error instanceof Error ? error.message : String(error);
-      markdown = buildDepartmentDailyFallbackMarkdown(department, input.items, errorMessage);
-    }
+    const generated = await generateDepartmentDailyMarkdown({ date, department, input });
 
     return saveDepartmentDailyReport({
       date,
       department,
       input,
-      markdown,
-      model,
-      status,
-      error: errorMessage,
+      markdown: generated.markdown,
+      model: generated.model,
+      status: generated.status,
+      error: generated.error,
     });
   })().finally(() => {
     departmentDailyGenerationPromises.delete(generationKey);
@@ -7395,7 +7475,7 @@ async function generateAllDepartmentDailyReports(date, { refresh = false } = {})
   };
 }
 
-async function readJsonBody(req) {
+async function readRequestBody(req) {
   return new Promise((resolvePromise, reject) => {
     let body = "";
     req.on("data", (chunk) => {
@@ -7406,19 +7486,44 @@ async function readJsonBody(req) {
       }
     });
     req.on("end", () => {
-      if (!body.trim()) {
-        resolvePromise({});
-        return;
-      }
-
-      try {
-        resolvePromise(JSON.parse(body));
-      } catch {
-        reject(new Error("Invalid JSON body"));
-      }
+      resolvePromise(body);
     });
     req.on("error", reject);
   });
+}
+
+async function readJsonBody(req) {
+  const body = await readRequestBody(req);
+  if (!body.trim()) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new Error("Invalid JSON body");
+  }
+}
+
+async function readOptionalJsonOrFormBody(req) {
+  const body = await readRequestBody(req);
+  const trimmed = body.trim();
+  if (!trimmed) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    const contentType = String(req.headers["content-type"] || "").toLowerCase();
+    if (
+      contentType.includes("application/x-www-form-urlencoded")
+      || /^[^=&\s]+=[\s\S]*$/.test(trimmed)
+    ) {
+      return Object.fromEntries(new URLSearchParams(trimmed));
+    }
+    return {};
+  }
 }
 
 const server = createServer(async (req, res) => {
@@ -7855,8 +7960,13 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (url.pathname === "/api/daily/departments/generate" && req.method === "POST") {
-      const body = await readJsonBody(req);
+    if (url.pathname === "/api/daily/departments/generate") {
+      if (!["GET", "POST"].includes(req.method)) {
+        sendJson(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+
+      const body = req.method === "POST" ? await readOptionalJsonOrFormBody(req) : {};
       const date = String(body.date || url.searchParams.get("date") || getShanghaiDate());
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
         sendJson(res, 400, {
