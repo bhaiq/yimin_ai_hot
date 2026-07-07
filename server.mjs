@@ -19,6 +19,7 @@ const dailyAnalysisBatchSize = Math.max(1, Number(process.env.DAILY_ANALYSIS_BAT
 const dailyAnalysisConcurrency = Math.max(1, Number(process.env.DAILY_ANALYSIS_CONCURRENCY || 1));
 const dailyFinalPromptMaxChars = Math.max(20000, Number(process.env.DAILY_FINAL_PROMPT_MAX_CHARS || 80000));
 const deepseekTimeoutMs = Math.max(1000, Number(process.env.DEEPSEEK_TIMEOUT_MS || 120000));
+const deepseekStreamEnabled = process.env.DEEPSEEK_STREAM !== "0";
 const dailyAnalysisVersion = "daily-analysis-v3";
 const dailyLocalizationVersion = "daily-localization-v2";
 const articleTranslationVersion = "article-translation-v1";
@@ -5746,6 +5747,7 @@ async function callDeepSeek(prompt, options = {}) {
     body: JSON.stringify({
       model: deepseekConfig.model,
       temperature,
+      stream: deepseekStreamEnabled,
       messages: [
         {
           role: "system",
@@ -5764,8 +5766,11 @@ async function callDeepSeek(prompt, options = {}) {
     throw new Error(`DeepSeek HTTP ${response.status}: ${text.slice(0, 180)}`);
   }
 
-  const data = await response.json();
-  let content = data.choices?.[0]?.message?.content?.trim();
+  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+  let content = deepseekStreamEnabled && !contentType.includes("application/json")
+    ? await readOpenAICompatibleStream(response)
+    : await readOpenAICompatibleJson(response);
+  content = content.trim();
   if (!content) {
     throw new Error("DeepSeek returned empty content");
   }
@@ -5778,6 +5783,76 @@ async function callDeepSeek(prompt, options = {}) {
   );
 
   return sanitizeTextArtifacts(content);
+}
+
+async function readOpenAICompatibleJson(response) {
+  const data = await response.json();
+  return data.choices?.[0]?.message?.content || "";
+}
+
+async function readOpenAICompatibleStream(response) {
+  if (!response.body) {
+    return readOpenAICompatibleJson(response);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+
+  const processLine = (rawLine) => {
+    const line = rawLine.trim();
+    if (!line || line.startsWith(":")) {
+      return false;
+    }
+    if (!line.startsWith("data:")) {
+      return false;
+    }
+
+    const data = line.slice(5).trim();
+    if (!data || data === "[DONE]") {
+      return data === "[DONE]";
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      return false;
+    }
+    if (parsed.error) {
+      throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+    }
+
+    const choice = parsed.choices?.[0] || {};
+    content += choice.delta?.content
+      || choice.message?.content
+      || choice.text
+      || "";
+    return false;
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (processLine(line)) {
+        return content;
+      }
+    }
+  }
+
+  buffer += decoder.decode();
+  for (const line of buffer.split(/\r?\n/)) {
+    if (processLine(line)) {
+      break;
+    }
+  }
+  return content;
 }
 
 function getDeepSeekChatCompletionsUrl() {
