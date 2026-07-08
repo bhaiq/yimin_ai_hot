@@ -20,7 +20,7 @@ const dailyAnalysisConcurrency = Math.max(1, Number(process.env.DAILY_ANALYSIS_C
 const dailyFinalPromptMaxChars = Math.max(20000, Number(process.env.DAILY_FINAL_PROMPT_MAX_CHARS || 80000));
 const deepseekTimeoutMs = Math.max(1000, Number(process.env.DEEPSEEK_TIMEOUT_MS || 120000));
 const deepseekStreamEnabled = process.env.DEEPSEEK_STREAM !== "0";
-const dailyAnalysisVersion = "daily-analysis-v3";
+const dailyAnalysisVersion = "daily-analysis-v4";
 const dailyLocalizationVersion = "daily-localization-v2";
 const articleTranslationVersion = "article-translation-v1";
 const articleTranslationBatchSize = Math.max(5, Number(process.env.ARTICLE_TRANSLATION_BATCH_SIZE || 30));
@@ -5121,6 +5121,16 @@ function buildDailyAnalysisPrompt(items) {
 - 普通旅游、房产、娱乐、体育、一般商业或科技新闻且没有明确移民申请影响时 relevant=false。
 - “职业机会/就业机会/招聘/岗位列表/职位发布/Career Opportunities/Job Opportunities/Job Posting”等招聘或求职信息，除非明确宣布工签、雇主担保、短缺职业配额、移民就业合规等政策变化，否则必须 relevant=false。
 - canonicalTopic 对同一政策或同一事件的不同媒体报道应尽量使用相同表述。
+- canonicalTopic 必须基于原文核心事实，不得添加原文没有的断言或结论。
+- canonicalTopic 避免使用“勒令”“最后通牒”“终止”“关闭”等绝对化、煽动性词汇，除非原文白纸黑字明确为此类行动，且没有任何缓冲或谈判空间。
+- 如果原文包含“警告”“可能”“如果…否则…”“建议”“提议”等条件性表述，canonicalTopic 必须如实反映该条件性，例如使用“欧盟警告称可能…”“欧盟提议…否则面临…”等措辞。
+- canonicalTopic 应平衡反映事件中的主要行动方和回应方，必要时可包含“双方回应”“谈判中”等词语。
+- summaryZh 必须完整覆盖原文核心信息：谁、对谁、做了什么，该动作是最终决定还是提议/警告/谈判筹码，有无时间期限、条件、过渡期、替代方案，以及相关各方的直接回应或已知立场。
+- summaryZh 务必区分事实陈述和观点/推测；原文引用的官方声明、信件内容等可作为事实呈现，分析性语言必须注明出处或使用“据报道”“分析认为”等措辞。
+- 如果原文提到某项措施是为了达到某个目的，例如测试系统、加强审查，summaryZh 必须体现这一目的，不能只截取威胁部分。
+- summaryZh 应客观中立，不偏向任何一方，但要如实反映各方矛盾或共识。
+- summaryZh 避免使用“震惊”“重磅”“突发”等情绪化词汇，除非原文本身以此为标题且事实确凿。
+- 输出前必须自查：canonicalTopic 是否可能让只读标题的读者产生误解，如可能则修改；summaryZh 是否忽略“仅当…才…”等关键限制条件，如有则补充；各方回应是否都得到体现，若一方明确反驳或拒绝必须写出；原文中的“截至…”“过渡期至…”等时间节点是否准确反映。
 - 不得编造原文没有的政策、日期、费用或影响。
 - 外文内容翻译成简体中文。
 
@@ -5566,6 +5576,25 @@ ${eventMaterial}
 发布时间过滤：
 - 只使用“日报可选时间范围”内的资讯；发布时间早于该范围的内容不得出现在任何章节。
 - 如果没有明确发布时间，但抓取时间在“日报可选时间范围”内，可以保留。
+
+标题生成规则：
+- 标题必须基于原文核心事实，不得添加原文没有的断言或结论。
+- 避免使用“勒令”“最后通牒”“终止”“关闭”等绝对化、煽动性词汇，除非原文白纸黑字明确为此类行动，且没有任何缓冲或谈判空间。
+- 如果原文包含“警告”“可能”“如果…否则…”“建议”“提议”等条件性表述，标题应如实反映该条件性，例如使用“欧盟警告称可能…”“欧盟提议…否则面临…”等措辞。
+- 标题应平衡反映事件中的主要行动方和回应方，必要时可包含“双方回应”“谈判中”等词语。
+
+摘要生成规则：
+- 摘要必须完整覆盖原文的核心信息，包括谁、对谁、做了什么；该动作是最终决定，还是提议/警告/谈判筹码；有无时间期限、条件、过渡期、替代方案；相关各方的直接回应或已知立场。
+- 务必区分“事实陈述”和“观点/推测”。原文中引用的官方声明、信件内容等作为事实呈现，分析性语言应注明出处或使用“据报道”“分析认为”等。
+- 如果原文提到某项措施是为了达到某个目的，例如测试系统、加强审查，摘要中必须体现这一目的，不能只截取威胁部分。
+- 摘要应客观中立，不偏向任何一方，但也要如实反映各方矛盾或共识。
+- 避免使用“震惊”“重磅”“突发”等情绪化词汇，除非原文本身以此为标题且事实确凿。
+
+自查要求：
+- 输出前，请对照原文检查标题是否可能让只读标题的读者产生误解。如果是，请修改。
+- 摘要中是否有被忽略的关键限制条件，例如“仅当…才…”。如果有，请补充。
+- 各方回应是否都得到了体现。如果一方明确反驳或拒绝，应一并写出。
+- 原文中的时间节点，例如“截至…”“过渡期至…”，是否准确反映。
 
 请严格使用 Markdown，包含以下六节：
 ## 一、今日总结
@@ -6073,6 +6102,22 @@ Content relevance rules, identical to the Chinese daily:
 - Exclude career opportunity, job opportunity, recruitment, job listing, and job posting content unless the item itself announces a work visa, employer sponsorship, shortage occupation quota, or immigration employment-compliance policy change.
 - Use only material within the reporting window represented by the Chinese public daily.
 
+Headline and summary rules, identical to the Chinese daily:
+- Headlines must be based on the source material's core facts and must not add assertions or conclusions absent from the source.
+- Avoid absolute or sensational terms such as "ordered", "ultimatum", "terminated", or "closed" unless the source explicitly describes that exact action with no buffer, condition, negotiation, or transition path.
+- If the source uses conditional language such as "warned", "may", "if...otherwise", "recommended", or "proposed", preserve that conditional nature in the English headline and summary.
+- Balance the main actor and the responding party where relevant; use wording such as "both sides responded" or "talks continue" when the source supports it.
+- Summaries must cover who acted, who was affected, what was done or stated, whether it is a final decision or a proposal/warning/negotiating position, any deadline, condition, transition period, alternative, and known responses or positions from relevant parties.
+- Distinguish facts from views or speculation. Present official statements, letters, and quoted documents as sourced facts; label analysis with wording such as "according to reports" or "analysts said" when needed.
+- If the source states the purpose of a measure, such as testing a system or strengthening review, include that purpose instead of extracting only the threatening portion.
+- Keep summaries neutral and avoid emotional wording such as "shocking", "blockbuster", or "breaking" unless the original source itself uses it and the fact is verified.
+
+Self-check before output:
+- Check whether any headline could mislead a reader who only reads the headline. If yes, revise it.
+- Check whether the summary omits key limiting conditions such as "only if..." or "provided that...". If yes, add them.
+- Check whether relevant parties' responses are represented. If one side clearly refuted or rejected a claim, include that response.
+- Check whether source time markers such as "as of..." or "transition period until..." are accurately reflected.
+
 Section rules:
 - today_new means facts that did not appear in the last 7 days of daily reports.
 - important means relevant recent changes that are not today's new facts but have not been used recently.
@@ -6115,6 +6160,10 @@ Rules:
 - Do not add new facts, dates, fees, policy interpretations, or conclusions.
 - Preserve the Chinese brief's inclusion/exclusion decisions and freshness classification; do not promote continuing or repeated items into headline news.
 - Exclude career opportunities, recruitment posts, job lists, or job postings unless the Chinese brief explicitly treats them as immigration employment/visa policy changes.
+- Preserve cautious and conditional wording in headlines and summaries. Do not turn warnings, proposals, possible actions, negotiation positions, or "if...otherwise" statements into final decisions.
+- Avoid absolute or sensational terms such as "ordered", "ultimatum", "terminated", or "closed" unless the Chinese brief/source explicitly supports that exact meaning with no buffer, condition, negotiation, or transition path.
+- Keep summaries neutral, complete, and factual; include deadlines, conditions, transition periods, alternatives, purposes, and relevant responses when the Chinese brief contains them.
+- Before output, self-check whether any headline may mislead headline-only readers, whether key limiting conditions were omitted, whether responses from all relevant parties are represented, and whether time markers such as "as of..." or "transition period until..." are accurate.
 - Make headings and action recommendations read naturally in English.
 - Output English only.
 
@@ -7195,6 +7244,14 @@ ${articleMaterial || "暂无。"}
 - 部门重点可以重新解释公共日报已覆盖的文章，不要仅因为公共日报出现过就删除。
 - 只能使用上述文章中的事实，不得补充模型记忆中的政策信息。
 - 重大政策判断使用审慎措辞，并提醒以官方原文和业务负责人确认为准。
+- 标题或重点小标题必须基于原文核心事实，不得添加原文没有的断言或结论。
+- 避免使用“勒令”“最后通牒”“终止”“关闭”等绝对化、煽动性词汇，除非原文白纸黑字明确为此类行动，且没有任何缓冲或谈判空间。
+- 如果原文包含“警告”“可能”“如果…否则…”“建议”“提议”等条件性表述，标题、重点和摘要应如实反映该条件性。
+- 摘要必须覆盖主体、对象、动作性质、时间期限、条件、过渡期、替代方案，以及相关各方的直接回应或已知立场。
+- 务必区分事实陈述和观点/推测；分析性语言应注明出处或使用“据报道”“分析认为”等措辞。
+- 如果原文提到某项措施的目的，例如测试系统、加强审查，摘要中必须体现该目的，不能只截取威胁部分。
+- 摘要应客观中立，避免“震惊”“重磅”“突发”等情绪化词汇，除非原文本身以此为标题且事实确凿。
+- 输出前请自查：标题是否可能让只读标题的读者产生误解，如可能则修改；摘要是否忽略“仅当…才…”等关键限制条件，如有则补充；各方回应是否都得到体现，若一方明确反驳或拒绝必须写出；原文中的“截至…”“过渡期至…”等时间节点是否准确反映。
 - 全部使用简体中文。`;
 }
 
