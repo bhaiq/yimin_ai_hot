@@ -31,7 +31,7 @@ http://127.0.0.1:4173
 - 日报完整资讯附录：`/api/daily/items`，分页追溯全部候选文章
 - 日报会记录引用明细，今日总结只使用近 7 天未出现过的当天新增事实
 - 信源提报与公开反馈入库；静态打开时回退到本地草稿
-- 网站源支持：通过 Firecrawl API 抓取无 RSS 的网页
+- 网站源支持：通过 Firecrawl API 抓取无 RSS 的网页；额度不足时自动轮换备用 key 并重试
 - HTML 页面抓取：通过 Jina Reader API 提取网页内容
 - 信源审核：管理员审核用户提报的信源，补充类型和国家后启用
 - 用户登录：管理员账号登录，审核等敏感操作需认证
@@ -102,6 +102,16 @@ http://127.0.0.1:4173
 | Canada Border Services Agency | 加拿大 | website | Firecrawl 抓取 |
 | Visa Bulletin API | 美国 | json | 签证排期数据接口 |
 | 用户提报信源 | — | html/website | 数据库管理，Jina Reader / Firecrawl 抓取 |
+
+Firecrawl 支持保留原有的单 key 配置，并通过逗号分隔或编号变量增加备用 key：
+
+```env
+FIRECRAWL_API_KEY=fc-primary
+FIRECRAWL_API_KEYS=fc-backup-1,fc-backup-2
+# 也支持 FIRECRAWL_API_KEY_2=fc-backup-3
+```
+
+当接口明确返回 `Insufficient credits` 时，本次抓取会立即切换到下一个 key 重试；其他类型错误不会触发 key 轮换。
 
 ## 后续接入建议
 

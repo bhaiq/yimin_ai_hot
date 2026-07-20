@@ -78,9 +78,10 @@ const localTestSsoConfig = {
     .filter((value) => Number.isSafeInteger(value) && value > 0),
 };
 const firecrawlConfig = {
-  apiKey: process.env.FIRECRAWL_API_KEY || "",
+  apiKeys: getFirecrawlApiKeys(),
   baseUrl: "https://api.firecrawl.dev/v1",
 };
+let firecrawlApiKeyIndex = 0;
 const sessions = new Map();
 
 const mimeTypes = {
@@ -137,6 +138,28 @@ async function loadEnv() {
       process.env[key] = value;
     }
   });
+}
+
+function getFirecrawlApiKeys() {
+  const numberedKeys = Object.entries(process.env)
+    .map(([name, value]) => {
+      const match = name.match(/^FIRECRAWL_API_KEY_?(\d+)$/);
+      return match ? { order: Number(match[1]), value } : null;
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.order - right.order)
+    .map(({ value }) => value);
+
+  const keys = [
+    process.env.FIRECRAWL_API_KEY,
+    process.env.FIRECRAWL_API_KEYS,
+    ...numberedKeys,
+  ]
+    .flatMap((value) => String(value || "").split(/[,;\s]+/))
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  return [...new Set(keys)];
 }
 
 function sendJson(res, status, payload) {
@@ -3794,45 +3817,121 @@ async function fetchWithTimeout(url, extraHeaders = {}) {
 }
 
 async function fetchWithFirecrawl(url) {
-  if (!firecrawlConfig.apiKey) {
-    return { ok: false, status: 0, error: "FIRECRAWL_API_KEY not configured" };
-  }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30000);
-
-  try {
-    const response = await fetch(`${firecrawlConfig.baseUrl}/scrape`, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${firecrawlConfig.apiKey}`,
-      },
-      body: JSON.stringify({ url, formats: ["markdown"] }),
-    });
-
-    const data = await response.json();
-    if (!response.ok || !data.success) {
-      return { ok: false, status: response.status, error: data.error || `HTTP ${response.status}` };
-    }
-
-    const page = data.data || {};
-    const metadata = page.metadata || {};
-    const markdown = page.markdown || "";
-
+  if (firecrawlConfig.apiKeys.length === 0) {
     return {
-      ok: true,
-      title: metadata.title || "",
-      summary: markdown.slice(0, 500),
-      url: metadata.sourceURL || url,
-      publishedAt: metadata.publishedTime || null,
+      ok: false,
+      status: 0,
+      error: "FIRECRAWL_API_KEY or FIRECRAWL_API_KEYS not configured",
     };
-  } catch (err) {
-    return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };
-  } finally {
-    clearTimeout(timer);
   }
+
+  const attemptedKeyIndexes = new Set();
+  let lastCreditError = null;
+
+  while (attemptedKeyIndexes.size < firecrawlConfig.apiKeys.length) {
+    const keyIndex = findNextFirecrawlKeyIndex(attemptedKeyIndexes);
+    const apiKey = firecrawlConfig.apiKeys[keyIndex];
+    attemptedKeyIndexes.add(keyIndex);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+
+    try {
+      const response = await fetch(`${firecrawlConfig.baseUrl}/scrape`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ url, formats: ["markdown"] }),
+      });
+
+      const responseText = await response.text();
+      let data = {};
+      try {
+        data = JSON.parse(responseText);
+      } catch {
+        data = {};
+      }
+
+      if (!response.ok || !data.success) {
+        const error = getFirecrawlError(data, response.status);
+        if (isFirecrawlCreditError(error, data)) {
+          lastCreditError = { status: response.status, error };
+          advanceFirecrawlApiKey(keyIndex);
+
+          if (attemptedKeyIndexes.size < firecrawlConfig.apiKeys.length) {
+            console.warn(
+              `[firecrawl] API key ${keyIndex + 1}/${firecrawlConfig.apiKeys.length} has insufficient credits; retrying with another key.`,
+            );
+            continue;
+          }
+
+          break;
+        }
+
+        return { ok: false, status: response.status, error };
+      }
+
+      const page = data.data || {};
+      const metadata = page.metadata || {};
+      const markdown = page.markdown || "";
+
+      return {
+        ok: true,
+        title: metadata.title || "",
+        summary: markdown.slice(0, 500),
+        url: metadata.sourceURL || url,
+        publishedAt: metadata.publishedTime || null,
+      };
+    } catch (err) {
+      return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  return {
+    ok: false,
+    status: lastCreditError?.status || 0,
+    error: `${lastCreditError?.error || "Insufficient Firecrawl credits"} (all ${firecrawlConfig.apiKeys.length} configured keys were tried)`,
+  };
+}
+
+function findNextFirecrawlKeyIndex(attemptedKeyIndexes) {
+  for (let offset = 0; offset < firecrawlConfig.apiKeys.length; offset += 1) {
+    const index = (firecrawlApiKeyIndex + offset) % firecrawlConfig.apiKeys.length;
+    if (!attemptedKeyIndexes.has(index)) {
+      return index;
+    }
+  }
+
+  return firecrawlApiKeyIndex;
+}
+
+function advanceFirecrawlApiKey(failedKeyIndex) {
+  if (firecrawlApiKeyIndex === failedKeyIndex) {
+    firecrawlApiKeyIndex = (failedKeyIndex + 1) % firecrawlConfig.apiKeys.length;
+  }
+}
+
+function getFirecrawlError(data, status) {
+  if (typeof data?.error === "string" && data.error.trim()) {
+    return data.error.trim();
+  }
+  if (typeof data?.error?.message === "string" && data.error.message.trim()) {
+    return data.error.message.trim();
+  }
+  if (typeof data?.message === "string" && data.message.trim()) {
+    return data.message.trim();
+  }
+  return `HTTP ${status}`;
+}
+
+function isFirecrawlCreditError(error, data) {
+  const details = `${error}\n${JSON.stringify(data)}`;
+  return /insufficient[\s_-]+credits?/i.test(details);
 }
 
 async function fetchWithJina(url) {
