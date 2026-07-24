@@ -20,5 +20,9 @@ Thumbs.db
 # 临时调试文件
 tmp-*.png
 
+# 服务器本地公开上传文件（只提交目录占位文件）
+/uploads/*
+!/uploads/.gitkeep
+
 # 数据库目录
 yimin_ai_hot/
