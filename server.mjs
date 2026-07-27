@@ -1800,10 +1800,15 @@ function isPeerMonitorDepartmentNameAllowed(name) {
   if (!normalized) return false;
   return [...peerMonitorConfig.allowedDepartmentNames].some((allowed) => (
     normalized === allowed
+    || normalized === `${allowed}部门`
     || normalized.startsWith(`${allowed}-`)
     || normalized.startsWith(`${allowed} `)
     || normalized.startsWith(`${allowed}（`)
     || normalized.startsWith(`${allowed}(`)
+    || normalized.startsWith(`${allowed}部门-`)
+    || normalized.startsWith(`${allowed}部门 `)
+    || normalized.startsWith(`${allowed}部门（`)
+    || normalized.startsWith(`${allowed}部门(`)
   ));
 }
 

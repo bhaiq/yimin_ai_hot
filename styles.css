@@ -320,6 +320,10 @@ img {
   gap: 10px;
 }
 
+.sidebar-section[hidden] {
+  display: none;
+}
+
 .section-label {
   margin: 0;
   padding-left: 12px;
