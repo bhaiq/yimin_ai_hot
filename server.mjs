@@ -49,6 +49,21 @@ const deepseekConfig = {
   baseUrl: process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com/v1",
   model: process.env.DEEPSEEK_MODEL || "deepseek-chat",
 };
+const hColumnConfig = {
+  enabled: process.env.H_COLUMN_ENABLED !== "0",
+  maxTopics: Math.min(3, Math.max(1, Number(process.env.H_COLUMN_DAILY_MAX_TOPICS || 3))),
+  model: process.env.H_COLUMN_MODEL || process.env.DEEPSEEK_MODEL || "deepseek-chat",
+  reviewModel: process.env.H_COLUMN_REVIEW_MODEL || process.env.H_COLUMN_MODEL || process.env.DEEPSEEK_MODEL || "deepseek-chat",
+  ownerUserIds: new Set(String(process.env.H_COLUMN_USER_IDS || "fanrui").split(",").map((value) => value.trim()).filter(Boolean)),
+  editorUserIds: new Set(String(process.env.H_COLUMN_EDITOR_USER_IDS || "liangshuang").split(",").map((value) => value.trim()).filter(Boolean)),
+  ownerNames: new Set(String(process.env.H_COLUMN_OWNER_NAMES || "Henry范睿,范睿").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean)),
+  editorNames: new Set(String(process.env.H_COLUMN_EDITOR_NAMES || "Celine梁爽,梁爽").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean)),
+  departmentNames: new Set(String(process.env.H_COLUMN_DEPARTMENT_NAMES || "IOD").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean)),
+  autoGenerate: process.env.H_COLUMN_AUTO_GENERATE !== "0",
+  skillVersion: process.env.H_COLUMN_SKILL_VERSION || "henry-content-v1",
+  profileVersion: process.env.H_COLUMN_PROFILE_VERSION || "approved-profile-2026-07-23",
+};
+const hFullSourceMinChars = 800;
 const marketProjects = [
   { name: "美国 EB-5", country: "美国", keywords: ["eb-5", "eb5", "regional center", "投资"] },
   { name: "美国 NIW / EB-1", country: "美国", keywords: ["niw", "eb-1", "eb1", "national interest waiver"] },
@@ -774,7 +789,198 @@ async function initDb() {
           UNIQUE KEY uk_department_daily_report (report_date, department_id),
           INDEX idx_department_daily_department (department_id, report_date)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='部门每日重点报告表';
+
+        CREATE TABLE IF NOT EXISTS yimin_h_topics (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'H 专栏候选主键',
+          topic_date DATE NOT NULL COMMENT '候选归属日期',
+          source_report_id BIGINT NOT NULL COMMENT '来源公共日报 ID',
+          event_key VARCHAR(160) NOT NULL COMMENT '来源事件 Key',
+          title VARCHAR(600) NOT NULL COMMENT '候选标题',
+          event_summary TEXT NULL COMMENT '事件事实摘要',
+          core_question VARCHAR(600) NULL COMMENT '面向 Henry 的核心问题',
+          suggested_angle TEXT NULL COMMENT '系统建议角度，不等于本人观点',
+          target_audience VARCHAR(500) NULL COMMENT '目标读者',
+          content_archetype VARCHAR(80) NOT NULL DEFAULT 'policy_explanation' COMMENT '内容原型',
+          primary_mode VARCHAR(40) NOT NULL DEFAULT 'wechat_article' COMMENT '推荐主内容模式',
+          reusable_mode VARCHAR(40) NULL COMMENT '推荐复用模式',
+          four_checks_json JSON NOT NULL COMMENT 'H 选题四问结果',
+          readiness ENUM('not_recommended','topic_only','outline_ready','needs_viewpoint','needs_evidence','draft_ready') NOT NULL DEFAULT 'topic_only' COMMENT '成稿准备度',
+          status ENUM('candidate','selected','later','rejected','archived') NOT NULL DEFAULT 'candidate' COMMENT '候选状态',
+          duplicate_risk_json JSON NULL COMMENT '近 30 天重复风险',
+          source_snapshot_json JSON NULL COMMENT '日报事件快照',
+          missing_items_json JSON NULL COMMENT '事实或判断缺口',
+          input_hash CHAR(64) NOT NULL COMMENT '候选输入哈希',
+          rule_version VARCHAR(80) NOT NULL COMMENT '候选规则版本',
+          skill_version VARCHAR(80) NOT NULL COMMENT 'Henry Skill 版本',
+          profile_version VARCHAR(80) NOT NULL COMMENT '人物档案版本',
+          selected_by VARCHAR(160) NULL COMMENT '选择操作者',
+          selected_at DATETIME NULL COMMENT '选择时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          UNIQUE KEY uk_h_topic_date_event (topic_date, event_key),
+          INDEX idx_h_topics_status (topic_date, status, readiness),
+          CONSTRAINT fk_h_topic_report FOREIGN KEY (source_report_id) REFERENCES yimin_daily_reports(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Henry 每日内容候选';
+
+        CREATE TABLE IF NOT EXISTS yimin_h_topic_sources (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'H 事实包来源主键',
+          topic_id BIGINT NOT NULL COMMENT '关联候选',
+          article_hash CHAR(40) NULL COMMENT '关联日报文章哈希',
+          source_name VARCHAR(240) NOT NULL DEFAULT '' COMMENT '来源名称',
+          url VARCHAR(1400) NULL COMMENT '来源链接',
+          title VARCHAR(600) NOT NULL DEFAULT '' COMMENT '来源标题',
+          published_at DATETIME NULL COMMENT '来源发布时间',
+          content_status ENUM('full','summary_only','missing') NOT NULL DEFAULT 'summary_only' COMMENT '原文完整度',
+          source_level ENUM('A','B','C','D') NOT NULL DEFAULT 'C' COMMENT '证据等级',
+          policy_status ENUM('effective','announced','pending','proposed','media_report','opinion','not_applicable') NOT NULL DEFAULT 'media_report' COMMENT '政策状态',
+          extracted_text LONGTEXT NULL COMMENT '全文或可用摘要',
+          evidence_summary TEXT NULL COMMENT '可证明事实',
+          is_primary TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否主来源',
+          verified_by VARCHAR(160) NULL COMMENT '核验人',
+          verified_at DATETIME NULL COMMENT '核验时间',
+          content_hash CHAR(64) NULL COMMENT '来源内容哈希',
+          deleted_at DATETIME NULL COMMENT '软删除时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          UNIQUE KEY uk_h_topic_source_article (topic_id, article_hash),
+          INDEX idx_h_topic_sources_topic (topic_id, deleted_at),
+          CONSTRAINT fk_h_topic_source_topic FOREIGN KEY (topic_id) REFERENCES yimin_h_topics(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Henry 候选事实包来源';
+
+        CREATE TABLE IF NOT EXISTS yimin_h_viewpoints (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'Henry 观点输入主键',
+          topic_id BIGINT NOT NULL COMMENT '关联候选',
+          input_type ENUM('text','transcript','profile','public_material') NOT NULL DEFAULT 'text' COMMENT '观点来源类型',
+          raw_text TEXT NOT NULL COMMENT '原始输入',
+          edited_text TEXT NULL COMMENT '编辑整理文本',
+          is_confirmed TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已确认可用于成稿',
+          confirmation_type ENUM('unconfirmed','henry','authorized_editor','profile') NOT NULL DEFAULT 'unconfirmed' COMMENT '确认类型',
+          confirmed_by VARCHAR(160) NULL COMMENT '真实确认操作者',
+          confirmed_at DATETIME NULL COMMENT '确认时间',
+          created_by VARCHAR(160) NOT NULL COMMENT '录入操作者',
+          deleted_at DATETIME NULL COMMENT '软删除时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          INDEX idx_h_viewpoints_topic (topic_id, deleted_at, is_confirmed),
+          CONSTRAINT fk_h_viewpoint_topic FOREIGN KEY (topic_id) REFERENCES yimin_h_topics(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Henry 本次观点与确认记录';
+
+        CREATE TABLE IF NOT EXISTS yimin_h_drafts (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'H 草稿主键',
+          topic_id BIGINT NOT NULL COMMENT '关联候选',
+          parent_draft_id BIGINT NULL COMMENT '父版本',
+          mode ENUM('outline','wechat_article','short_video','run_and_talk_video','deep_video') NOT NULL COMMENT '内容模式',
+          version_no INT NOT NULL DEFAULT 1 COMMENT '同模式版本号',
+          title VARCHAR(600) NOT NULL DEFAULT '' COMMENT '推荐标题',
+          title_candidates_json JSON NULL COMMENT '标题候选',
+          outline_markdown LONGTEXT NULL COMMENT '结构化大纲',
+          content_markdown LONGTEXT NOT NULL COMMENT '正文或口播 Markdown',
+          content_html LONGTEXT NOT NULL COMMENT '渲染 HTML',
+          extras_json JSON NULL COMMENT '摘要、配图、画面等附加输出',
+          pending_facts_json JSON NULL COMMENT '待确认事实',
+          status ENUM('generating','drafted','reviewing','needs_revision','ready_for_henry','henry_reviewed','approved','rejected','failed') NOT NULL DEFAULT 'drafted' COMMENT '草稿状态',
+          readiness ENUM('pending','review_required','facts_required','ready_for_henry') NOT NULL DEFAULT 'review_required' COMMENT '发布准备度',
+          provider VARCHAR(80) NOT NULL DEFAULT 'openai-compatible' COMMENT '模型提供方',
+          model VARCHAR(120) NOT NULL COMMENT '生成模型',
+          skill_version VARCHAR(80) NOT NULL COMMENT 'Skill 版本',
+          profile_version VARCHAR(80) NOT NULL COMMENT '人物档案版本',
+          prompt_version VARCHAR(80) NOT NULL COMMENT 'Prompt 版本',
+          input_hash CHAR(64) NOT NULL COMMENT '输入事实与观点哈希',
+          input_snapshot_json JSON NULL COMMENT '生成输入快照',
+          generation_error TEXT NULL COMMENT '生成错误',
+          created_by VARCHAR(160) NOT NULL COMMENT '生成操作者',
+          approved_by VARCHAR(160) NULL COMMENT '真实采用操作者',
+          approval_type ENUM('none','henry','authorized_editor') NOT NULL DEFAULT 'none' COMMENT '采用类型',
+          approved_at DATETIME NULL COMMENT '采用时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          UNIQUE KEY uk_h_draft_version (topic_id, mode, version_no),
+          INDEX idx_h_drafts_status (status, updated_at),
+          CONSTRAINT fk_h_draft_topic FOREIGN KEY (topic_id) REFERENCES yimin_h_topics(id) ON DELETE CASCADE,
+          CONSTRAINT fk_h_draft_parent FOREIGN KEY (parent_draft_id) REFERENCES yimin_h_drafts(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Henry 文章与视频草稿版本';
+
+        CREATE TABLE IF NOT EXISTS yimin_h_reviews (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'H 草稿审校主键',
+          draft_id BIGINT NOT NULL COMMENT '关联草稿',
+          conclusion ENUM('ready_for_henry','facts_required','not_recommended') NOT NULL COMMENT '四层质检结论',
+          l1_status ENUM('passed','needs_revision') NOT NULL COMMENT '事实与风险',
+          l2_status ENUM('passed','needs_revision') NOT NULL COMMENT '判断与结构',
+          l3_status ENUM('passed','needs_revision') NOT NULL COMMENT 'H 口吻与渠道',
+          l4_status ENUM('passed','needs_revision') NOT NULL COMMENT '原创与发布准备',
+          issues_json JSON NULL COMMENT '可验证问题',
+          pending_facts_json JSON NULL COMMENT '待确认事实',
+          required_actions_json JSON NULL COMMENT '必须处理项',
+          model VARCHAR(120) NOT NULL COMMENT '审校模型',
+          prompt_version VARCHAR(80) NOT NULL COMMENT '审校 Prompt 版本',
+          input_hash CHAR(64) NOT NULL COMMENT '审校输入哈希',
+          reviewed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          INDEX idx_h_reviews_draft (draft_id, reviewed_at),
+          CONSTRAINT fk_h_review_draft FOREIGN KEY (draft_id) REFERENCES yimin_h_drafts(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Henry 内容四层质检';
+
+        CREATE TABLE IF NOT EXISTS yimin_h_feedback (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'H 内容反馈主键',
+          topic_id BIGINT NOT NULL COMMENT '关联候选',
+          draft_id BIGINT NULL COMMENT '关联草稿',
+          action ENUM('use','later','reject','revise') NOT NULL COMMENT '反馈动作',
+          reason_code VARCHAR(80) NULL COMMENT '结构化原因',
+          note TEXT NULL COMMENT '备注',
+          created_by VARCHAR(160) NOT NULL COMMENT '真实操作者',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          INDEX idx_h_feedback_topic (topic_id, created_at),
+          CONSTRAINT fk_h_feedback_topic FOREIGN KEY (topic_id) REFERENCES yimin_h_topics(id) ON DELETE CASCADE,
+          CONSTRAINT fk_h_feedback_draft FOREIGN KEY (draft_id) REFERENCES yimin_h_drafts(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Henry 内容采用与退回日志';
+
+        CREATE TABLE IF NOT EXISTS yimin_h_generation_runs (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'H 生成任务主键',
+          run_type ENUM('topics','evidence','draft','review') NOT NULL COMMENT '任务类型',
+          target_id BIGINT NULL COMMENT '候选或草稿 ID',
+          idempotency_key CHAR(64) NOT NULL COMMENT '幂等键',
+          status ENUM('pending','running','completed','failed') NOT NULL DEFAULT 'pending' COMMENT '任务状态',
+          provider VARCHAR(80) NOT NULL DEFAULT 'openai-compatible',
+          model VARCHAR(120) NOT NULL COMMENT '模型',
+          attempt_count INT NOT NULL DEFAULT 0 COMMENT '尝试次数',
+          started_at DATETIME NULL,
+          finished_at DATETIME NULL,
+          error_message TEXT NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          UNIQUE KEY uk_h_generation_idempotency (idempotency_key),
+          INDEX idx_h_generation_status (status, created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Henry 内容异步生成日志';
+
+        CREATE TABLE IF NOT EXISTS yimin_h_audit_logs (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'H 专栏审计日志主键',
+          entity_type VARCHAR(40) NOT NULL COMMENT '实体类型',
+          entity_id VARCHAR(160) NOT NULL DEFAULT '' COMMENT '实体 ID 或日期',
+          action VARCHAR(80) NOT NULL COMMENT '操作名称',
+          actor_id VARCHAR(160) NOT NULL COMMENT '真实操作者 ID',
+          actor_name VARCHAR(160) NOT NULL DEFAULT '' COMMENT '真实操作者姓名',
+          actor_role VARCHAR(40) NOT NULL DEFAULT '' COMMENT '操作者角色',
+          metadata_json JSON NULL COMMENT '不含正文的操作元数据',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          INDEX idx_h_audit_entity (entity_type, entity_id, created_at),
+          INDEX idx_h_audit_actor (actor_id, created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Henry 内容工作台写操作审计日志';
       `);
+
+      const hViewpointColumns = await mysqlRun(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+          AND TABLE_NAME = 'yimin_h_viewpoints'
+          AND COLUMN_NAME = 'deleted_at';
+      `);
+      if (!hViewpointColumns.includes("deleted_at")) {
+        await mysqlExec(`
+          ALTER TABLE yimin_h_viewpoints
+          ADD COLUMN deleted_at DATETIME NULL COMMENT '软删除时间'
+          AFTER created_by;
+        `);
+      }
 
       const colCheck = await mysqlRun(`
         SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
@@ -3826,7 +4032,7 @@ async function fetchWithFirecrawl(url) {
   }
 
   const attemptedKeyIndexes = new Set();
-  let lastCreditError = null;
+  let lastKeyError = null;
 
   while (attemptedKeyIndexes.size < firecrawlConfig.apiKeys.length) {
     const keyIndex = findNextFirecrawlKeyIndex(attemptedKeyIndexes);
@@ -3857,13 +4063,14 @@ async function fetchWithFirecrawl(url) {
 
       if (!response.ok || !data.success) {
         const error = getFirecrawlError(data, response.status);
-        if (isFirecrawlCreditError(error, data)) {
-          lastCreditError = { status: response.status, error };
+        const rotationReason = getFirecrawlKeyRotationReason(error, data, response.status);
+        if (rotationReason) {
+          lastKeyError = { status: response.status, error };
           advanceFirecrawlApiKey(keyIndex);
 
           if (attemptedKeyIndexes.size < firecrawlConfig.apiKeys.length) {
             console.warn(
-              `[firecrawl] API key ${keyIndex + 1}/${firecrawlConfig.apiKeys.length} has insufficient credits; retrying with another key.`,
+              `[firecrawl] API key ${keyIndex + 1}/${firecrawlConfig.apiKeys.length} ${rotationReason}; retrying with another key.`,
             );
             continue;
           }
@@ -3882,6 +4089,7 @@ async function fetchWithFirecrawl(url) {
         ok: true,
         title: metadata.title || "",
         summary: markdown.slice(0, 500),
+        content: markdown,
         url: metadata.sourceURL || url,
         publishedAt: metadata.publishedTime || null,
       };
@@ -3894,8 +4102,8 @@ async function fetchWithFirecrawl(url) {
 
   return {
     ok: false,
-    status: lastCreditError?.status || 0,
-    error: `${lastCreditError?.error || "Insufficient Firecrawl credits"} (all ${firecrawlConfig.apiKeys.length} configured keys were tried)`,
+    status: lastKeyError?.status || 0,
+    error: `${lastKeyError?.error || "No usable Firecrawl API key"} (all ${firecrawlConfig.apiKeys.length} configured keys were tried)`,
   };
 }
 
@@ -3932,6 +4140,23 @@ function getFirecrawlError(data, status) {
 function isFirecrawlCreditError(error, data) {
   const details = `${error}\n${JSON.stringify(data)}`;
   return /insufficient[\s_-]+credits?/i.test(details);
+}
+
+function getFirecrawlKeyRotationReason(error, data, status) {
+  if (isFirecrawlCreditError(error, data)) {
+    return "has insufficient credits";
+  }
+
+  const details = `${error}\n${JSON.stringify(data)}`;
+  if (
+    status === 401
+    || /unauthorized\s*:\s*invalid[\s_-]+token/i.test(details)
+    || /invalid[\s_-]+(?:api[\s_-]+)?(?:key|token)/i.test(details)
+  ) {
+    return "was rejected as invalid";
+  }
+
+  return "";
 }
 
 async function fetchWithJina(url) {
@@ -4090,10 +4315,25 @@ function decodeEntities(value) {
 
 function sanitizeTextArtifacts(value) {
   return String(value || "")
-    .replace(/雇主担(?:�{1,}|&amp;#65533;|&#65533;|\\ufffd)+/g, "雇主担保")
-    .replace(/担(?:�{1,}|&amp;#65533;|&#65533;|\\ufffd)+/g, "担保")
-    .replace(/(?:�|&amp;#65533;|&#65533;|\\ufffd)+/g, "")
+    .replace(/雇主担(?:�|&(?:amp;)?#65533;|\\ufffd)+/gi, "雇主担保")
+    .replace(/担(?:�|&(?:amp;)?#65533;|\\ufffd)+/gi, "担保")
+    .replace(/(?:�|&(?:amp;)?#65533;|\\ufffd)+/gi, "")
     .trim();
+}
+
+function hasReplacementTextArtifacts(value) {
+  return /(?:�|&(?:amp;)?#65533;|\\ufffd)/i.test(String(value || ""));
+}
+
+function sanitizeStructuredTextArtifacts(value) {
+  if (typeof value === "string") return sanitizeTextArtifacts(value);
+  if (Array.isArray(value)) return value.map(sanitizeStructuredTextArtifacts);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, sanitizeStructuredTextArtifacts(item)]),
+    );
+  }
+  return value;
 }
 
 function cleanText(value) {
@@ -5874,7 +6114,7 @@ async function callDeepSeek(prompt, options = {}) {
       authorization: `Bearer ${deepseekConfig.apiKey}`,
     },
     body: JSON.stringify({
-      model: deepseekConfig.model,
+      model: options.model || deepseekConfig.model,
       temperature,
       stream: deepseekStreamEnabled,
       messages: [
@@ -5910,6 +6150,9 @@ async function callDeepSeek(prompt, options = {}) {
     /[Ͱ-Ͽᴀ-ᶿἀ-῿Ⲁ-⳿]/g,
     "",
   );
+  if (hasReplacementTextArtifacts(content)) {
+    throw new Error("模型返回内容包含乱码，系统已阻止保存，请重试生成");
+  }
 
   return sanitizeTextArtifacts(content);
 }
@@ -5925,7 +6168,7 @@ async function readOpenAICompatibleStream(response) {
   }
 
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   let buffer = "";
   let content = "";
 
@@ -6434,6 +6677,7 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
         existing.contentMarkdown = sanitizeTextArtifacts(existing.contentMarkdown);
         existing.html = markdownToHtml(existing.contentMarkdown);
       }
+      startHTopicGenerationInBackground(date);
       return attachDailyWindowLabel({ ...existing, language: "zh" });
     }
   }
@@ -6505,6 +6749,7 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
   if (prebuildLocalizations) {
     await prebuildDailyLocalizations(report);
   }
+  startHTopicGenerationInBackground(date, { refresh });
   return report;
 }
 
@@ -6572,6 +6817,2807 @@ function isDailyReportGenerationRunning(date, { windowMode = "calendar", languag
   return ["refresh", "cached"].some((mode) => (
     dailyReportGenerationPromises.has(`${date}:${normalizedWindowMode}:${normalizedLanguage}:${mode}`)
   ));
+}
+
+let hContentProfileCache = null;
+const hTopicGenerationPromises = new Map();
+
+async function saveHAuditLog(entityType, entityId, action, actor, metadata = {}) {
+  const normalizedActor = actor || {
+    id: "system",
+    name: "system",
+    role: "system",
+  };
+  await mysqlExec(`
+    INSERT INTO yimin_h_audit_logs (
+      entity_type, entity_id, action, actor_id, actor_name, actor_role, metadata_json
+    )
+    VALUES (
+      ${sqlString(entityType)}, ${sqlString(entityId ?? "")}, ${sqlString(action)},
+      ${sqlString(normalizedActor.id || "system")}, ${sqlString(normalizedActor.name || "")},
+      ${sqlString(normalizedActor.role || normalizedActor.source || "")}, ${sqlJson(metadata || {})}
+    );
+  `);
+}
+
+async function listHAuditLogs(limit = 100) {
+  const safeLimit = Math.min(300, Math.max(1, Number(limit) || 100));
+  return (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+      'id', id,
+      'entityType', entity_type,
+      'entityId', entity_id,
+      'action', action,
+      'actorId', actor_id,
+      'actorName', actor_name,
+      'actorRole', actor_role,
+      'metadata', metadata_json,
+      'createdAt', DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:%s+08:00')
+    )), JSON_ARRAY())
+    FROM (
+      SELECT *
+      FROM yimin_h_audit_logs
+      ORDER BY id DESC
+      LIMIT ${sqlNumber(safeLimit)}
+    ) audit_rows;
+  `)) || [];
+}
+
+function normalizeHIdentityValue(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function hIdentityMatches(value, configuredValues) {
+  const normalized = normalizeHIdentityValue(value);
+  if (!normalized) return false;
+  const identityTokens = normalized
+    .split(/[\s,，/|()（）【】[\]_-]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+  return [...configuredValues].some((candidate) => (
+    normalized === candidate
+    || identityTokens.includes(candidate)
+  ));
+}
+
+function hDepartmentMatches(value) {
+  const normalized = normalizeHIdentityValue(value);
+  if (!normalized) return false;
+  return [...hColumnConfig.departmentNames].some((candidate) => (
+    normalized === candidate
+    || normalized.startsWith(candidate)
+  ));
+}
+
+async function listHActorDepartments(identity) {
+  if (!identity?.userId) return [];
+  await initDb();
+  let departmentIds;
+  if (identity.source === "local-test") {
+    departmentIds = await resolveLocalTestDepartmentIds(identity.departmentIds);
+  } else {
+    const user = await mysqlJson(`
+      SELECT JSON_OBJECT(
+        'departmentIds', COALESCE(departments_json, JSON_ARRAY())
+      )
+      FROM yimin_wx_users
+      WHERE userid = ${sqlString(identity.userId)}
+      LIMIT 1;
+    `);
+    departmentIds = normalizeDepartmentIds(user?.departmentIds);
+  }
+  const normalizedIds = normalizeDepartmentIds(departmentIds);
+  if (!normalizedIds.length) return [];
+  return (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT('id', department_id, 'name', department_name)
+    ), JSON_ARRAY())
+    FROM yimin_wx_departments
+    WHERE department_id IN (${normalizedIds.map(sqlNumber).join(",")});
+  `)) || [];
+}
+
+async function getHColumnActor(req) {
+  if (!hColumnConfig.enabled) return null;
+
+  const identity = getSsoIdentityFromRequest(req);
+  const adminSession = requireAuth(req);
+  const userId = String(identity?.userId || "").trim();
+  const userName = String(identity?.userName || "").trim();
+  const hasNamedAccess = Boolean(identity) && (
+    hColumnConfig.ownerUserIds.has(userId)
+    || hIdentityMatches(userName, hColumnConfig.ownerNames)
+    || hColumnConfig.editorUserIds.has(userId)
+    || hIdentityMatches(userName, hColumnConfig.editorNames)
+  );
+  let hasDepartmentAccess = false;
+  if (identity && !hasNamedAccess) {
+    try {
+      const departments = await listHActorDepartments(identity);
+      hasDepartmentAccess = departments.some((department) => hDepartmentMatches(department.name));
+    } catch (error) {
+      console.warn(`H department access lookup failed for ${userId}:`, formatErrorMessage(error));
+    }
+  }
+
+  if (identity && (hasNamedAccess || hasDepartmentAccess)) {
+    return {
+      id: userId,
+      name: userName || userId,
+      source: identity.source,
+      role: "member",
+      confirmationType: "authorized_editor",
+    };
+  }
+
+  if (adminSession) {
+    return {
+      id: `admin:${adminSession.username}`,
+      name: adminSession.username,
+      source: "admin-session",
+      role: "member",
+      confirmationType: "authorized_editor",
+    };
+  }
+
+  return null;
+}
+
+async function loadHContentProfile() {
+  if (hContentProfileCache) return hContentProfileCache;
+  const raw = await readFile(join(rootDir, "data", "henry-content-profile.json"), "utf8");
+  const parsed = JSON.parse(raw);
+  hContentProfileCache = {
+    ...parsed,
+    skillVersion: parsed.skillVersion || hColumnConfig.skillVersion,
+    profileVersion: parsed.profileVersion || hColumnConfig.profileVersion,
+  };
+  return hContentProfileCache;
+}
+
+function parseDeepSeekJsonObject(content) {
+  const text = String(content || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end <= start) {
+    throw new Error("AI output did not return a JSON object");
+  }
+  const parsed = JSON.parse(text.slice(start, end + 1));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("AI output JSON is not an object");
+  }
+  return parsed;
+}
+
+function inferHSourceLevel(sourceName, url) {
+  const text = `${sourceName || ""} ${url || ""}`.toLowerCase();
+  if (
+    /\.(gov|gc\.ca)(?:\/|$)/i.test(text)
+    || /gov\.uk|europa\.eu|uscis|ircc|政府|移民局|议会|法院|官方公报|department of|home office/i.test(text)
+  ) {
+    return "A";
+  }
+  if (/reuters|associated press|bbc|financial times|权威媒体/i.test(text)) {
+    return "B";
+  }
+  if (/twitter|x\.com|weibo|reddit|传闻|朋友圈/i.test(text)) {
+    return "D";
+  }
+  return "C";
+}
+
+function inferHPolicyStatus(title, summary, category) {
+  const text = `${title || ""} ${summary || ""} ${category || ""}`.toLowerCase();
+  if (/拟议|提议|草案|proposal|proposed|consultation/i.test(text)) return "proposed";
+  if (/待生效|将于.+生效|announced|takes effect|effective from/i.test(text)) return "announced";
+  if (/审议|表决|诉讼中|pending|under review|in progress/i.test(text)) return "pending";
+  if (/媒体|报道称|据报道|分析|观点|评论|reportedly|analysis|opinion/i.test(text)) return "media_report";
+  if (/已生效|正式实施|生效|effective|in force|implemented/i.test(text)) return "effective";
+  if (/政策|签证|居留|永居|入籍|税务|投资|移民|visa|residence|citizenship|immigration/i.test(text)) {
+    return "media_report";
+  }
+  return "not_applicable";
+}
+
+function isHHighRiskTopic(topic) {
+  const text = `${topic?.title || ""} ${topic?.eventSummary || topic?.event_summary || ""} ${topic?.contentArchetype || topic?.content_archetype || ""}`;
+  return /政策|签证|居留|永居|入籍|税|投资|费用|资格|排期|法律|visa|residence|citizenship|tax|investment|legal/i.test(text);
+}
+
+function findHStableJudgment(profile, text) {
+  const normalized = String(text || "").toLowerCase();
+  return (profile.stableJudgments || []).find((item) => (
+    (item.keywords || []).some((keyword) => {
+      const normalizedKeyword = String(keyword || "").toLowerCase();
+      if (!normalizedKeyword) return false;
+      if (/^[a-z0-9 .+-]+$/i.test(normalizedKeyword)) {
+        const escaped = normalizedKeyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return new RegExp(`\\b${escaped}\\b`, "i").test(normalized);
+      }
+      return normalized.includes(normalizedKeyword);
+    })
+  )) || null;
+}
+
+function buildHTitleBigrams(value) {
+  const normalized = String(value || "")
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, "");
+  if (normalized.length < 2) return normalized ? [normalized] : [];
+  return Array.from({ length: normalized.length - 1 }, (_, index) => normalized.slice(index, index + 2));
+}
+
+function getHTitleSimilarity(left, right) {
+  const leftSet = new Set(buildHTitleBigrams(left));
+  const rightSet = new Set(buildHTitleBigrams(right));
+  if (!leftSet.size || !rightSet.size) return 0;
+  let overlap = 0;
+  for (const value of leftSet) {
+    if (rightSet.has(value)) overlap += 1;
+  }
+  return (2 * overlap) / (leftSet.size + rightSet.size);
+}
+
+function buildHDuplicateRisk(event, candidate, recentTopics) {
+  if (!recentTopics.length) {
+    return { level: "unknown", reason: "系统上线后开始积累近30天历史" };
+  }
+  const exactEvent = recentTopics.find((topic) => topic.eventKey === event.eventKey);
+  if (exactEvent) {
+    return {
+      level: "high",
+      reason: `近30天已有同一事件候选：${exactEvent.title}`,
+      relatedTopic: exactEvent,
+    };
+  }
+  const title = candidate.title || event.title;
+  const matches = recentTopics
+    .map((topic) => ({ topic, similarity: getHTitleSimilarity(title, topic.title) }))
+    .sort((left, right) => right.similarity - left.similarity);
+  const best = matches[0];
+  if (best?.similarity >= 0.62) {
+    return {
+      level: "high",
+      reason: `与 ${best.topic.date} 的候选主题高度相似`,
+      similarity: Number(best.similarity.toFixed(3)),
+      relatedTopic: best.topic,
+    };
+  }
+  if (best?.similarity >= 0.38) {
+    return {
+      level: "medium",
+      reason: `与 ${best.topic.date} 的候选存在主题重叠`,
+      similarity: Number(best.similarity.toFixed(3)),
+      relatedTopic: best.topic,
+    };
+  }
+  return { level: "low", reason: "近30天未发现明显重复主题" };
+}
+
+function normalizeHMode(value, fallback = "wechat_article") {
+  const allowed = new Set(["outline", "wechat_article", "short_video", "run_and_talk_video", "deep_video"]);
+  const mode = String(value || "");
+  return allowed.has(mode) ? mode : fallback;
+}
+
+function normalizeHReadiness(value, fallback = "topic_only") {
+  const allowed = new Set(["not_recommended", "topic_only", "outline_ready", "needs_viewpoint", "needs_evidence", "draft_ready"]);
+  const readiness = String(value || "");
+  return allowed.has(readiness) ? readiness : fallback;
+}
+
+function normalizeHTopicStatus(value, fallback = "candidate") {
+  const allowed = new Set(["candidate", "selected", "later", "rejected", "archived"]);
+  const status = String(value || "");
+  return allowed.has(status) ? status : fallback;
+}
+
+function buildFallbackHTopicCandidates(events, profile) {
+  return events
+    .filter((event) => (
+      ["today_new", "important"].includes(event.section)
+      && /移民|签证|居留|永居|永久居民|入籍|国籍|边境|工签|工作许可|雇主担保|庇护|难民|遣返|领事|visa|immigra|residen|citizen|border|work permit|sponsor|asylum|refugee|deport|consular/i.test(
+        `${event.title || ""} ${event.summary || ""}`,
+      )
+    ))
+    .slice(0, hColumnConfig.maxTopics)
+    .map((event) => {
+      const stableJudgment = findHStableJudgment(profile, `${event.title} ${event.summary}`);
+      const hasJudgment = Boolean(stableJudgment);
+      const hasBasis = false;
+      const useful = Number(event.importance || 0) >= 55;
+      const longTerm = Boolean(stableJudgment) || /政策|风险|选择|合规|专业|投资/i.test(`${event.title} ${event.summary}`);
+      const passedCount = [hasJudgment, hasBasis, useful, longTerm].filter(Boolean).length;
+      return {
+        eventKey: event.eventKey,
+        title: event.title,
+        coreQuestion: `这件事对哪些客户真正有影响，Henry 会如何排序风险和行动？`,
+        suggestedAngle: stableJudgment?.summary || "先说明适用对象和政策状态，再解释客户应如何判断，而不是复述新闻。",
+        targetAudience: "正在进行身份、签证或跨境规划的中文读者",
+        contentArchetype: "policy_explanation",
+        primaryMode: "wechat_article",
+        reusableMode: "short_video",
+        fourChecks: {
+          hasJudgment,
+          hasBasis,
+          useful,
+          longTerm,
+          passedCount,
+        },
+        readiness: passedCount <= 1 ? "not_recommended" : (hasJudgment ? "needs_evidence" : "topic_only"),
+        missingItems: [
+          ...(!hasBasis ? ["需要完整原文及核心政策的 A 级来源"] : []),
+          ...(!hasJudgment ? ["需要 H 专栏成员确认本次核心观点"] : []),
+        ],
+        stableJudgment,
+      };
+    });
+}
+
+function buildHTopicGenerationPrompt(report, events, recentTopics, profile) {
+  const eventPayload = events
+    .filter((event) => event.section !== "repeated")
+    .slice(0, 18)
+    .map((event) => ({
+      eventKey: event.eventKey,
+      section: event.section,
+      title: event.title,
+      summary: event.summary,
+      country: event.country,
+      category: event.category,
+      importance: event.importance,
+      articleCount: event.articleCount,
+      sourceCount: event.sourceCount,
+    }));
+  const stableJudgments = (profile.stableJudgments || []).map((item) => ({
+    key: item.key,
+    keywords: item.keywords,
+    summary: item.summary,
+  }));
+
+  return `请为 Henry 内容工作台从以下公共日报事件中选择 0—${hColumnConfig.maxTopics} 个真正值得判断的候选题。
+
+只返回 JSON 数组，不要 Markdown，不要解释。数组元素格式：
+{
+  "eventKey":"必须来自输入",
+  "title":"候选标题",
+  "coreQuestion":"Henry真正需要回答的问题",
+  "suggestedAngle":"系统建议角度，不能冒充Henry本人观点",
+  "targetAudience":"明确读者",
+  "contentArchetype":"policy_explanation|country_city|ceo_management|experience_reflection|viewpoint_response|recommendation_list",
+  "primaryMode":"wechat_article|short_video|run_and_talk_video|deep_video",
+  "reusableMode":"wechat_article|short_video|run_and_talk_video|deep_video",
+  "fourChecks":{"hasJudgment":false,"hasBasis":false,"useful":true,"longTerm":true},
+  "readiness":"not_recommended|topic_only|outline_ready|needs_viewpoint|needs_evidence|draft_ready",
+  "missingItems":["事实或判断缺口"],
+  "stableJudgmentKey":"仅当与已确认稳定观点直接匹配时填写，否则为空"
+}
+
+硬规则：
+- 稀缺的是 Henry 的真实判断，不是文章数量；允许返回空数组。
+- 只选择 today_new 或 important。continuing 只有出现可明确说明的实质变化时才可选择。
+- 日报标题和摘要只能证明“值得研究”，不能自动视为完整原文，因此默认 hasBasis=false。
+- 系统建议角度不等于 Henry 已确认观点。
+- 只有与已确认稳定观点直接匹配，hasJudgment 才可为 true。
+- 不虚构 Henry 的经历、观点、客户、数字或公司事实。
+- 不选择招聘、普通执法个案、旅游、娱乐或与客户决策无关的资讯。
+- 一篇只保留一个主轴，必须说明对谁有用以及风险或代价。
+- 与近30天主题重复且无新增事实的内容不要选择。
+
+人物稳定观点：
+${JSON.stringify(stableJudgments)}
+
+近30天已存在候选：
+${JSON.stringify(recentTopics)}
+
+日报：
+${JSON.stringify({ date: report.date, title: report.title, events: eventPayload })}`;
+}
+
+async function listRecentHTopicTitles(date, days = 30) {
+  return (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+      'date', DATE_FORMAT(topic_date, '%Y-%m-%d'),
+      'eventKey', event_key,
+      'title', title,
+      'status', status
+    )), JSON_ARRAY())
+    FROM (
+      SELECT topic_date, event_key, title, status
+      FROM yimin_h_topics
+      WHERE topic_date < ${sqlString(date)}
+        AND topic_date >= DATE_SUB(${sqlString(date)}, INTERVAL ${sqlNumber(days, 30)} DAY)
+      ORDER BY topic_date DESC, id DESC
+      LIMIT 120
+    ) recent_topics;
+  `)) || [];
+}
+
+async function seedHTopicSources(topicId, event) {
+  const hashes = Array.isArray(event.articleHashes) ? event.articleHashes.filter(Boolean) : [];
+  if (!hashes.length) {
+    if (!event.representativeUrl) return;
+    const existing = await mysqlJson(`
+      SELECT JSON_OBJECT('id', id)
+      FROM yimin_h_topic_sources
+      WHERE topic_id = ${sqlNumber(topicId)}
+        AND url = ${sqlString(event.representativeUrl)}
+        AND deleted_at IS NULL
+      LIMIT 1;
+    `);
+    if (existing) return;
+    const sourceLevel = inferHSourceLevel("", event.representativeUrl);
+    const policyStatus = inferHPolicyStatus(event.title, event.summary, event.category);
+    await mysqlExec(`
+      INSERT INTO yimin_h_topic_sources (
+        topic_id, article_hash, source_name, url, title, content_status,
+        source_level, policy_status, extracted_text, evidence_summary,
+        is_primary, content_hash
+      )
+      VALUES (
+        ${sqlNumber(topicId)}, NULL, '', ${sqlString(event.representativeUrl)},
+        ${sqlString(event.title)}, 'summary_only', ${sqlString(sourceLevel)},
+        ${sqlString(policyStatus)}, ${sqlString(event.summary || "")},
+        ${sqlString(event.summary || "")}, 1,
+        ${sqlString(createHash("sha256").update(String(event.summary || "")).digest("hex"))}
+      );
+    `);
+    return;
+  }
+
+  const rows = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+      'articleHash', a.dedupe_hash,
+      'title', a.title,
+      'summary', COALESCE(a.summary, ''),
+      'url', a.url,
+      'publishedAt', IF(a.published_at IS NULL, NULL, DATE_FORMAT(a.published_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+      'sourceName', s.name,
+      'category', a.category
+    )), JSON_ARRAY())
+    FROM yimin_articles a
+    JOIN yimin_sources s ON s.id = a.source_id
+    WHERE a.dedupe_hash IN (${hashes.map(sqlString).join(",")});
+  `)) || [];
+
+  for (const [index, row] of rows.entries()) {
+    const sourceLevel = inferHSourceLevel(row.sourceName, row.url);
+    const policyStatus = inferHPolicyStatus(row.title, row.summary, row.category);
+    const extractedText = String(row.summary || "");
+    await mysqlExec(`
+      INSERT INTO yimin_h_topic_sources (
+        topic_id, article_hash, source_name, url, title, published_at,
+        content_status, source_level, policy_status, extracted_text,
+        evidence_summary, is_primary, content_hash
+      )
+      VALUES (
+        ${sqlNumber(topicId)}, ${sqlString(row.articleHash)}, ${sqlString(row.sourceName)},
+        ${sqlString(row.url || "")}, ${sqlString(row.title)}, ${sqlDate(row.publishedAt)},
+        ${sqlString(extractedText ? "summary_only" : "missing")}, ${sqlString(sourceLevel)},
+        ${sqlString(policyStatus)}, ${sqlString(extractedText)}, ${sqlString(extractedText)},
+        ${sqlNumber(index === 0 || row.url === event.representativeUrl ? 1 : 0)},
+        ${sqlString(createHash("sha256").update(extractedText).digest("hex"))}
+      )
+      ON DUPLICATE KEY UPDATE
+        source_name = VALUES(source_name),
+        url = VALUES(url),
+        title = VALUES(title),
+        published_at = VALUES(published_at),
+        updated_at = CURRENT_TIMESTAMP;
+    `);
+  }
+}
+
+async function insertHTopicCandidate(date, report, event, candidate, profile, inputHash, recentTopics = []) {
+  const stableJudgment = candidate.stableJudgment
+    || (candidate.stableJudgmentKey
+      ? (profile.stableJudgments || []).find((item) => item.key === candidate.stableJudgmentKey)
+      : findHStableJudgment(profile, `${event.title} ${event.summary}`));
+  const checks = {
+    hasJudgment: Boolean(stableJudgment || candidate.fourChecks?.hasJudgment),
+    hasBasis: false,
+    useful: Boolean(candidate.fourChecks?.useful),
+    longTerm: Boolean(candidate.fourChecks?.longTerm),
+  };
+  checks.passedCount = Object.values(checks).filter((value) => value === true).length;
+  const readiness = checks.passedCount <= 1
+    ? "not_recommended"
+    : normalizeHReadiness(candidate.readiness, checks.hasJudgment ? "needs_evidence" : "topic_only");
+  const missingItems = Array.isArray(candidate.missingItems) ? candidate.missingItems : [];
+  if (!checks.hasBasis && !missingItems.some((item) => /来源|原文|证据/.test(item))) {
+    missingItems.push("需要完整原文及核心政策的 A 级来源");
+  }
+  if (!checks.hasJudgment && !missingItems.some((item) => /判断|观点/.test(item))) {
+    missingItems.push("需要 H 专栏成员确认本次核心观点");
+  }
+  const duplicateRisk = buildHDuplicateRisk(event, candidate, recentTopics);
+
+  await mysqlExec(`
+    INSERT INTO yimin_h_topics (
+      topic_date, source_report_id, event_key, title, event_summary,
+      core_question, suggested_angle, target_audience, content_archetype,
+      primary_mode, reusable_mode, four_checks_json, readiness, status,
+      duplicate_risk_json, source_snapshot_json, missing_items_json,
+      input_hash, rule_version, skill_version, profile_version
+    )
+    VALUES (
+      ${sqlString(date)}, ${sqlNumber(report.id)}, ${sqlString(event.eventKey)},
+      ${sqlString(candidate.title || event.title)}, ${sqlString(event.summary || "")},
+      ${sqlString(candidate.coreQuestion || "")}, ${sqlString(candidate.suggestedAngle || stableJudgment?.summary || "")},
+      ${sqlString(candidate.targetAudience || "关心身份与全球化选择的中文读者")},
+      ${sqlString(candidate.contentArchetype || "policy_explanation")},
+      ${sqlString(normalizeHMode(candidate.primaryMode))},
+      ${sqlString(normalizeHMode(candidate.reusableMode, "short_video"))},
+      ${sqlJson(checks)}, ${sqlString(readiness)}, 'candidate',
+      ${sqlJson(duplicateRisk)},
+      ${sqlJson(event)}, ${sqlJson(missingItems)}, ${sqlString(inputHash)},
+      'h-topic-v1', ${sqlString(profile.skillVersion)}, ${sqlString(profile.profileVersion)}
+    )
+    ON DUPLICATE KEY UPDATE
+      title = VALUES(title),
+      event_summary = VALUES(event_summary),
+      core_question = VALUES(core_question),
+      suggested_angle = VALUES(suggested_angle),
+      target_audience = VALUES(target_audience),
+      content_archetype = VALUES(content_archetype),
+      primary_mode = VALUES(primary_mode),
+      reusable_mode = VALUES(reusable_mode),
+      four_checks_json = IF(status IN ('selected','later','rejected'), four_checks_json, VALUES(four_checks_json)),
+      readiness = IF(status IN ('selected','later','rejected'), readiness, VALUES(readiness)),
+      status = IF(status = 'archived', 'candidate', status),
+      duplicate_risk_json = VALUES(duplicate_risk_json),
+      source_snapshot_json = VALUES(source_snapshot_json),
+      missing_items_json = IF(status IN ('selected','later','rejected'), missing_items_json, VALUES(missing_items_json)),
+      input_hash = VALUES(input_hash),
+      rule_version = VALUES(rule_version),
+      skill_version = VALUES(skill_version),
+      profile_version = VALUES(profile_version),
+      updated_at = CURRENT_TIMESTAMP;
+  `);
+  const row = await mysqlJson(`
+    SELECT JSON_OBJECT('id', id)
+    FROM yimin_h_topics
+    WHERE topic_date = ${sqlString(date)}
+      AND event_key = ${sqlString(event.eventKey)}
+    LIMIT 1;
+  `);
+  if (!row?.id) return null;
+  await seedHTopicSources(row.id, event);
+  if (stableJudgment) {
+    const existingViewpoint = await mysqlJson(`
+      SELECT JSON_OBJECT('id', id)
+      FROM yimin_h_viewpoints
+      WHERE topic_id = ${sqlNumber(row.id)}
+        AND input_type = 'profile'
+      LIMIT 1;
+    `);
+    if (!existingViewpoint) {
+      await mysqlExec(`
+        INSERT INTO yimin_h_viewpoints (
+          topic_id, input_type, raw_text, edited_text, is_confirmed,
+          confirmation_type, confirmed_by, confirmed_at, created_by
+        )
+        VALUES (
+          ${sqlNumber(row.id)}, 'profile', ${sqlString(stableJudgment.summary)},
+          ${sqlString(stableJudgment.summary)}, 1, 'profile',
+          ${sqlString(`profile:${stableJudgment.key}`)}, CURRENT_TIMESTAMP,
+          ${sqlString(`profile:${stableJudgment.key}`)}
+        );
+      `);
+    }
+  }
+  return row.id;
+}
+
+async function generateHTopics(date = getShanghaiDate(), { refresh = false, actor = null } = {}) {
+  await initDb();
+  const report = await loadDailyReportBaseRow(date);
+  if (!report) {
+    const error = new Error("请先生成当天公共日报");
+    error.code = "H_DAILY_MISSING";
+    throw error;
+  }
+  const events = await loadDailyLocalizationEvents(report.id);
+  const eligibleEvents = events.filter((event) => ["today_new", "important", "continuing"].includes(event.section));
+  const profile = await loadHContentProfile();
+  const recentTopics = await listRecentHTopicTitles(date);
+  const inputHash = createHash("sha256").update(JSON.stringify({
+    date,
+    reportId: report.id,
+    generatedAt: report.generatedAt,
+    events: eligibleEvents,
+    recentTopics,
+    skillVersion: profile.skillVersion,
+    profileVersion: profile.profileVersion,
+  })).digest("hex");
+
+  if (!refresh) {
+    const existing = await mysqlJson(`
+      SELECT JSON_OBJECT('count', COUNT(*), 'inputHash', MAX(input_hash))
+      FROM yimin_h_topics
+      WHERE topic_date = ${sqlString(date)};
+    `);
+    if (Number(existing?.count || 0) > 0 && existing.inputHash === inputHash) {
+      return listHTopics(date);
+    }
+  }
+
+  let candidates = [];
+  if (eligibleEvents.length) {
+    try {
+      const content = await callDeepSeek(
+        buildHTopicGenerationPrompt(report, eligibleEvents, recentTopics, profile),
+        {
+          model: hColumnConfig.model,
+          temperature: 0.2,
+          systemPrompt: "你是 Henry 内容工作台的选题编辑。你只做选题判断，不替 Henry 发明观点、经历、客户、数字或公司事实。日报摘要不是完整原文。只返回严格 JSON。",
+        },
+      );
+      candidates = parseDeepSeekJsonArray(content);
+    } catch (error) {
+      console.error("H topic generation fallback:", formatErrorMessage(error));
+      candidates = buildFallbackHTopicCandidates(eligibleEvents, profile);
+    }
+  }
+
+  const eventByKey = new Map(eligibleEvents.map((event) => [event.eventKey, event]));
+  const accepted = [];
+  const usedKeys = new Set();
+  for (const candidate of candidates) {
+    const eventKey = String(candidate?.eventKey || "");
+    const event = eventByKey.get(eventKey);
+    if (!event || usedKeys.has(eventKey) || accepted.length >= hColumnConfig.maxTopics) continue;
+    if (!["today_new", "important"].includes(event.section) && event.section !== "continuing") continue;
+    usedKeys.add(eventKey);
+    accepted.push({ event, candidate });
+  }
+
+  await mysqlExec(`
+    UPDATE yimin_h_topics
+    SET status = 'archived',
+        updated_at = CURRENT_TIMESTAMP
+    WHERE topic_date = ${sqlString(date)}
+      AND status = 'candidate';
+  `);
+  for (const { event, candidate } of accepted) {
+    await insertHTopicCandidate(date, report, event, candidate, profile, inputHash, recentTopics);
+  }
+  await saveHAuditLog("topic_date", date, "topics.generate", actor, {
+    refresh,
+    acceptedCount: accepted.length,
+    sourceReportId: report.id,
+    inputHash,
+  });
+  return listHTopics(date);
+}
+
+function startHTopicGenerationInBackground(date, { refresh = false } = {}) {
+  if (!hColumnConfig.enabled || !hColumnConfig.autoGenerate) return null;
+  const key = `${date}:${refresh ? "refresh" : "cached"}`;
+  if (hTopicGenerationPromises.has(key)) return hTopicGenerationPromises.get(key);
+  const promise = generateHTopics(date, { refresh })
+    .catch((error) => {
+      console.error(`H topic generation failed for ${date}:`, formatErrorMessage(error));
+      return null;
+    })
+    .finally(() => hTopicGenerationPromises.delete(key));
+  hTopicGenerationPromises.set(key, promise);
+  return promise;
+}
+
+function isHTopicGenerationRunning(date) {
+  return ["refresh", "cached"].some((mode) => hTopicGenerationPromises.has(`${date}:${mode}`));
+}
+
+async function listHTopics(date = getShanghaiDate()) {
+  await initDb();
+  const topics = sanitizeStructuredTextArtifacts((await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(topic_json), JSON_ARRAY())
+    FROM (
+      SELECT JSON_OBJECT(
+        'id', t.id,
+        'date', DATE_FORMAT(t.topic_date, '%Y-%m-%d'),
+        'eventKey', t.event_key,
+        'title', t.title,
+        'eventSummary', COALESCE(t.event_summary, ''),
+        'coreQuestion', COALESCE(t.core_question, ''),
+        'suggestedAngle', COALESCE(t.suggested_angle, ''),
+        'targetAudience', COALESCE(t.target_audience, ''),
+        'contentArchetype', t.content_archetype,
+        'primaryMode', t.primary_mode,
+        'reusableMode', t.reusable_mode,
+        'fourChecks', t.four_checks_json,
+        'readiness', t.readiness,
+        'status', t.status,
+        'duplicateRisk', t.duplicate_risk_json,
+        'missingItems', t.missing_items_json,
+        'sourceCount', (
+          SELECT COUNT(*) FROM yimin_h_topic_sources s
+          WHERE s.topic_id = t.id AND s.deleted_at IS NULL
+        ),
+        'fullSourceCount', (
+          SELECT COUNT(*) FROM yimin_h_topic_sources s
+          WHERE s.topic_id = t.id AND s.deleted_at IS NULL AND s.content_status = 'full'
+        ),
+        'aLevelSourceCount', (
+          SELECT COUNT(*) FROM yimin_h_topic_sources s
+          WHERE s.topic_id = t.id AND s.deleted_at IS NULL AND s.source_level = 'A'
+        ),
+        'confirmedViewpointCount', (
+          SELECT COUNT(*) FROM yimin_h_viewpoints v
+          WHERE v.topic_id = t.id AND v.deleted_at IS NULL AND v.is_confirmed = 1
+        ),
+        'draftCount', (
+          SELECT COUNT(*) FROM yimin_h_drafts d
+          WHERE d.topic_id = t.id AND d.status <> 'failed'
+        ),
+        'readyForHenryDraftCount', (
+          SELECT COUNT(*) FROM yimin_h_drafts d
+          WHERE d.topic_id = t.id AND d.status = 'ready_for_henry'
+        ),
+        'updatedAt', DATE_FORMAT(t.updated_at, '%Y-%m-%dT%H:%i:%s+08:00')
+      ) AS topic_json
+      FROM yimin_h_topics t
+      WHERE t.topic_date = ${sqlString(date)}
+        AND t.status <> 'archived'
+      ORDER BY FIELD(t.status, 'selected', 'candidate', 'later', 'rejected', 'archived'),
+               FIELD(t.readiness, 'draft_ready', 'needs_viewpoint', 'needs_evidence', 'outline_ready', 'topic_only', 'not_recommended'),
+               t.id ASC
+    ) topics;
+  `)) || []);
+  const statusRank = { selected: 0, candidate: 1, later: 2, rejected: 3, archived: 4 };
+  const readinessRank = {
+    draft_ready: 0,
+    needs_viewpoint: 1,
+    needs_evidence: 2,
+    outline_ready: 3,
+    topic_only: 4,
+    not_recommended: 5,
+  };
+  return topics.sort((left, right) => (
+    (statusRank[left.status] ?? 99) - (statusRank[right.status] ?? 99)
+    || (readinessRank[left.readiness] ?? 99) - (readinessRank[right.readiness] ?? 99)
+    || Number(left.id) - Number(right.id)
+  ));
+}
+
+async function getHTopicBase(topicId) {
+  return sanitizeStructuredTextArtifacts(await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'id', id,
+      'date', DATE_FORMAT(topic_date, '%Y-%m-%d'),
+      'sourceReportId', source_report_id,
+      'eventKey', event_key,
+      'title', title,
+      'eventSummary', COALESCE(event_summary, ''),
+      'coreQuestion', COALESCE(core_question, ''),
+      'suggestedAngle', COALESCE(suggested_angle, ''),
+      'targetAudience', COALESCE(target_audience, ''),
+      'contentArchetype', content_archetype,
+      'primaryMode', primary_mode,
+      'reusableMode', reusable_mode,
+      'fourChecks', four_checks_json,
+      'readiness', readiness,
+      'status', status,
+      'duplicateRisk', duplicate_risk_json,
+      'sourceSnapshot', source_snapshot_json,
+      'missingItems', missing_items_json,
+      'skillVersion', skill_version,
+      'profileVersion', profile_version,
+      'selectedBy', selected_by,
+      'selectedAt', IF(selected_at IS NULL, NULL, DATE_FORMAT(selected_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+      'createdAt', DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'updatedAt', DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:%s+08:00')
+    )
+    FROM yimin_h_topics
+    WHERE id = ${sqlNumber(topicId)}
+    LIMIT 1;
+  `));
+}
+
+async function listHTopicSources(topicId) {
+  return sanitizeStructuredTextArtifacts((await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+      'id', id,
+      'articleHash', article_hash,
+      'sourceName', source_name,
+      'url', url,
+      'title', title,
+      'publishedAt', IF(published_at IS NULL, NULL, DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+      'contentStatus', content_status,
+      'sourceLevel', source_level,
+      'policyStatus', policy_status,
+      'extractedText', COALESCE(extracted_text, ''),
+      'evidenceSummary', COALESCE(evidence_summary, ''),
+      'isPrimary', is_primary,
+      'verifiedBy', verified_by,
+      'verifiedAt', IF(verified_at IS NULL, NULL, DATE_FORMAT(verified_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+      'updatedAt', DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:%s+08:00')
+    )), JSON_ARRAY())
+    FROM (
+      SELECT *
+      FROM yimin_h_topic_sources
+      WHERE topic_id = ${sqlNumber(topicId)}
+        AND deleted_at IS NULL
+      ORDER BY is_primary DESC, FIELD(source_level, 'A', 'B', 'C', 'D'), id ASC
+    ) sources;
+  `)) || []);
+}
+
+async function listHTopicViewpoints(topicId) {
+  return sanitizeStructuredTextArtifacts((await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+      'id', id,
+      'inputType', input_type,
+      'rawText', raw_text,
+      'editedText', COALESCE(edited_text, ''),
+      'isConfirmed', is_confirmed,
+      'confirmationType', confirmation_type,
+      'confirmedBy', confirmed_by,
+      'confirmedAt', IF(confirmed_at IS NULL, NULL, DATE_FORMAT(confirmed_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+      'createdBy', created_by,
+      'createdAt', DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'updatedAt', DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:%s+08:00')
+    )), JSON_ARRAY())
+    FROM (
+      SELECT *
+      FROM yimin_h_viewpoints
+      WHERE topic_id = ${sqlNumber(topicId)}
+        AND deleted_at IS NULL
+      ORDER BY is_confirmed DESC, id DESC
+    ) viewpoints;
+  `)) || []);
+}
+
+async function listHTopicDrafts(topicId) {
+  const drafts = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+      'id', d.id,
+      'topicId', d.topic_id,
+      'parentDraftId', d.parent_draft_id,
+      'mode', d.mode,
+      'versionNo', d.version_no,
+      'title', d.title,
+      'titleCandidates', d.title_candidates_json,
+      'outlineMarkdown', COALESCE(d.outline_markdown, ''),
+      'contentMarkdown', d.content_markdown,
+      'html', d.content_html,
+      'extras', d.extras_json,
+      'pendingFacts', d.pending_facts_json,
+      'status', d.status,
+      'readiness', d.readiness,
+      'provider', d.provider,
+      'model', d.model,
+      'skillVersion', d.skill_version,
+      'profileVersion', d.profile_version,
+      'promptVersion', d.prompt_version,
+      'generationError', d.generation_error,
+      'createdBy', d.created_by,
+      'approvedBy', d.approved_by,
+      'approvalType', d.approval_type,
+      'approvedAt', IF(d.approved_at IS NULL, NULL, DATE_FORMAT(d.approved_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+      'createdAt', DATE_FORMAT(d.created_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'updatedAt', DATE_FORMAT(d.updated_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'latestReview', (
+        SELECT JSON_OBJECT(
+          'id', r.id,
+          'conclusion', r.conclusion,
+          'l1Status', r.l1_status,
+          'l2Status', r.l2_status,
+          'l3Status', r.l3_status,
+          'l4Status', r.l4_status,
+          'issues', r.issues_json,
+          'pendingFacts', r.pending_facts_json,
+          'requiredActions', r.required_actions_json,
+          'model', r.model,
+          'reviewedAt', DATE_FORMAT(r.reviewed_at, '%Y-%m-%dT%H:%i:%s+08:00')
+        )
+        FROM yimin_h_reviews r
+        WHERE r.draft_id = d.id
+        ORDER BY r.id DESC
+        LIMIT 1
+      )
+    )), JSON_ARRAY())
+    FROM (
+      SELECT *
+      FROM yimin_h_drafts
+      WHERE topic_id = ${sqlNumber(topicId)}
+      ORDER BY updated_at DESC, id DESC
+    ) d;
+  `)) || [];
+  return sanitizeStructuredTextArtifacts(drafts)
+    .sort((left, right) => Number(right.id) - Number(left.id));
+}
+
+async function getHDraft(draftId) {
+  return sanitizeStructuredTextArtifacts(await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'id', id,
+      'topicId', topic_id,
+      'parentDraftId', parent_draft_id,
+      'mode', mode,
+      'versionNo', version_no,
+      'title', title,
+      'titleCandidates', title_candidates_json,
+      'outlineMarkdown', COALESCE(outline_markdown, ''),
+      'contentMarkdown', content_markdown,
+      'html', content_html,
+      'extras', extras_json,
+      'pendingFacts', pending_facts_json,
+      'status', status,
+      'readiness', readiness,
+      'provider', provider,
+      'model', model,
+      'skillVersion', skill_version,
+      'profileVersion', profile_version,
+      'promptVersion', prompt_version,
+      'generationError', generation_error,
+      'inputHash', input_hash,
+      'inputSnapshot', input_snapshot_json,
+      'createdBy', created_by,
+      'approvedBy', approved_by,
+      'approvalType', approval_type,
+      'approvedAt', IF(approved_at IS NULL, NULL, DATE_FORMAT(approved_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+      'createdAt', DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'updatedAt', DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:%s+08:00')
+    )
+    FROM yimin_h_drafts
+    WHERE id = ${sqlNumber(draftId)}
+    LIMIT 1;
+  `));
+}
+
+async function getLatestHDraftReview(draftId) {
+  return sanitizeStructuredTextArtifacts(await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'id', id,
+      'draftId', draft_id,
+      'conclusion', conclusion,
+      'l1Status', l1_status,
+      'l2Status', l2_status,
+      'l3Status', l3_status,
+      'l4Status', l4_status,
+      'issues', issues_json,
+      'pendingFacts', pending_facts_json,
+      'requiredActions', required_actions_json,
+      'model', model,
+      'reviewedAt', DATE_FORMAT(reviewed_at, '%Y-%m-%dT%H:%i:%s+08:00')
+    )
+    FROM yimin_h_reviews
+    WHERE draft_id = ${sqlNumber(draftId)}
+    ORDER BY id DESC
+    LIMIT 1;
+  `));
+}
+
+function isHDraftReviewStale(review, sources = [], viewpoints = []) {
+  if (!review) return true;
+  const reviewedAt = Date.parse(review.reviewedAt || "");
+  if (!Number.isFinite(reviewedAt)) return true;
+  return sources.some((source) => Date.parse(source.updatedAt || "") > reviewedAt)
+    || viewpoints.some((viewpoint) => Date.parse(viewpoint.updatedAt || viewpoint.createdAt || "") > reviewedAt);
+}
+
+async function assertHDraftReviewCurrent(draft) {
+  const [review, sources, viewpoints] = await Promise.all([
+    getLatestHDraftReview(draft.id),
+    listHTopicSources(draft.topicId),
+    listHTopicViewpoints(draft.topicId),
+  ]);
+  if (!review || isHDraftReviewStale(review, sources, viewpoints)) {
+    const error = new Error("事实包或 Henry 观点在审校后发生变化，请重新运行四层审校");
+    error.code = "H_DRAFT_REVIEW_STALE";
+    throw error;
+  }
+  return review;
+}
+
+async function getHTopicDetail(topicId) {
+  await initDb();
+  const topic = await getHTopicBase(topicId);
+  if (!topic) return null;
+  const [sources, viewpoints, drafts] = await Promise.all([
+    listHTopicSources(topicId),
+    listHTopicViewpoints(topicId),
+    listHTopicDrafts(topicId),
+  ]);
+  const draftsWithReviewState = drafts.map((draft) => ({
+    ...draft,
+    latestReview: draft.latestReview
+      ? {
+          ...draft.latestReview,
+          isStale: isHDraftReviewStale(draft.latestReview, sources, viewpoints),
+        }
+      : null,
+  }));
+  return {
+    ...topic,
+    sources,
+    viewpoints,
+    drafts: draftsWithReviewState,
+    sourceCount: sources.length,
+    fullSourceCount: sources.filter((source) => source.contentStatus === "full").length,
+    aLevelSourceCount: sources.filter((source) => source.sourceLevel === "A").length,
+    confirmedViewpointCount: viewpoints.filter((viewpoint) => viewpoint.isConfirmed).length,
+    draftCount: draftsWithReviewState.filter((draft) => draft.status !== "failed").length,
+    readyForHenryDraftCount: draftsWithReviewState.filter((draft) => draft.status === "ready_for_henry").length,
+  };
+}
+
+async function refreshHTopicReadiness(topicId) {
+  const topic = await getHTopicBase(topicId);
+  if (!topic) return null;
+  const [sources, viewpoints] = await Promise.all([
+    listHTopicSources(topicId),
+    listHTopicViewpoints(topicId),
+  ]);
+  const highRisk = isHHighRiskTopic(topic);
+  const hasFullSource = sources.some((source) => source.contentStatus === "full" && source.verifiedAt);
+  const hasAFullSource = sources.some((source) => (
+    source.contentStatus === "full"
+    && source.sourceLevel === "A"
+    && source.verifiedAt
+  ));
+  const hasBasis = highRisk ? hasAFullSource : hasFullSource;
+  const hasJudgment = viewpoints.some((viewpoint) => Boolean(viewpoint.isConfirmed));
+  const currentChecks = topic.fourChecks || {};
+  const checks = {
+    hasJudgment,
+    hasBasis,
+    useful: Boolean(currentChecks.useful),
+    longTerm: Boolean(currentChecks.longTerm),
+  };
+  checks.passedCount = Object.values(checks).filter((value) => value === true).length;
+
+  let readiness = "topic_only";
+  if (checks.passedCount <= 1) readiness = "not_recommended";
+  else if (!hasBasis && !hasJudgment) readiness = "topic_only";
+  else if (!hasBasis) readiness = "needs_evidence";
+  else if (!hasJudgment) readiness = "needs_viewpoint";
+  else if (checks.useful && checks.longTerm) readiness = "draft_ready";
+  else readiness = "outline_ready";
+
+  const missingItems = [
+    ...(!hasBasis
+      ? [highRisk
+        ? "政策、法律、税务或投资核心事实需要至少一个 A 级完整来源"
+        : "需要至少一个完整来源"]
+      : []),
+    ...(!hasJudgment ? ["需要 H 专栏成员确认本次核心观点"] : []),
+    ...(!checks.useful ? ["需要说明读者看完后可以采取什么行动"] : []),
+    ...(!checks.longTerm ? ["需要建立与专业、合规、安全、公平、全球化或长期主义的真实连接"] : []),
+  ];
+  await mysqlExec(`
+    UPDATE yimin_h_topics
+    SET four_checks_json = ${sqlJson(checks)},
+        readiness = ${sqlString(readiness)},
+        missing_items_json = ${sqlJson(missingItems)}
+    WHERE id = ${sqlNumber(topicId)};
+  `);
+  return getHTopicDetail(topicId);
+}
+
+async function updateHTopic(topicId, data, actor) {
+  const topic = await getHTopicBase(topicId);
+  if (!topic) return null;
+  const status = normalizeHTopicStatus(data.status, topic.status);
+  const newlySelected = status === "selected" && topic.status !== "selected";
+  const requestedChecks = data.fourChecks && typeof data.fourChecks === "object"
+    ? data.fourChecks
+    : {};
+  const nextChecks = {
+    ...(topic.fourChecks || {}),
+    useful: typeof requestedChecks.useful === "boolean"
+      ? requestedChecks.useful
+      : Boolean(topic.fourChecks?.useful),
+    longTerm: typeof requestedChecks.longTerm === "boolean"
+      ? requestedChecks.longTerm
+      : Boolean(topic.fourChecks?.longTerm),
+  };
+  await mysqlExec(`
+    UPDATE yimin_h_topics
+    SET status = ${sqlString(status)},
+        primary_mode = ${sqlString(normalizeHMode(data.primaryMode, topic.primaryMode))},
+        reusable_mode = ${sqlString(normalizeHMode(data.reusableMode, topic.reusableMode || "short_video"))},
+        four_checks_json = ${sqlJson(nextChecks)},
+        selected_by = ${newlySelected ? sqlString(actor.id) : "selected_by"},
+        selected_at = ${newlySelected ? "CURRENT_TIMESTAMP" : "selected_at"},
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ${sqlNumber(topicId)};
+  `);
+  await saveHAuditLog("topic", topicId, "topic.update", actor, {
+    previousStatus: topic.status,
+    status,
+    primaryMode: normalizeHMode(data.primaryMode, topic.primaryMode),
+    reusableMode: normalizeHMode(data.reusableMode, topic.reusableMode || "short_video"),
+    fourChecks: {
+      useful: nextChecks.useful,
+      longTerm: nextChecks.longTerm,
+    },
+  });
+  if (["later", "rejected"].includes(status)) {
+    await saveHFeedback(topicId, null, status === "later" ? "later" : "reject", data.reasonCode, data.note, actor);
+  }
+  if (newlySelected) {
+    try {
+      return await fetchHTopicEvidence(topicId, actor);
+    } catch (error) {
+      console.warn(`H automatic evidence fetch failed for topic ${topicId}:`, formatErrorMessage(error));
+    }
+  }
+  return refreshHTopicReadiness(topicId);
+}
+
+async function saveHFeedback(topicId, draftId, action, reasonCode, note, actor) {
+  await mysqlExec(`
+    INSERT INTO yimin_h_feedback (
+      topic_id, draft_id, action, reason_code, note, created_by
+    )
+    VALUES (
+      ${sqlNumber(topicId)}, ${draftId ? sqlNumber(draftId) : "NULL"},
+      ${sqlString(action)}, ${sqlString(reasonCode || "")},
+      ${sqlString(note || "")}, ${sqlString(actor.id)}
+    );
+  `);
+  await saveHAuditLog(draftId ? "draft" : "topic", draftId || topicId, `feedback.${action}`, actor, {
+    topicId: Number(topicId),
+    draftId: draftId ? Number(draftId) : null,
+    reasonCode: reasonCode || "",
+  });
+}
+
+async function addHViewpoint(topicId, data, actor) {
+  const topic = await getHTopicBase(topicId);
+  if (!topic) return null;
+  const rawText = sanitizeTextArtifacts(String(data.rawText || data.text || "").trim());
+  if (!rawText) {
+    throw new Error("请输入 Henry 本次观点");
+  }
+  const wantsConfirmation = data.confirm === true;
+  const confirmed = wantsConfirmation;
+  await mysqlExec(`
+    INSERT INTO yimin_h_viewpoints (
+      topic_id, input_type, raw_text, edited_text, is_confirmed,
+      confirmation_type, confirmed_by, confirmed_at, created_by
+    )
+    VALUES (
+      ${sqlNumber(topicId)}, 'text', ${sqlString(rawText)},
+      ${sqlString(sanitizeTextArtifacts(String(data.editedText || rawText)))},
+      ${sqlNumber(confirmed ? 1 : 0)},
+      ${sqlString(confirmed ? actor.confirmationType : "unconfirmed")},
+      ${confirmed ? sqlString(actor.id) : "NULL"},
+      ${confirmed ? "CURRENT_TIMESTAMP" : "NULL"},
+      ${sqlString(actor.id)}
+    );
+  `);
+  await saveHAuditLog("topic", topicId, "viewpoint.add", actor, {
+    confirmed,
+    confirmationType: confirmed ? actor.confirmationType : "unconfirmed",
+  });
+  return refreshHTopicReadiness(topicId);
+}
+
+async function confirmHViewpoint(viewpointId, actor) {
+  const row = await mysqlJson(`
+    SELECT JSON_OBJECT('id', id, 'topicId', topic_id)
+    FROM yimin_h_viewpoints
+    WHERE id = ${sqlNumber(viewpointId)}
+      AND deleted_at IS NULL
+    LIMIT 1;
+  `);
+  if (!row) return null;
+  await mysqlExec(`
+    UPDATE yimin_h_viewpoints
+    SET is_confirmed = 1,
+        confirmation_type = ${sqlString(actor.confirmationType)},
+        confirmed_by = ${sqlString(actor.id)},
+        confirmed_at = CURRENT_TIMESTAMP
+    WHERE id = ${sqlNumber(viewpointId)};
+  `);
+  await saveHAuditLog("viewpoint", viewpointId, "viewpoint.confirm", actor, {
+    topicId: Number(row.topicId),
+    confirmationType: actor.confirmationType,
+  });
+  return refreshHTopicReadiness(row.topicId);
+}
+
+async function updateHViewpoint(viewpointId, data, actor) {
+  const row = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'id', id,
+      'topicId', topic_id,
+      'currentText', COALESCE(edited_text, raw_text)
+    )
+    FROM yimin_h_viewpoints
+    WHERE id = ${sqlNumber(viewpointId)}
+      AND deleted_at IS NULL
+    LIMIT 1;
+  `);
+  if (!row) return null;
+  const editedText = sanitizeTextArtifacts(String(data.editedText || data.text || "").trim());
+  if (!editedText) throw new Error("Henry 观点不能为空");
+  await mysqlExec(`
+    UPDATE yimin_h_viewpoints
+    SET input_type = IF(input_type = 'profile', 'text', input_type),
+        edited_text = ${sqlString(editedText)},
+        is_confirmed = 1,
+        confirmation_type = ${sqlString(actor.confirmationType)},
+        confirmed_by = ${sqlString(actor.id)},
+        confirmed_at = CURRENT_TIMESTAMP
+    WHERE id = ${sqlNumber(viewpointId)}
+      AND deleted_at IS NULL;
+  `);
+  await saveHAuditLog("viewpoint", viewpointId, "viewpoint.update", actor, {
+    topicId: Number(row.topicId),
+    previousContentHash: createHash("sha256").update(String(row.currentText || "")).digest("hex"),
+    contentHash: createHash("sha256").update(editedText).digest("hex"),
+  });
+  return refreshHTopicReadiness(row.topicId);
+}
+
+async function deleteHViewpoint(viewpointId, actor) {
+  const row = await mysqlJson(`
+    SELECT JSON_OBJECT('id', id, 'topicId', topic_id, 'inputType', input_type)
+    FROM yimin_h_viewpoints
+    WHERE id = ${sqlNumber(viewpointId)}
+      AND deleted_at IS NULL
+    LIMIT 1;
+  `);
+  if (!row) return null;
+  await mysqlExec(`
+    UPDATE yimin_h_viewpoints
+    SET deleted_at = CURRENT_TIMESTAMP
+    WHERE id = ${sqlNumber(viewpointId)}
+      AND deleted_at IS NULL;
+  `);
+  await saveHAuditLog("viewpoint", viewpointId, "viewpoint.delete", actor, {
+    topicId: Number(row.topicId),
+    inputType: row.inputType,
+  });
+  return refreshHTopicReadiness(row.topicId);
+}
+
+function normalizeHSourceUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    if (!["http:", "https:"].includes(url.protocol)) {
+      throw new Error("unsupported protocol");
+    }
+    return url.href;
+  } catch {
+    throw new Error("来源链接必须是有效的 http:// 或 https:// 地址");
+  }
+}
+
+function deriveHContentStatus(extractedText) {
+  const length = String(extractedText || "").trim().length;
+  if (length >= hFullSourceMinChars) return "full";
+  return length > 0 ? "summary_only" : "missing";
+}
+
+async function addHTopicSource(topicId, data, actor) {
+  const topic = await getHTopicBase(topicId);
+  if (!topic) return null;
+  const url = normalizeHSourceUrl(data.url);
+  const title = sanitizeTextArtifacts(String(data.title || "").trim());
+  const extractedText = sanitizeTextArtifacts(String(data.extractedText || data.content || "").trim());
+  if (!url && !title && !extractedText) throw new Error("来源链接、标题或正文至少填写一项");
+  const contentStatus = deriveHContentStatus(extractedText);
+  const sourceLevel = ["A", "B", "C", "D"].includes(data.sourceLevel)
+    ? data.sourceLevel
+    : inferHSourceLevel(data.sourceName, url);
+  const allowedPolicyStatuses = new Set(["effective", "announced", "pending", "proposed", "media_report", "opinion", "not_applicable"]);
+  const policyStatus = allowedPolicyStatuses.has(data.policyStatus)
+    ? data.policyStatus
+    : inferHPolicyStatus(title, extractedText, topic.contentArchetype);
+  const row = await mysqlJson(`
+    INSERT INTO yimin_h_topic_sources (
+      topic_id, article_hash, source_name, url, title, published_at,
+      content_status, source_level, policy_status, extracted_text,
+      evidence_summary, is_primary, verified_by, verified_at, content_hash
+    )
+    VALUES (
+      ${sqlNumber(topicId)}, NULL, ${sqlString(data.sourceName || "")},
+      ${sqlString(url)}, ${sqlString(title)}, ${sqlDate(data.publishedAt)},
+      ${sqlString(contentStatus)}, ${sqlString(sourceLevel)}, ${sqlString(policyStatus)},
+      ${sqlString(extractedText)}, ${sqlString(data.evidenceSummary || "")},
+      ${sqlNumber(data.isPrimary ? 1 : 0)}, ${data.verified ? sqlString(actor.id) : "NULL"},
+      ${data.verified ? "CURRENT_TIMESTAMP" : "NULL"},
+      ${sqlString(createHash("sha256").update(extractedText).digest("hex"))}
+    );
+    SELECT JSON_OBJECT('id', LAST_INSERT_ID());
+  `);
+  await saveHAuditLog("source", row?.id || "", "source.add", actor, {
+    topicId: Number(topicId),
+    contentStatus,
+    sourceLevel,
+    policyStatus,
+    verified: Boolean(data.verified),
+  });
+  return refreshHTopicReadiness(topicId);
+}
+
+async function updateHTopicSource(sourceId, data, actor) {
+  const source = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'id', id,
+      'topicId', topic_id,
+      'sourceName', source_name,
+      'url', url,
+      'title', title,
+      'contentStatus', content_status,
+      'sourceLevel', source_level,
+      'policyStatus', policy_status,
+      'extractedText', COALESCE(extracted_text, ''),
+      'evidenceSummary', COALESCE(evidence_summary, ''),
+      'isPrimary', is_primary,
+      'verifiedAt', IF(verified_at IS NULL, NULL, DATE_FORMAT(verified_at, '%Y-%m-%dT%H:%i:%s+08:00'))
+    )
+    FROM yimin_h_topic_sources
+    WHERE id = ${sqlNumber(sourceId)}
+      AND deleted_at IS NULL
+    LIMIT 1;
+  `);
+  if (!source) return null;
+  const extractedText = sanitizeTextArtifacts(String(data.extractedText ?? source.extractedText));
+  const extractedTextWasProvided = Object.prototype.hasOwnProperty.call(data, "extractedText");
+  const contentStatusWasProvided = Object.prototype.hasOwnProperty.call(data, "contentStatus");
+  const contentStatus = extractedTextWasProvided || contentStatusWasProvided
+    ? deriveHContentStatus(extractedText)
+    : source.contentStatus;
+  const sourceLevel = ["A", "B", "C", "D"].includes(data.sourceLevel)
+    ? data.sourceLevel
+    : source.sourceLevel;
+  const policyStatus = ["effective", "announced", "pending", "proposed", "media_report", "opinion", "not_applicable"].includes(data.policyStatus)
+    ? data.policyStatus
+    : source.policyStatus;
+  const url = Object.prototype.hasOwnProperty.call(data, "url")
+    ? normalizeHSourceUrl(data.url)
+    : String(source.url || "");
+  const title = sanitizeTextArtifacts(String(data.title ?? source.title));
+  const contentChanged = extractedText !== String(source.extractedText || "")
+    || contentStatus !== source.contentStatus
+    || sourceLevel !== source.sourceLevel
+    || policyStatus !== source.policyStatus
+    || url !== String(source.url || "")
+    || title !== String(source.title || "");
+  await mysqlExec(`
+    UPDATE yimin_h_topic_sources
+    SET source_name = ${sqlString(data.sourceName ?? source.sourceName)},
+        url = ${sqlString(url)},
+        title = ${sqlString(title)},
+        content_status = ${sqlString(contentStatus)},
+        source_level = ${sqlString(sourceLevel)},
+        policy_status = ${sqlString(policyStatus)},
+        extracted_text = ${sqlString(extractedText)},
+        evidence_summary = ${sqlString(data.evidenceSummary ?? source.evidenceSummary)},
+        is_primary = ${sqlNumber((data.isPrimary ?? source.isPrimary) ? 1 : 0)},
+        verified_by = ${data.verified ? sqlString(actor.id) : (contentChanged ? "NULL" : "verified_by")},
+        verified_at = ${data.verified ? "CURRENT_TIMESTAMP" : (contentChanged ? "NULL" : "verified_at")},
+        content_hash = ${sqlString(createHash("sha256").update(extractedText).digest("hex"))}
+    WHERE id = ${sqlNumber(sourceId)};
+  `);
+  await saveHAuditLog("source", sourceId, "source.update", actor, {
+    topicId: Number(source.topicId),
+    contentStatus,
+    sourceLevel,
+    policyStatus,
+    verified: data.verified ? true : (contentChanged ? false : Boolean(source.verifiedAt)),
+  });
+  return refreshHTopicReadiness(source.topicId);
+}
+
+async function deleteHTopicSource(sourceId, actor) {
+  const source = await mysqlJson(`
+    SELECT JSON_OBJECT('topicId', topic_id)
+    FROM yimin_h_topic_sources
+    WHERE id = ${sqlNumber(sourceId)}
+      AND deleted_at IS NULL
+    LIMIT 1;
+  `);
+  if (!source) return null;
+  await mysqlExec(`
+    UPDATE yimin_h_topic_sources
+    SET deleted_at = CURRENT_TIMESTAMP
+    WHERE id = ${sqlNumber(sourceId)};
+  `);
+  await saveHAuditLog("source", sourceId, "source.delete", actor, {
+    topicId: Number(source.topicId),
+  });
+  return refreshHTopicReadiness(source.topicId);
+}
+
+async function fetchHTopicEvidence(topicId, actor) {
+  const sources = await listHTopicSources(topicId);
+  if (!sources.length) return refreshHTopicReadiness(topicId);
+  const pendingSources = sources.filter((source) => source.url && source.contentStatus !== "full");
+  const results = await runWithConcurrency(pendingSources, 3, async (source) => {
+    let fetched = null;
+    try {
+      const firecrawl = await fetchWithFirecrawl(source.url);
+      if (firecrawl.ok && String(firecrawl.content || "").trim().length >= 800) {
+        fetched = {
+          text: firecrawl.content,
+          title: firecrawl.title || source.title,
+        };
+      } else {
+        const jina = await fetchWithJina(source.url);
+        if (jina.ok && String(jina.text || "").trim().length >= 800) {
+          fetched = {
+            text: jina.text,
+            title: jina.title || source.title,
+          };
+        }
+      }
+    } catch (error) {
+      console.warn(`H evidence fetch failed ${source.url}:`, formatErrorMessage(error));
+    }
+    if (!fetched) return false;
+    const cleanText = sanitizeTextArtifacts(String(fetched.text || "")).slice(0, 120000);
+    await mysqlExec(`
+      UPDATE yimin_h_topic_sources
+      SET title = ${sqlString(fetched.title || source.title)},
+          extracted_text = ${sqlString(cleanText)},
+          content_status = 'full',
+          source_level = ${sqlString(inferHSourceLevel(source.sourceName, source.url))},
+          content_hash = ${sqlString(createHash("sha256").update(cleanText).digest("hex"))},
+          verified_by = NULL,
+          verified_at = NULL
+      WHERE id = ${sqlNumber(source.id)};
+    `);
+    return true;
+  });
+  const updatedCount = results.filter(Boolean).length;
+  if (updatedCount > 0) {
+    await saveHAuditLog("topic", topicId, "evidence.fetch", actor, {
+      updatedSourceCount: updatedCount,
+    });
+  }
+  return refreshHTopicReadiness(topicId);
+}
+
+function buildHDraftPrompt(topic, sources, viewpoints, profile, mode) {
+  const channel = mode === "outline"
+    ? {
+        label: "内容大纲",
+        length: "以清晰完整为准",
+        requirements: ["确认一个主轴", "列出事实依据和边界", "组织3—5个独立论点", "保留风险、反面和读者行动"],
+      }
+    : profile.channelModes?.[mode] || profile.channelModes?.wechat_article || {};
+  const sourcePayload = sources.map((source) => ({
+    sourceName: source.sourceName,
+    title: source.title,
+    url: source.url,
+    publishedAt: source.publishedAt,
+    contentStatus: source.contentStatus,
+    sourceLevel: source.sourceLevel,
+    policyStatus: source.policyStatus,
+    evidenceSummary: source.evidenceSummary,
+    text: String(source.extractedText || "").slice(0, 22000),
+  }));
+  const viewpointPayload = viewpoints
+    .filter((viewpoint) => Boolean(viewpoint.isConfirmed))
+    .map((viewpoint) => ({
+      inputType: viewpoint.inputType,
+      text: viewpoint.editedText || viewpoint.rawText,
+      confirmationType: viewpoint.confirmationType,
+      confirmedBy: viewpoint.confirmedBy,
+    }));
+
+  return `请基于以下事实包和已确认观点生成 Henry 内容草稿。
+
+任务模式：${mode}
+渠道名称：${channel.label || mode}
+建议长度：${channel.length || ""}
+渠道要求：${JSON.stringify(channel.requirements || [])}
+
+只返回一个严格 JSON 对象，不要 Markdown 代码围栏：
+{
+  "titleCandidates":["默认8个，不复制历史标题"],
+  "recommendedTitle":"推荐标题",
+  "outlineMarkdown":"大纲 Markdown",
+  "contentMarkdown":"${mode === "outline" ? "与 outlineMarkdown 一致的结构化内容大纲" : "完整正文或口播 Markdown"}",
+  "extras":{
+    "recommendationReason":"推荐标题理由",
+    "summary":"公众号摘要或视频定位",
+    "coverText":"视频封面或文章封面文案",
+    "visualSuggestions":["配图、画面、字幕或B-roll节点"]
+  },
+  "pendingFacts":["待本人确认、待补来源、待补数据或待补统计日期"],
+  "verificationNotes":["发布前核验提示"]
+}
+
+写作原则：
+- 这是供 Henry 本人或授权编辑审阅的草稿，不声称完全代表本人。
+- 先有观点，再说明前提、事实、原因、风险和读者行动。
+- 一篇只保留一个主轴和3—5个独立论点，不换词重复结论。
+- 系统建议角度不是本人观点，只能使用“已确认观点”里的第一人称表达。
+- 不得虚构个人经历、客户案例、公司事实、情绪、对话或现场。
+- 只有标题或摘要的来源不得冒充完整原文。
+- 政策、法律、税务、投资、费用、排期和资格必须保留状态、日期、适用对象和不确定性。
+- 不得使用“保证获批、绝对安全、零风险、百分百”等承诺。
+- 不得披露禁区内容。
+- 标题默认 balanced：专业、有明确对象和问题，但不得超过正文证据强度。
+- 公众号开头150字内出现主题；视频前20秒出现核心问题和初步答案。
+- 必须承认至少一个风险、代价、反面或不适合人群。
+- 不使用“赋能、布局、生态、认知升级、底层逻辑”等空泛公关表达。
+${mode === "outline" ? "- 当前任务只生成内容大纲：明确主轴、事实边界、核心观点、3—5个论点、风险和行动。" : ""}
+
+人物定位：
+${profile.positioning}
+
+禁止内容：
+${JSON.stringify(profile.prohibitedContent || [])}
+
+选题：
+${JSON.stringify({
+    title: topic.title,
+    eventSummary: topic.eventSummary,
+    coreQuestion: topic.coreQuestion,
+    suggestedAngle: topic.suggestedAngle,
+    targetAudience: topic.targetAudience,
+    contentArchetype: topic.contentArchetype,
+  })}
+
+已确认观点：
+${JSON.stringify(viewpointPayload)}
+
+事实包：
+${JSON.stringify(sourcePayload)}`;
+}
+
+function buildFallbackHDraft(topic, sources, viewpoints, mode) {
+  const confirmedViewpoint = viewpoints.find((viewpoint) => Boolean(viewpoint.isConfirmed));
+  const facts = sources
+    .filter((source) => source.evidenceSummary || source.extractedText)
+    .slice(0, 5)
+    .map((source) => `- ${source.evidenceSummary || String(source.extractedText || "").slice(0, 220)}（${source.sourceLevel}级，${source.policyStatus}）`);
+  const outline = [
+    `# ${topic.title}`,
+    "",
+    "## 核心观点",
+    confirmedViewpoint?.editedText || confirmedViewpoint?.rawText || "[待本人确认：这件事真正想表达的判断]",
+    "",
+    "## 适用前提",
+    `面向：${topic.targetAudience || "关心身份与全球化选择的中文读者"}`,
+    "",
+    "## 已确认事实",
+    ...(facts.length ? facts : ["- [待补来源：当前没有足够完整的事实材料]"]),
+    "",
+    "## 风险与不确定性",
+    "- 发布前需逐项核验政策状态、日期、适用对象和限制条件。",
+    "",
+    "## 对读者的行动建议",
+    "- 先判断自身目标和风险承受能力，再决定是否调整方案。",
+  ].join("\n");
+  return {
+    titleCandidates: [topic.title],
+    recommendedTitle: topic.title,
+    outlineMarkdown: outline,
+    contentMarkdown: mode === "outline"
+      ? outline
+      : `${outline}\n\n> AI 完整成稿暂不可用，本版本仅保留可验证的大纲，不能直接发布。`,
+    extras: {
+      recommendationReason: "标题直接对应已确认事件，不扩大证据强度。",
+      summary: topic.coreQuestion,
+      coverText: topic.title.slice(0, 16),
+      visualSuggestions: [],
+    },
+    pendingFacts: topic.missingItems || [],
+    verificationNotes: ["生成模型暂不可用，本版本为规则化降级大纲。"],
+  };
+}
+
+async function beginHGenerationRun(runType, targetId, idempotencyKey, model) {
+  await mysqlExec(`
+    INSERT INTO yimin_h_generation_runs (
+      run_type, target_id, idempotency_key, status, provider, model,
+      attempt_count, started_at
+    )
+    VALUES (
+      ${sqlString(runType)}, ${targetId ? sqlNumber(targetId) : "NULL"},
+      ${sqlString(idempotencyKey)}, 'running', 'openai-compatible',
+      ${sqlString(model)}, 1, CURRENT_TIMESTAMP
+    )
+    ON DUPLICATE KEY UPDATE
+      status = 'running',
+      attempt_count = attempt_count + 1,
+      started_at = CURRENT_TIMESTAMP,
+      finished_at = NULL,
+      error_message = NULL,
+      updated_at = CURRENT_TIMESTAMP;
+  `);
+}
+
+async function finishHGenerationRun(idempotencyKey, error = null) {
+  await mysqlExec(`
+    UPDATE yimin_h_generation_runs
+    SET status = ${sqlString(error ? "failed" : "completed")},
+        finished_at = CURRENT_TIMESTAMP,
+        error_message = ${error ? sqlString(formatErrorMessage(error)) : "NULL"}
+    WHERE idempotency_key = ${sqlString(idempotencyKey)};
+  `);
+}
+
+async function generateHDraft(topicId, data, actor) {
+  const topic = await refreshHTopicReadiness(topicId);
+  if (!topic) return null;
+  const mode = normalizeHMode(data.mode, topic.primaryMode);
+  if (topic.status !== "selected") {
+    const error = new Error("请先选择“值得写”，再生成内容");
+    error.code = "H_TOPIC_NOT_SELECTED";
+    throw error;
+  }
+  if (topic.readiness === "not_recommended") {
+    const error = new Error("当前选题暂不建议成稿");
+    error.code = "H_TOPIC_NOT_READY";
+    throw error;
+  }
+  if (mode !== "outline" && topic.readiness !== "draft_ready") {
+    const error = new Error(`当前准备度为 ${topic.readiness}，请先补齐事实和已确认观点`);
+    error.code = "H_TOPIC_NOT_READY";
+    throw error;
+  }
+  const sources = topic.sources || await listHTopicSources(topicId);
+  const viewpoints = topic.viewpoints || await listHTopicViewpoints(topicId);
+  const profile = await loadHContentProfile();
+  const inputSnapshot = {
+    topic: {
+      id: topic.id,
+      title: topic.title,
+      eventSummary: topic.eventSummary,
+      coreQuestion: topic.coreQuestion,
+      suggestedAngle: topic.suggestedAngle,
+      targetAudience: topic.targetAudience,
+      contentArchetype: topic.contentArchetype,
+      readiness: topic.readiness,
+    },
+    sources: sources.map((source) => ({
+      id: source.id,
+      sourceName: source.sourceName,
+      url: source.url,
+      title: source.title,
+      contentStatus: source.contentStatus,
+      sourceLevel: source.sourceLevel,
+      policyStatus: source.policyStatus,
+      contentHash: createHash("sha256").update(String(source.extractedText || "")).digest("hex"),
+    })),
+    viewpoints: viewpoints.filter((viewpoint) => viewpoint.isConfirmed).map((viewpoint) => ({
+      id: viewpoint.id,
+      inputType: viewpoint.inputType,
+      text: viewpoint.editedText || viewpoint.rawText,
+      confirmationType: viewpoint.confirmationType,
+      confirmedBy: viewpoint.confirmedBy,
+    })),
+    mode,
+    skillVersion: profile.skillVersion,
+    profileVersion: profile.profileVersion,
+  };
+  const inputHash = createHash("sha256").update(JSON.stringify(inputSnapshot)).digest("hex");
+  if (!data.refresh) {
+    const existing = await mysqlJson(`
+      SELECT JSON_OBJECT('id', id)
+      FROM yimin_h_drafts
+      WHERE topic_id = ${sqlNumber(topicId)}
+        AND mode = ${sqlString(mode)}
+        AND input_hash = ${sqlString(inputHash)}
+        AND status <> 'failed'
+      ORDER BY id DESC
+      LIMIT 1;
+    `);
+    if (existing?.id) return getHDraft(existing.id);
+  }
+
+  const versionRow = await mysqlJson(`
+    SELECT JSON_OBJECT('nextVersion', COALESCE(MAX(version_no), 0) + 1)
+    FROM yimin_h_drafts
+    WHERE topic_id = ${sqlNumber(topicId)}
+      AND mode = ${sqlString(mode)};
+  `);
+  const versionNo = Number(versionRow?.nextVersion || 1);
+  const idempotencyKey = createHash("sha256").update(`draft:${topicId}:${mode}:${inputHash}:${versionNo}`).digest("hex");
+  await beginHGenerationRun("draft", topicId, idempotencyKey, hColumnConfig.model);
+  let generated;
+  let generationError = null;
+  try {
+    const content = await callDeepSeek(
+      buildHDraftPrompt(topic, sources, viewpoints, profile, mode),
+      {
+        model: hColumnConfig.model,
+        temperature: mode === "outline" ? 0.25 : 0.48,
+        systemPrompt: "你是 Henry 内容工作台的资深内容编辑。只使用提供的事实包和已确认观点，不得虚构 Henry 的观点、经历、客户、数字或公司事实。输出严格 JSON。",
+      },
+    );
+    generated = parseDeepSeekJsonObject(content);
+  } catch (error) {
+    generationError = error;
+    console.error("H draft generation fallback:", formatErrorMessage(error));
+    generated = buildFallbackHDraft(topic, sources, viewpoints, mode);
+  }
+  const titleCandidates = Array.isArray(generated.titleCandidates)
+    ? generated.titleCandidates.map((value) => sanitizeTextArtifacts(String(value))).filter(Boolean).slice(0, 8)
+    : [];
+  const title = sanitizeTextArtifacts(String(generated.recommendedTitle || titleCandidates[0] || topic.title));
+  const outlineMarkdown = sanitizeTextArtifacts(String(generated.outlineMarkdown || ""));
+  const contentMarkdown = sanitizeTextArtifacts(String(generated.contentMarkdown || outlineMarkdown || ""));
+  const pendingFacts = Array.isArray(generated.pendingFacts)
+    ? generated.pendingFacts.map((value) => sanitizeTextArtifacts(String(value))).filter(Boolean)
+    : [];
+  const extras = sanitizeStructuredTextArtifacts({
+    ...(generated.extras && typeof generated.extras === "object" ? generated.extras : {}),
+    verificationNotes: Array.isArray(generated.verificationNotes) ? generated.verificationNotes : [],
+  });
+  const row = await mysqlJson(`
+    INSERT INTO yimin_h_drafts (
+      topic_id, parent_draft_id, mode, version_no, title,
+      title_candidates_json, outline_markdown, content_markdown, content_html,
+      extras_json, pending_facts_json, status, readiness, provider, model,
+      skill_version, profile_version, prompt_version, input_hash,
+      input_snapshot_json, generation_error, created_by
+    )
+    VALUES (
+      ${sqlNumber(topicId)}, NULL, ${sqlString(mode)}, ${sqlNumber(versionNo)},
+      ${sqlString(title)}, ${sqlJson(titleCandidates)}, ${sqlString(outlineMarkdown)},
+      ${sqlString(contentMarkdown)}, ${sqlString(markdownToHtml(contentMarkdown))},
+      ${sqlJson(extras)}, ${sqlJson(pendingFacts)}, 'drafted', 'review_required',
+      'openai-compatible', ${sqlString(generationError ? "fallback" : hColumnConfig.model)},
+      ${sqlString(profile.skillVersion)}, ${sqlString(profile.profileVersion)},
+      ${sqlString(mode === "outline" ? "h-outline-v2" : "h-draft-v1")},
+      ${sqlString(inputHash)}, ${sqlJson(inputSnapshot)},
+      ${generationError ? sqlString(formatErrorMessage(generationError)) : "NULL"},
+      ${sqlString(actor.id)}
+    );
+    SELECT JSON_OBJECT('id', LAST_INSERT_ID());
+  `);
+  await finishHGenerationRun(idempotencyKey, generationError);
+  await saveHAuditLog("draft", row?.id || "", "draft.generate", actor, {
+    topicId: Number(topicId),
+    mode,
+    versionNo,
+    model: generationError ? "fallback" : hColumnConfig.model,
+    generationFailed: Boolean(generationError),
+  });
+  return getHDraft(row?.id);
+}
+
+async function saveHDraftRevision(draftId, data, actor) {
+  const draft = await getHDraft(draftId);
+  if (!draft) return null;
+  const versionRow = await mysqlJson(`
+    SELECT JSON_OBJECT('nextVersion', COALESCE(MAX(version_no), 0) + 1)
+    FROM yimin_h_drafts
+    WHERE topic_id = ${sqlNumber(draft.topicId)}
+      AND mode = ${sqlString(draft.mode)};
+  `);
+  const title = sanitizeTextArtifacts(String(data.title ?? draft.title));
+  const outlineMarkdown = sanitizeTextArtifacts(String(data.outlineMarkdown ?? draft.outlineMarkdown));
+  const contentMarkdown = sanitizeTextArtifacts(String(data.contentMarkdown ?? draft.contentMarkdown));
+  const versionNo = Number(versionRow?.nextVersion || (draft.versionNo + 1));
+  const inputHash = createHash("sha256").update(JSON.stringify({
+    parentDraftId: draft.id,
+    title,
+    outlineMarkdown,
+    contentMarkdown,
+    editedBy: actor.id,
+  })).digest("hex");
+  const row = await mysqlJson(`
+    INSERT INTO yimin_h_drafts (
+      topic_id, parent_draft_id, mode, version_no, title,
+      title_candidates_json, outline_markdown, content_markdown, content_html,
+      extras_json, pending_facts_json, status, readiness, provider, model,
+      skill_version, profile_version, prompt_version, input_hash,
+      input_snapshot_json, created_by
+    )
+    VALUES (
+      ${sqlNumber(draft.topicId)}, ${sqlNumber(draft.id)}, ${sqlString(draft.mode)},
+      ${sqlNumber(versionNo)}, ${sqlString(title)}, ${sqlJson(draft.titleCandidates || [])},
+      ${sqlString(outlineMarkdown)}, ${sqlString(contentMarkdown)},
+      ${sqlString(markdownToHtml(contentMarkdown))}, ${sqlJson(draft.extras || {})},
+      ${sqlJson(data.pendingFacts ?? draft.pendingFacts ?? [])}, 'drafted',
+      'review_required', ${sqlString(draft.provider)}, ${sqlString(draft.model)},
+      ${sqlString(draft.skillVersion)}, ${sqlString(draft.profileVersion)},
+      ${sqlString(draft.mode === "outline" ? "h-outline-manual-v1" : "h-manual-edit-v1")},
+      ${sqlString(inputHash)}, ${sqlJson({ parentDraftId: draft.id })},
+      ${sqlString(actor.id)}
+    );
+    SELECT JSON_OBJECT('id', LAST_INSERT_ID());
+  `);
+  await saveHAuditLog("draft", row?.id || "", "draft.revise", actor, {
+    topicId: Number(draft.topicId),
+    parentDraftId: Number(draft.id),
+    mode: draft.mode,
+    versionNo,
+  });
+  return getHDraft(row?.id);
+}
+
+function buildHReviewedRevisionPrompt(
+  topic,
+  draft,
+  review,
+  sources,
+  viewpoints,
+  profile,
+  targetMode = draft.mode,
+  { fromOutline = false } = {},
+) {
+  const channel = targetMode === "outline"
+    ? {
+        label: "内容大纲",
+        length: "以清晰完整为准",
+        requirements: ["确认一个主轴", "列出事实依据和边界", "组织3—5个独立论点", "保留风险、反面和读者行动"],
+      }
+    : profile.channelModes?.[targetMode] || profile.channelModes?.wechat_article || {};
+  const isChannelAdaptation = targetMode !== draft.mode;
+  const sourceLabel = fromOutline ? "选中的内容大纲" : "当前渠道稿";
+  return `请基于${sourceLabel}，直接生成一份可继续审阅的 Henry 内容新稿。不要只给修改建议。
+
+来源模式：${draft.mode}
+目标模式：${targetMode}
+渠道名称：${channel.label || targetMode}
+建议长度：${channel.length || ""}
+渠道要求：${JSON.stringify(channel.requirements || [])}
+任务性质：${isChannelAdaptation ? "从选中大纲独立生成目标渠道版本" : "按最新审校意见修订当前渠道版本"}
+
+只返回一个严格 JSON 对象，不要 Markdown 代码围栏：
+{
+  "titleCandidates":["最多8个标题"],
+  "recommendedTitle":"推荐标题",
+  "outlineMarkdown":"修订后的大纲 Markdown",
+  "contentMarkdown":"${targetMode === "outline" ? "与 outlineMarkdown 一致的结构化内容大纲" : "修订后的完整正文或口播 Markdown"}",
+  "extras":{
+    "recommendationReason":"推荐标题理由",
+    "summary":"公众号摘要或视频定位",
+    "coverText":"视频封面或文章封面文案",
+    "visualSuggestions":["配图、画面、字幕或B-roll节点"]
+  },
+  "pendingFacts":["修订后仍需人工确认或补充来源的事实"],
+  "verificationNotes":["发布前核验提示"]
+}
+
+生成规则：
+${review ? "- 逐项处理最新审校的 requiredActions 和 issues。" : "- 当前大纲没有可用的最新审校；依据大纲、当前事实包和已确认观点生成，所有渠道稿生成后再独立审校。"}
+- 输出完整新稿，不输出修改说明或思维过程。
+- 目标渠道稿必须从事实包、已确认观点和选中大纲独立组织，不得把公众号文章机械缩写成视频稿。
+- 审校意见若要求补充当前事实包没有的信息，不得虚构；应删除过强表述、改为有边界的表达，并列入 pendingFacts。
+- 只能把“已确认观点”写成 Henry 的第一人称判断，不得把系统建议角度冒充本人观点。
+- 不得虚构个人经历、客户案例、公司事实、日期、金额、资格、结果、对话或情绪。
+- 保留政策状态、适用对象、时间条件和不确定性；不得使用保证获批、绝对安全、零风险等承诺。
+- 保持一个主轴，先讲判断，再说明前提、事实、原因、风险和读者行动。
+- 新稿仍需再次运行四层审校，不能宣称已经可发布。
+${targetMode === "outline" ? "- 当前目标是内容大纲，只保留主轴、事实边界、核心观点、论点、风险和行动。" : ""}
+
+人物定位：
+${profile.positioning}
+
+禁止内容：
+${JSON.stringify(profile.prohibitedContent || [])}
+
+选题：
+${JSON.stringify({
+    title: topic.title,
+    eventSummary: topic.eventSummary,
+    coreQuestion: topic.coreQuestion,
+    suggestedAngle: topic.suggestedAngle,
+    targetAudience: topic.targetAudience,
+    contentArchetype: topic.contentArchetype,
+  })}
+
+可用的最新四层审校：
+${review ? JSON.stringify(review) : "无；渠道稿生成后必须分别运行四层审校"}
+
+已确认观点：
+${JSON.stringify(viewpoints.filter((item) => item.isConfirmed).map((item) => ({
+    inputType: item.inputType,
+    text: item.editedText || item.rawText,
+    confirmationType: item.confirmationType,
+    confirmedBy: item.confirmedBy,
+  })))}
+
+事实包：
+${JSON.stringify(sources.map((source) => ({
+    sourceName: source.sourceName,
+    title: source.title,
+    url: source.url,
+    publishedAt: source.publishedAt,
+    contentStatus: source.contentStatus,
+    sourceLevel: source.sourceLevel,
+    policyStatus: source.policyStatus,
+    evidenceSummary: source.evidenceSummary,
+    text: String(source.extractedText || "").slice(0, 22000),
+  })))}
+
+当前标题：
+${draft.title}
+
+当前大纲：
+${draft.outlineMarkdown}
+
+当前正文：
+${draft.contentMarkdown}`;
+}
+
+async function generateHDraftFromReview(draftId, data = {}, actor) {
+  const draft = await getHDraft(draftId);
+  if (!draft) return null;
+  const fromOutline = data.fromOutline === true;
+  const latestReview = await getLatestHDraftReview(draftId);
+  if (!fromOutline && !latestReview) {
+    const error = new Error("请先运行四层审校，再生成修订稿");
+    error.code = "H_REVIEW_REQUIRED";
+    throw error;
+  }
+  const targetMode = normalizeHMode(data.mode, draft.mode);
+  if (fromOutline && draft.mode !== "outline") {
+    const error = new Error("请先选择一个内容大纲，再生成整套稿件");
+    error.code = "H_OUTLINE_REQUIRED";
+    throw error;
+  }
+  if (fromOutline && !["wechat_article", "short_video", "run_and_talk_video", "deep_video"].includes(targetMode)) {
+    const error = new Error("请选择公众号文章、H快评、H边跑边聊或H深聊");
+    error.code = "H_CHANNEL_MODE_REQUIRED";
+    throw error;
+  }
+  const topic = fromOutline
+    ? await refreshHTopicReadiness(draft.topicId)
+    : await getHTopicBase(draft.topicId);
+  if (!topic) return null;
+  if (fromOutline && topic.status !== "selected") {
+    const error = new Error("请先选择“值得写”，再生成整套稿件");
+    error.code = "H_TOPIC_NOT_SELECTED";
+    throw error;
+  }
+  const [sources, viewpoints, profile] = await Promise.all([
+    listHTopicSources(draft.topicId),
+    listHTopicViewpoints(draft.topicId),
+    loadHContentProfile(),
+  ]);
+  const reviewIsStale = latestReview && isHDraftReviewStale(latestReview, sources, viewpoints);
+  if (!fromOutline && reviewIsStale) {
+    const error = new Error("事实包或 Henry 观点在审校后发生变化，请重新运行四层审校");
+    error.code = "H_DRAFT_REVIEW_STALE";
+    throw error;
+  }
+  const review = fromOutline || reviewIsStale ? null : latestReview;
+  const inputSnapshot = {
+    parentDraftId: Number(draft.id),
+    parentContentHash: createHash("sha256").update(String(draft.contentMarkdown || "")).digest("hex"),
+    review,
+    sources: sources.map((source) => ({
+      id: source.id,
+      contentStatus: source.contentStatus,
+      sourceLevel: source.sourceLevel,
+      policyStatus: source.policyStatus,
+      contentHash: createHash("sha256").update(String(source.extractedText || "")).digest("hex"),
+    })),
+    viewpoints: viewpoints.filter((item) => item.isConfirmed).map((item) => ({
+      id: item.id,
+      text: item.editedText || item.rawText,
+      confirmationType: item.confirmationType,
+      confirmedBy: item.confirmedBy,
+    })),
+    sourceMode: draft.mode,
+    targetMode,
+    skillVersion: profile.skillVersion,
+    profileVersion: profile.profileVersion,
+  };
+  const inputHash = createHash("sha256").update(JSON.stringify(inputSnapshot)).digest("hex");
+  const versionRow = await mysqlJson(`
+    SELECT JSON_OBJECT('nextVersion', COALESCE(MAX(version_no), 0) + 1)
+    FROM yimin_h_drafts
+    WHERE topic_id = ${sqlNumber(draft.topicId)}
+      AND mode = ${sqlString(targetMode)};
+  `);
+  const versionNo = Number(versionRow?.nextVersion || (targetMode === draft.mode ? draft.versionNo + 1 : 1));
+  const idempotencyKey = createHash("sha256")
+    .update(`review-revision:${draft.id}:${review?.id || "no-review"}:${targetMode}:${inputHash}:${versionNo}`)
+    .digest("hex");
+  await beginHGenerationRun("draft", draft.id, idempotencyKey, hColumnConfig.model);
+
+  let generated;
+  try {
+    const content = await callDeepSeek(
+      buildHReviewedRevisionPrompt(
+        topic,
+        draft,
+        review,
+        sources,
+        viewpoints,
+        profile,
+        targetMode,
+        { fromOutline },
+      ),
+      {
+        model: hColumnConfig.model,
+        temperature: targetMode === "outline" ? 0.25 : 0.42,
+        systemPrompt: "你是 Henry 内容工作台的资深内容编辑。依据选中大纲、当前事实包和已确认观点输出目标渠道完整稿件。不得虚构事实或 Henry 观点。只输出严格 JSON。",
+      },
+    );
+    generated = parseDeepSeekJsonObject(content);
+    if (!String(generated.contentMarkdown || generated.outlineMarkdown || "").trim()) {
+      throw new Error("模型未返回完整修订稿");
+    }
+  } catch (error) {
+    await finishHGenerationRun(idempotencyKey, error);
+    const generationError = new Error(`修订稿生成失败：${formatErrorMessage(error)}`);
+    generationError.code = "H_DRAFT_GENERATION_FAILED";
+    throw generationError;
+  }
+
+  const titleCandidates = Array.isArray(generated.titleCandidates)
+    ? generated.titleCandidates.map((value) => sanitizeTextArtifacts(String(value))).filter(Boolean).slice(0, 8)
+    : [];
+  const title = sanitizeTextArtifacts(String(generated.recommendedTitle || titleCandidates[0] || draft.title));
+  const outlineMarkdown = sanitizeTextArtifacts(String(generated.outlineMarkdown || draft.outlineMarkdown || ""));
+  const contentMarkdown = sanitizeTextArtifacts(String(generated.contentMarkdown || outlineMarkdown));
+  const pendingFacts = Array.isArray(generated.pendingFacts)
+    ? generated.pendingFacts.map((value) => sanitizeTextArtifacts(String(value))).filter(Boolean)
+    : [];
+  const extras = sanitizeStructuredTextArtifacts({
+    ...(generated.extras && typeof generated.extras === "object" ? generated.extras : {}),
+    verificationNotes: Array.isArray(generated.verificationNotes) ? generated.verificationNotes : [],
+    ...(review ? { revisedFromReviewId: Number(review.id) } : {}),
+  });
+  const promptVersion = fromOutline && targetMode !== "outline"
+    ? "h-channel-from-outline-v1"
+    : targetMode === "outline"
+      ? "h-outline-revision-v1"
+      : "h-review-revision-v1";
+  let row;
+  try {
+    row = await mysqlJson(`
+      INSERT INTO yimin_h_drafts (
+        topic_id, parent_draft_id, mode, version_no, title,
+        title_candidates_json, outline_markdown, content_markdown, content_html,
+        extras_json, pending_facts_json, status, readiness, provider, model,
+        skill_version, profile_version, prompt_version, input_hash,
+        input_snapshot_json, generation_error, created_by
+      )
+      VALUES (
+        ${sqlNumber(draft.topicId)}, ${sqlNumber(draft.id)}, ${sqlString(targetMode)},
+        ${sqlNumber(versionNo)}, ${sqlString(title)}, ${sqlJson(titleCandidates)},
+        ${sqlString(outlineMarkdown)}, ${sqlString(contentMarkdown)},
+        ${sqlString(markdownToHtml(contentMarkdown))}, ${sqlJson(extras)},
+        ${sqlJson(pendingFacts)}, 'drafted', 'review_required',
+        'openai-compatible', ${sqlString(hColumnConfig.model)},
+        ${sqlString(profile.skillVersion)}, ${sqlString(profile.profileVersion)},
+        ${sqlString(promptVersion)}, ${sqlString(inputHash)}, ${sqlJson(inputSnapshot)},
+        NULL, ${sqlString(actor.id)}
+      );
+      SELECT JSON_OBJECT('id', LAST_INSERT_ID());
+    `);
+  } catch (error) {
+    await finishHGenerationRun(idempotencyKey, error);
+    throw error;
+  }
+  await finishHGenerationRun(idempotencyKey);
+  await saveHAuditLog("draft", row?.id || "", "draft.generate_from_review", actor, {
+    topicId: Number(draft.topicId),
+    parentDraftId: Number(draft.id),
+    reviewId: review ? Number(review.id) : null,
+    sourceMode: draft.mode,
+    fromOutline,
+    mode: targetMode,
+    versionNo,
+    model: hColumnConfig.model,
+  });
+  return getHDraft(row?.id);
+}
+
+function buildHReviewPrompt(topic, draft, sources, viewpoints, profile, recentTopics) {
+  return `请对 Henry 内容草稿执行四层发布前质检，只返回严格 JSON 对象。
+
+格式：
+{
+  "conclusion":"ready_for_henry|facts_required|not_recommended",
+  "l1Status":"passed|needs_revision",
+  "l2Status":"passed|needs_revision",
+  "l3Status":"passed|needs_revision",
+  "l4Status":"passed|needs_revision",
+  "issues":[{"layer":"L1|L2|L3|L4","message":"可验证问题","evidence":"对应事实或原文位置"}],
+  "pendingFacts":["待确认事实"],
+  "requiredActions":["本人审阅前必须处理"]
+}
+
+标准：
+L1 ${profile.qualityGates?.l1 || ""}
+L2 ${profile.qualityGates?.l2 || ""}
+L3 ${profile.qualityGates?.l3 || ""}
+L4 ${profile.qualityGates?.l4 || ""}
+
+硬规则：
+- 只有标题或摘要不能当完整原文。
+- 政策、法律、税务和投资的确定性核心事实需要 A 级完整来源。
+- 强第一人称判断必须来自已确认观点。
+- 禁止虚构经历、客户、公司事实、情绪、对话或数字。
+- 发现必须修改项时不得输出 ready_for_henry。
+- 不输出思维过程，只列问题、证据和动作。
+
+禁止内容：
+${JSON.stringify(profile.prohibitedContent || [])}
+
+选题：
+${JSON.stringify(topic)}
+
+已确认观点：
+${JSON.stringify(viewpoints.filter((item) => item.isConfirmed).map((item) => ({
+    text: item.editedText || item.rawText,
+    confirmationType: item.confirmationType,
+    confirmedBy: item.confirmedBy,
+  })))}
+
+事实来源：
+${JSON.stringify(sources.map((source) => ({
+    title: source.title,
+    url: source.url,
+    contentStatus: source.contentStatus,
+    sourceLevel: source.sourceLevel,
+    policyStatus: source.policyStatus,
+    evidenceSummary: source.evidenceSummary,
+    text: String(source.extractedText || "").slice(0, 16000),
+  })))}
+
+近30天候选：
+${JSON.stringify(recentTopics)}
+
+草稿：
+${draft.contentMarkdown}`;
+}
+
+async function reviewHDraft(draftId, actor) {
+  const draft = await getHDraft(draftId);
+  if (!draft) return null;
+  const topic = await getHTopicBase(draft.topicId);
+  const [sources, viewpoints, profile, recentTopics] = await Promise.all([
+    listHTopicSources(draft.topicId),
+    listHTopicViewpoints(draft.topicId),
+    loadHContentProfile(),
+    listRecentHTopicTitles(topic.date),
+  ]);
+  const inputHash = createHash("sha256").update(JSON.stringify({
+    draftId,
+    content: draft.contentMarkdown,
+    sources: sources.map((source) => ({
+      id: source.id,
+      contentStatus: source.contentStatus,
+      sourceLevel: source.sourceLevel,
+      policyStatus: source.policyStatus,
+      contentHash: createHash("sha256").update(String(source.extractedText || "")).digest("hex"),
+    })),
+    viewpoints: viewpoints.filter((item) => item.isConfirmed).map((item) => item.id),
+    profileVersion: profile.profileVersion,
+  })).digest("hex");
+  const idempotencyKey = createHash("sha256").update(`review:${draftId}:${inputHash}`).digest("hex");
+  await beginHGenerationRun("review", draftId, idempotencyKey, hColumnConfig.reviewModel);
+  let result;
+  let reviewError = null;
+  try {
+    const content = await callDeepSeek(
+      buildHReviewPrompt(topic, draft, sources, viewpoints, profile, recentTopics),
+      {
+        model: hColumnConfig.reviewModel,
+        temperature: 0.1,
+        systemPrompt: "你是 Henry 内容的事实核验与发布前审校编辑。只输出严格 JSON，不输出思维过程。发现事实、本人判断或隐私边界问题时必须阻止进入本人审阅。",
+      },
+    );
+    result = parseDeepSeekJsonObject(content);
+  } catch (error) {
+    reviewError = error;
+    result = {
+      conclusion: "facts_required",
+      l1Status: "needs_revision",
+      l2Status: "needs_revision",
+      l3Status: "needs_revision",
+      l4Status: "needs_revision",
+      issues: [{ layer: "L1", message: "AI 审校暂不可用，需要人工完成四层质检", evidence: formatErrorMessage(error) }],
+      pendingFacts: draft.pendingFacts || [],
+      requiredActions: ["人工核对全部事实、观点来源、禁区和渠道节奏"],
+    };
+  }
+
+  const highRisk = isHHighRiskTopic(topic);
+  const hasRequiredEvidence = highRisk
+    ? sources.some((source) => source.contentStatus === "full" && source.sourceLevel === "A" && source.verifiedAt)
+    : sources.some((source) => source.contentStatus === "full" && source.verifiedAt);
+  const hasConfirmedViewpoint = viewpoints.some((item) => item.isConfirmed);
+  const issues = sanitizeStructuredTextArtifacts(Array.isArray(result.issues) ? result.issues : []);
+  const pendingFacts = sanitizeStructuredTextArtifacts(Array.isArray(result.pendingFacts) ? result.pendingFacts : []);
+  const requiredActions = sanitizeStructuredTextArtifacts(Array.isArray(result.requiredActions) ? result.requiredActions : []);
+  if (!hasRequiredEvidence) {
+    issues.push({
+      layer: "L1",
+      message: highRisk ? "缺少 A 级完整来源" : "缺少完整来源",
+      evidence: "事实包门槛未通过",
+    });
+    requiredActions.push("补充并核验满足门槛的完整来源");
+  }
+  if (!hasConfirmedViewpoint) {
+    issues.push({
+      layer: "L1",
+      message: "缺少 H 专栏成员确认的本次观点",
+      evidence: "观点确认门槛未通过",
+    });
+    requiredActions.push("确认本次核心观点");
+  }
+  let conclusion = ["ready_for_henry", "facts_required", "not_recommended"].includes(result.conclusion)
+    ? result.conclusion
+    : "facts_required";
+  if (!hasRequiredEvidence || !hasConfirmedViewpoint || reviewError) conclusion = "facts_required";
+  const normalizeLayer = (value) => value === "passed" ? "passed" : "needs_revision";
+  let l1Status = normalizeLayer(result.l1Status);
+  const l2Status = normalizeLayer(result.l2Status);
+  const l3Status = normalizeLayer(result.l3Status);
+  const l4Status = normalizeLayer(result.l4Status);
+  if (!hasRequiredEvidence || !hasConfirmedViewpoint || reviewError) l1Status = "needs_revision";
+  if ([l1Status, l2Status, l3Status, l4Status].includes("needs_revision")) {
+    if (conclusion === "ready_for_henry") conclusion = "facts_required";
+  }
+
+  await mysqlExec(`
+    INSERT INTO yimin_h_reviews (
+      draft_id, conclusion, l1_status, l2_status, l3_status, l4_status,
+      issues_json, pending_facts_json, required_actions_json, model,
+      prompt_version, input_hash, reviewed_at
+    )
+    VALUES (
+      ${sqlNumber(draftId)}, ${sqlString(conclusion)}, ${sqlString(l1Status)},
+      ${sqlString(l2Status)}, ${sqlString(l3Status)}, ${sqlString(l4Status)},
+      ${sqlJson(issues)}, ${sqlJson(pendingFacts)}, ${sqlJson(requiredActions)},
+      ${sqlString(reviewError ? "fallback" : hColumnConfig.reviewModel)},
+      'h-review-v1', ${sqlString(inputHash)}, CURRENT_TIMESTAMP
+    );
+    UPDATE yimin_h_drafts
+    SET status = ${sqlString(conclusion === "ready_for_henry" ? "ready_for_henry" : "needs_revision")},
+        readiness = ${sqlString(conclusion === "ready_for_henry" ? "ready_for_henry" : "facts_required")}
+    WHERE id = ${sqlNumber(draftId)};
+  `);
+  await finishHGenerationRun(idempotencyKey, reviewError);
+  await saveHAuditLog("draft", draftId, "draft.review", actor, {
+    topicId: Number(draft.topicId),
+    conclusion,
+    reviewModel: reviewError ? "fallback" : hColumnConfig.reviewModel,
+    reviewFailed: Boolean(reviewError),
+  });
+  return getHTopicDetail(draft.topicId);
+}
+
+async function markHDraftReviewed(draftId, actor) {
+  const draft = await getHDraft(draftId);
+  if (!draft) return null;
+  if (draft.status !== "ready_for_henry") {
+    const error = new Error("草稿尚未通过四层质检，不能标记已审阅");
+    error.code = "H_DRAFT_NOT_READY";
+    throw error;
+  }
+  await assertHDraftReviewCurrent(draft);
+  await mysqlExec(`
+    UPDATE yimin_h_drafts
+    SET status = 'henry_reviewed'
+    WHERE id = ${sqlNumber(draftId)};
+  `);
+  await saveHAuditLog("draft", draftId, "draft.mark_reviewed", actor, {
+    topicId: Number(draft.topicId),
+  });
+  return getHTopicDetail(draft.topicId);
+}
+
+async function returnHDraftForRevision(draftId, data, actor) {
+  const draft = await getHDraft(draftId);
+  if (!draft) return null;
+  if (!["ready_for_henry", "henry_reviewed"].includes(draft.status)) {
+    const error = new Error("只有进入本人审阅的草稿才能退回修改");
+    error.code = "H_DRAFT_NOT_READY";
+    throw error;
+  }
+  await mysqlExec(`
+    UPDATE yimin_h_drafts
+    SET status = 'needs_revision',
+        readiness = 'facts_required'
+    WHERE id = ${sqlNumber(draftId)};
+  `);
+  await saveHFeedback(
+    draft.topicId,
+    draftId,
+    "revise",
+    "returned_for_revision",
+    sanitizeTextArtifacts(String(data?.note || "").trim()),
+    actor,
+  );
+  await saveHAuditLog("draft", draftId, "draft.return_for_revision", actor, {
+    topicId: Number(draft.topicId),
+    hadNote: Boolean(String(data?.note || "").trim()),
+  });
+  return getHTopicDetail(draft.topicId);
+}
+
+async function approveHDraft(draftId, actor) {
+  const draft = await getHDraft(draftId);
+  if (!draft) return null;
+  if (!["ready_for_henry", "henry_reviewed"].includes(draft.status)) {
+    const error = new Error("草稿尚未通过四层质检，不能最终采用");
+    error.code = "H_DRAFT_NOT_READY";
+    throw error;
+  }
+  await assertHDraftReviewCurrent(draft);
+  await mysqlExec(`
+    UPDATE yimin_h_drafts
+    SET status = 'approved',
+        approved_by = ${sqlString(actor.id)},
+        approval_type = ${sqlString(actor.confirmationType)},
+        approved_at = CURRENT_TIMESTAMP
+    WHERE id = ${sqlNumber(draftId)};
+  `);
+  await saveHFeedback(draft.topicId, draftId, "use", "approved", "最终采用，仅写入系统日志，不发送企业微信通知。", actor);
+  await saveHAuditLog("draft", draftId, "draft.approve", actor, {
+    topicId: Number(draft.topicId),
+    approvalType: actor.confirmationType,
+  });
+  return getHTopicDetail(draft.topicId);
+}
+
+async function exportHDraftPackage(draftId) {
+  const draft = await getHDraft(draftId);
+  if (!draft) return null;
+  const topic = await getHTopicDetail(draft.topicId);
+  const profile = await loadHContentProfile();
+  const channel = profile.channelModes?.[draft.mode] || profile.channelModes?.wechat_article || {};
+  const sourceLines = (topic.sources || []).map((source, index) => [
+    `${index + 1}. ${source.title || source.sourceName || "来源"}`,
+    `   - 等级：${source.sourceLevel}；完整度：${source.contentStatus}；政策状态：${source.policyStatus}`,
+    `   - 链接：${source.url || "无"}`,
+    `   - 可证明事实：${source.evidenceSummary || "待补"}`,
+  ].join("\n"));
+  const sourceTextBlocks = (topic.sources || []).map((source, index) => [
+    `### 来源 ${index + 1}：${source.title || source.sourceName || "来源"}`,
+    `- 等级：${source.sourceLevel}；完整度：${source.contentStatus}；政策状态：${source.policyStatus}`,
+    `- 链接：${source.url || "无"}`,
+    "",
+    String(source.extractedText || "").trim()
+      ? String(source.extractedText || "").trim().slice(0, 18000)
+      : "[未取得正文；不得把标题或摘要当作完整原文]",
+  ].join("\n"));
+  const viewpointLines = (topic.viewpoints || [])
+    .filter((item) => item.isConfirmed)
+    .map((item) => `- ${item.editedText || item.rawText}（${item.confirmationType}：${item.confirmedBy}）`);
+  return [
+    `# H 内容包：${draft.title || topic.title}`,
+    "",
+    "> 用途：可复制给 Claude、Gemini 或其他模型继续编辑。只能使用本包中的已确认观点和事实；不得把系统建议角度冒充 Henry 本人观点。",
+    "",
+    "## 任务",
+    `- Skill：${profile.skillName || "Henry 文章与视频写作"}`,
+    `- 模式：${draft.mode}`,
+    `- 渠道：${channel.label || draft.mode}`,
+    `- 建议长度：${channel.length || "按内容需要"}`,
+    `- 目标读者：${topic.targetAudience}`,
+    `- 核心问题：${topic.coreQuestion}`,
+    `- 系统建议角度（非本人观点）：${topic.suggestedAngle || "无"}`,
+    ...(channel.requirements || []).map((item) => `- 渠道要求：${item}`),
+    "",
+    "## 已确认观点",
+    viewpointLines.length ? viewpointLines.join("\n") : "- 无",
+    "",
+    "## 事实来源",
+    sourceLines.length ? sourceLines.join("\n") : "- 无",
+    "",
+    "## 来源正文或现有摘录",
+    sourceTextBlocks.length ? sourceTextBlocks.join("\n\n") : "- 无",
+    "",
+    "## 人物与禁区",
+    `- 人物定位：${profile.positioning || ""}`,
+    `- Skill版本：${profile.skillVersion}`,
+    `- 人物档案版本：${profile.profileVersion}`,
+    ...(profile.prohibitedContent || []).map((item) => `- 禁止：${item}`),
+    "",
+    "## 写作与审校硬规则",
+    "- 一篇只保留一个主轴；先讲判断，再说明前提、事实、原因、风险和读者行动。",
+    "- 只有“已确认观点”可以写成 Henry 的第一人称判断。",
+    "- 不虚构个人经历、客户案例、公司事实、日期、金额、资格、结果、对话或情绪。",
+    "- 保留政策状态、适用对象、时间条件和不确定性；不得使用保证获批、绝对安全、零风险等承诺。",
+    ...Object.entries(profile.qualityGates || {}).map(([layer, rule]) => `- ${layer.toUpperCase()}：${rule}`),
+    "",
+    "## 当前草稿",
+    draft.contentMarkdown,
+    "",
+    "## 待确认事实",
+    ...(draft.pendingFacts || []).map((item) => `- ${item}`),
+  ].join("\n");
+}
+
+function sendHApiError(res, error) {
+  const code = error?.code || "";
+  const status = code === "H_DAILY_MISSING"
+    || code === "H_TOPIC_NOT_SELECTED"
+    || code === "H_TOPIC_NOT_READY"
+    || code === "H_DRAFT_NOT_READY"
+    || code === "H_REVIEW_REQUIRED"
+    || code === "H_DRAFT_REVIEW_STALE"
+    || code === "H_OUTLINE_REQUIRED"
+    || code === "H_CHANNEL_MODE_REQUIRED"
+    ? 409
+    : 400;
+  sendJson(res, status, {
+    ok: false,
+    error: error instanceof Error ? error.message : String(error),
+    code,
+  });
+}
+
+async function handleHColumnApi(req, res, url) {
+  if (!url.pathname.startsWith("/api/h/")) return false;
+  const actor = await getHColumnActor(req);
+  if (!actor) {
+    sendJson(res, 403, {
+      ok: false,
+      error: "H 专栏仅限 Henry、Celine、IOD 部门成员和系统管理员访问",
+    });
+    return true;
+  }
+
+  if (url.pathname === "/api/h/me" && req.method === "GET") {
+    sendJson(res, 200, {
+      ok: true,
+      enabled: hColumnConfig.enabled,
+      actor,
+      maxTopics: hColumnConfig.maxTopics,
+      model: hColumnConfig.model,
+      reviewModel: hColumnConfig.reviewModel,
+    });
+    return true;
+  }
+
+  if (url.pathname === "/api/h/audit" && req.method === "GET") {
+    await initDb();
+    sendJson(res, 200, {
+      ok: true,
+      actor,
+      logs: await listHAuditLogs(url.searchParams.get("limit")),
+    });
+    return true;
+  }
+
+  if (url.pathname === "/api/h/topics/history" && req.method === "GET") {
+    await initDb();
+    const topics = (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+        'id', id,
+        'date', DATE_FORMAT(topic_date, '%Y-%m-%d'),
+        'title', title,
+        'status', status,
+        'readiness', readiness,
+        'primaryMode', primary_mode,
+        'updatedAt', DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:%s+08:00')
+      )), JSON_ARRAY())
+      FROM (
+        SELECT *
+        FROM yimin_h_topics
+        ORDER BY topic_date DESC, id DESC
+        LIMIT 120
+      ) h;
+    `)) || [];
+    sendJson(res, 200, { ok: true, actor, topics });
+    return true;
+  }
+
+  if (url.pathname === "/api/h/topics" && req.method === "GET") {
+    const date = url.searchParams.get("date") || getShanghaiDate();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      sendJson(res, 400, { ok: false, error: "date must use YYYY-MM-DD" });
+      return true;
+    }
+    let topics = await listHTopics(date);
+    if (!topics.length && hColumnConfig.autoGenerate) {
+      if (url.searchParams.get("sync") === "1") {
+        try {
+          topics = await generateHTopics(date, { actor });
+        } catch (error) {
+          sendHApiError(res, error);
+          return true;
+        }
+      } else {
+        startHTopicGenerationInBackground(date);
+        sendJson(res, 202, {
+          ok: true,
+          actor,
+          date,
+          topics: [],
+          running: true,
+          status: isHTopicGenerationRunning(date) ? "running" : "queued",
+        });
+        return true;
+      }
+    }
+    sendJson(res, 200, {
+      ok: true,
+      actor,
+      date,
+      topics,
+      running: isHTopicGenerationRunning(date),
+    });
+    return true;
+  }
+
+  if (url.pathname === "/api/h/topics/generate" && req.method === "POST") {
+    const body = await readOptionalJsonOrFormBody(req);
+    const date = String(body.date || getShanghaiDate());
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      sendJson(res, 400, { ok: false, error: "date must use YYYY-MM-DD" });
+      return true;
+    }
+    try {
+      const topics = await generateHTopics(date, {
+        refresh: body.refresh === true,
+        actor,
+      });
+      sendJson(res, 200, { ok: true, actor, date, topics });
+    } catch (error) {
+      sendHApiError(res, error);
+    }
+    return true;
+  }
+
+  const topicMatch = url.pathname.match(/^\/api\/h\/topics\/(\d+)$/);
+  if (topicMatch && req.method === "GET") {
+    const topic = await getHTopicDetail(topicMatch[1]);
+    if (!topic) sendJson(res, 404, { ok: false, error: "选题不存在" });
+    else sendJson(res, 200, { ok: true, actor, topic });
+    return true;
+  }
+  if (topicMatch && req.method === "PUT") {
+    const body = await readJsonBody(req);
+    try {
+      const topic = await updateHTopic(topicMatch[1], body, actor);
+      if (!topic) sendJson(res, 404, { ok: false, error: "选题不存在" });
+      else sendJson(res, 200, { ok: true, actor, topic });
+    } catch (error) {
+      sendHApiError(res, error);
+    }
+    return true;
+  }
+
+  const evidenceFetchMatch = url.pathname.match(/^\/api\/h\/topics\/(\d+)\/evidence\/fetch$/);
+  if (evidenceFetchMatch && req.method === "POST") {
+    try {
+      const topic = await fetchHTopicEvidence(evidenceFetchMatch[1], actor);
+      if (!topic) sendJson(res, 404, { ok: false, error: "选题不存在" });
+      else sendJson(res, 200, { ok: true, actor, topic });
+    } catch (error) {
+      sendHApiError(res, error);
+    }
+    return true;
+  }
+
+  const topicSourcesMatch = url.pathname.match(/^\/api\/h\/topics\/(\d+)\/sources$/);
+  if (topicSourcesMatch && req.method === "POST") {
+    const body = await readJsonBody(req);
+    try {
+      const topic = await addHTopicSource(topicSourcesMatch[1], body, actor);
+      if (!topic) sendJson(res, 404, { ok: false, error: "选题不存在" });
+      else sendJson(res, 201, { ok: true, actor, topic });
+    } catch (error) {
+      sendHApiError(res, error);
+    }
+    return true;
+  }
+
+  const sourceMatch = url.pathname.match(/^\/api\/h\/sources\/(\d+)$/);
+  if (sourceMatch && req.method === "PUT") {
+    const body = await readJsonBody(req);
+    try {
+      const topic = await updateHTopicSource(sourceMatch[1], body, actor);
+      if (!topic) sendJson(res, 404, { ok: false, error: "来源不存在" });
+      else sendJson(res, 200, { ok: true, actor, topic });
+    } catch (error) {
+      sendHApiError(res, error);
+    }
+    return true;
+  }
+  if (sourceMatch && req.method === "DELETE") {
+    const topic = await deleteHTopicSource(sourceMatch[1], actor);
+    if (!topic) sendJson(res, 404, { ok: false, error: "来源不存在" });
+    else sendJson(res, 200, { ok: true, actor, topic });
+    return true;
+  }
+
+  const viewpointsMatch = url.pathname.match(/^\/api\/h\/topics\/(\d+)\/viewpoints$/);
+  if (viewpointsMatch && req.method === "GET") {
+    sendJson(res, 200, {
+      ok: true,
+      actor,
+      viewpoints: await listHTopicViewpoints(viewpointsMatch[1]),
+    });
+    return true;
+  }
+  if (viewpointsMatch && req.method === "POST") {
+    const body = await readJsonBody(req);
+    try {
+      const topic = await addHViewpoint(viewpointsMatch[1], body, actor);
+      if (!topic) sendJson(res, 404, { ok: false, error: "选题不存在" });
+      else sendJson(res, 201, { ok: true, actor, topic });
+    } catch (error) {
+      sendHApiError(res, error);
+    }
+    return true;
+  }
+
+  const viewpointMatch = url.pathname.match(/^\/api\/h\/viewpoints\/(\d+)$/);
+  if (viewpointMatch && req.method === "PUT") {
+    const body = await readJsonBody(req);
+    try {
+      const topic = await updateHViewpoint(viewpointMatch[1], body, actor);
+      if (!topic) sendJson(res, 404, { ok: false, error: "观点不存在" });
+      else sendJson(res, 200, { ok: true, actor, topic });
+    } catch (error) {
+      sendHApiError(res, error);
+    }
+    return true;
+  }
+  if (viewpointMatch && req.method === "DELETE") {
+    const topic = await deleteHViewpoint(viewpointMatch[1], actor);
+    if (!topic) sendJson(res, 404, { ok: false, error: "观点不存在" });
+    else sendJson(res, 200, { ok: true, actor, topic });
+    return true;
+  }
+
+  const viewpointConfirmMatch = url.pathname.match(/^\/api\/h\/viewpoints\/(\d+)\/confirm$/);
+  if (viewpointConfirmMatch && req.method === "POST") {
+    try {
+      const topic = await confirmHViewpoint(viewpointConfirmMatch[1], actor);
+      if (!topic) sendJson(res, 404, { ok: false, error: "观点不存在" });
+      else sendJson(res, 200, { ok: true, actor, topic });
+    } catch (error) {
+      sendHApiError(res, error);
+    }
+    return true;
+  }
+
+  const topicDraftsMatch = url.pathname.match(/^\/api\/h\/topics\/(\d+)\/drafts$/);
+  if (topicDraftsMatch && req.method === "GET") {
+    sendJson(res, 200, {
+      ok: true,
+      actor,
+      drafts: await listHTopicDrafts(topicDraftsMatch[1]),
+    });
+    return true;
+  }
+  if (topicDraftsMatch && req.method === "POST") {
+    const body = await readJsonBody(req);
+    try {
+      const draft = await generateHDraft(topicDraftsMatch[1], body, actor);
+      if (!draft) sendJson(res, 404, { ok: false, error: "选题不存在" });
+      else sendJson(res, 201, { ok: true, actor, draft });
+    } catch (error) {
+      sendHApiError(res, error);
+    }
+    return true;
+  }
+
+  const draftMatch = url.pathname.match(/^\/api\/h\/drafts\/(\d+)$/);
+  if (draftMatch && req.method === "GET") {
+    const draft = await getHDraft(draftMatch[1]);
+    if (!draft) sendJson(res, 404, { ok: false, error: "草稿不存在" });
+    else sendJson(res, 200, { ok: true, actor, draft });
+    return true;
+  }
+  if (draftMatch && req.method === "PUT") {
+    const body = await readJsonBody(req);
+    try {
+      const draft = await saveHDraftRevision(draftMatch[1], body, actor);
+      if (!draft) sendJson(res, 404, { ok: false, error: "草稿不存在" });
+      else sendJson(res, 201, { ok: true, actor, draft });
+    } catch (error) {
+      sendHApiError(res, error);
+    }
+    return true;
+  }
+
+  const draftGenerateMatch = url.pathname.match(/^\/api\/h\/drafts\/(\d+)\/generate$/);
+  if (draftGenerateMatch && req.method === "POST") {
+    const body = await readOptionalJsonOrFormBody(req);
+    try {
+      const draft = await generateHDraftFromReview(draftGenerateMatch[1], body, actor);
+      if (!draft) sendJson(res, 404, { ok: false, error: "草稿不存在" });
+      else sendJson(res, 201, { ok: true, actor, draft });
+    } catch (error) {
+      sendHApiError(res, error);
+    }
+    return true;
+  }
+
+  const draftReviewMatch = url.pathname.match(/^\/api\/h\/drafts\/(\d+)\/review$/);
+  if (draftReviewMatch && req.method === "POST") {
+    try {
+      const topic = await reviewHDraft(draftReviewMatch[1], actor);
+      if (!topic) sendJson(res, 404, { ok: false, error: "草稿不存在" });
+      else sendJson(res, 200, { ok: true, actor, topic });
+    } catch (error) {
+      sendHApiError(res, error);
+    }
+    return true;
+  }
+
+  const draftReviewedMatch = url.pathname.match(/^\/api\/h\/drafts\/(\d+)\/henry-reviewed$/);
+  if (draftReviewedMatch && req.method === "POST") {
+    try {
+      const topic = await markHDraftReviewed(draftReviewedMatch[1], actor);
+      if (!topic) sendJson(res, 404, { ok: false, error: "草稿不存在" });
+      else sendJson(res, 200, { ok: true, actor, topic });
+    } catch (error) {
+      sendHApiError(res, error);
+    }
+    return true;
+  }
+
+  const draftApproveMatch = url.pathname.match(/^\/api\/h\/drafts\/(\d+)\/approve$/);
+  if (draftApproveMatch && req.method === "POST") {
+    try {
+      const topic = await approveHDraft(draftApproveMatch[1], actor);
+      if (!topic) sendJson(res, 404, { ok: false, error: "草稿不存在" });
+      else sendJson(res, 200, { ok: true, actor, topic });
+    } catch (error) {
+      sendHApiError(res, error);
+    }
+    return true;
+  }
+
+  const draftReturnMatch = url.pathname.match(/^\/api\/h\/drafts\/(\d+)\/return$/);
+  if (draftReturnMatch && req.method === "POST") {
+    const body = await readJsonBody(req);
+    try {
+      const topic = await returnHDraftForRevision(draftReturnMatch[1], body, actor);
+      if (!topic) sendJson(res, 404, { ok: false, error: "草稿不存在" });
+      else sendJson(res, 200, { ok: true, actor, topic });
+    } catch (error) {
+      sendHApiError(res, error);
+    }
+    return true;
+  }
+
+  const draftExportMatch = url.pathname.match(/^\/api\/h\/drafts\/(\d+)\/export$/);
+  if (draftExportMatch && req.method === "GET") {
+    const content = await exportHDraftPackage(draftExportMatch[1]);
+    if (!content) sendJson(res, 404, { ok: false, error: "草稿不存在" });
+    else sendJson(res, 200, { ok: true, actor, content });
+    return true;
+  }
+
+  const topicFeedbackMatch = url.pathname.match(/^\/api\/h\/topics\/(\d+)\/feedback$/);
+  if (topicFeedbackMatch && req.method === "POST") {
+    const body = await readJsonBody(req);
+    const action = ["use", "later", "reject", "revise"].includes(body.action) ? body.action : "revise";
+    await saveHFeedback(topicFeedbackMatch[1], body.draftId, action, body.reasonCode, body.note, actor);
+    sendJson(res, 201, { ok: true, actor });
+    return true;
+  }
+
+  const runMatch = url.pathname.match(/^\/api\/h\/runs\/(\d+)$/);
+  if (runMatch && req.method === "GET") {
+    const run = await mysqlJson(`
+      SELECT JSON_OBJECT(
+        'id', id,
+        'runType', run_type,
+        'targetId', target_id,
+        'status', status,
+        'provider', provider,
+        'model', model,
+        'attemptCount', attempt_count,
+        'startedAt', IF(started_at IS NULL, NULL, DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+        'finishedAt', IF(finished_at IS NULL, NULL, DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%s+08:00')),
+        'error', error_message
+      )
+      FROM yimin_h_generation_runs
+      WHERE id = ${sqlNumber(runMatch[1])}
+      LIMIT 1;
+    `);
+    if (!run) sendJson(res, 404, { ok: false, error: "任务不存在" });
+    else sendJson(res, 200, { ok: true, actor, run });
+    return true;
+  }
+
+  sendJson(res, 404, { ok: false, error: "H 专栏接口不存在" });
+  return true;
 }
 
 async function serveStatic(req, res) {
@@ -7860,6 +10906,10 @@ async function readOptionalJsonOrFormBody(req) {
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+
+    if (await handleHColumnApi(req, res, url)) {
+      return;
+    }
 
     if (url.pathname === "/api/login" && req.method === "POST") {
       const body = await readJsonBody(req);

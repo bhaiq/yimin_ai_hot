@@ -616,6 +616,25 @@ const state = {
   marketError: "",
   marketHistory: [],
   marketDate: null,
+  hAccess: false,
+  hActor: null,
+  hTopics: [],
+  hTopic: null,
+  hHistory: [],
+  hDate: null,
+  hTab: "today",
+  hSelectedDraftId: null,
+  hSelectedOutlineId: null,
+  hEditingViewpointId: null,
+  hGeneratingMode: null,
+  hGenerationProgress: null,
+  hSuiteFailedModes: [],
+  hLoading: false,
+  hLoadToken: 0,
+  hTopicLoadToken: 0,
+  hSaving: false,
+  hError: "",
+  hMessage: "",
   sourceStatus: [],
   dailyReport: null,
   dailyLoading: false,
@@ -679,7 +698,7 @@ const state = {
 };
 
 const authViews = ["market", "sources", "review", "sso-stats", "department-subscriptions", "feedback-review", "about"];
-const views = ["home", "all", "daily", "subscriptions", "market", "radar", "feedback", "login", "sources", "review", "sso-stats", "department-subscriptions", "feedback-review", "about", "changelog"];
+const views = ["home", "all", "daily", "h-column", "subscriptions", "market", "radar", "feedback", "login", "sources", "review", "sso-stats", "department-subscriptions", "feedback-review", "about", "changelog"];
 
 const filterStrip = document.querySelector("#filterStrip");
 const featuredFeed = document.querySelector("#featuredFeed");
@@ -690,6 +709,8 @@ const searchInput = document.querySelector("#searchInput");
 const homeCount = document.querySelector("#homeCount");
 const allCount = document.querySelector("#allCount");
 const dailyReport = document.querySelector("#dailyReport");
+const hColumnApp = document.querySelector("#hColumnApp");
+const hColumnDate = document.querySelector("#hColumnDate");
 const subscriptionList = document.querySelector("#subscriptionList");
 const subscriptionIdentity = document.querySelector("#subscriptionIdentity");
 const subscriptionCount = document.querySelector("#subscriptionCount");
@@ -723,6 +744,17 @@ function removeReplacementCharacters(value) {
 
 function escapeAttr(value) {
   return escapeHtml(value).replace(/`/g, "&#96;");
+}
+
+function markdownToPlainText(value) {
+  return String(value ?? "")
+    .replace(/```[\w-]*\n?/g, "")
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+\.)\s+/gm, "")
+    .replace(/(\*\*|__|\*|_|~~|`)/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function getShanghaiDateString(date = new Date()) {
@@ -2318,6 +2350,825 @@ function renderFeedbackReview() {
   `).join("");
 }
 
+const hReadinessLabels = {
+  not_recommended: "暂不建议成稿",
+  topic_only: "仅选题",
+  outline_ready: "可生成大纲",
+  needs_viewpoint: "待确认观点",
+  needs_evidence: "待补事实",
+  draft_ready: "事实观点已齐",
+};
+
+const hStatusLabels = {
+  candidate: "待选择",
+  selected: "值得写",
+  later: "以后再说",
+  rejected: "不写",
+  archived: "已归档",
+};
+
+const hModeLabels = {
+  outline: "内容大纲",
+  wechat_article: "公众号文章",
+  short_video: "H快评",
+  run_and_talk_video: "H边跑边聊",
+  deep_video: "H深聊",
+};
+
+const hSuiteModes = [
+  "wechat_article",
+  "short_video",
+  "run_and_talk_video",
+  "deep_video",
+];
+
+const hDraftStatusLabels = {
+  generating: "生成中",
+  drafted: "待审校",
+  reviewing: "审校中",
+  needs_revision: "需修改",
+  ready_for_henry: "可进入本人审阅",
+  henry_reviewed: "已审阅",
+  approved: "已采用",
+  rejected: "已放弃",
+  failed: "生成失败",
+};
+
+const hDuplicateLabels = {
+  unknown: "历史积累中",
+  low: "低重复",
+  medium: "中重复",
+  high: "高重复",
+};
+
+const hPolicyStatusLabels = {
+  effective: "已生效",
+  announced: "已公布待生效",
+  pending: "进行中",
+  proposed: "拟议",
+  media_report: "媒体报道",
+  opinion: "观点",
+  not_applicable: "非政策题",
+};
+
+const hConfirmationTypeLabels = {
+  unconfirmed: "尚未确认",
+  henry: "Henry 本人",
+  authorized_editor: "授权成员",
+  profile: "人物档案",
+};
+
+function hCheckChip(label, passed) {
+  return `<span class="h-check ${passed ? "passed" : "missing"}" aria-label="${escapeAttr(label)}：${passed ? "已满足" : "未满足"}"><span aria-hidden="true">${passed ? "✓" : "·"}</span>${escapeHtml(label)}</span>`;
+}
+
+function renderHTopicCard(topic, compact = false) {
+  const checks = topic.fourChecks || {};
+  const selected = Number(state.hTopic?.id) === Number(topic.id);
+  return `
+    <article class="h-topic-card${selected ? " active" : ""}${compact ? " compact" : ""}" data-h-topic-card="${escapeAttr(topic.id)}">
+      <button class="h-topic-open" type="button" data-h-open-topic="${escapeAttr(topic.id)}" aria-current="${selected ? "true" : "false"}">
+        <span class="h-topic-card-top">
+          <span class="h-status ${escapeAttr(topic.status)}">${escapeHtml(hStatusLabels[topic.status] || topic.status)}</span>
+          <span class="h-readiness ${escapeAttr(topic.readiness)}">${escapeHtml(hReadinessLabels[topic.readiness] || topic.readiness)}</span>
+        </span>
+        <strong>${escapeHtml(topic.title)}</strong>
+        ${compact ? "" : `<p>${escapeHtml(topic.eventSummary || topic.coreQuestion || "")}</p>`}
+        <span class="h-topic-meta">
+          <span>${escapeHtml(hModeLabels[topic.primaryMode] || topic.primaryMode)}</span>
+          <span>${Number(topic.fullSourceCount || 0)}/${Number(topic.sourceCount || 0)} 全文</span>
+          <span>${Number(topic.aLevelSourceCount || 0)} 个 A 级</span>
+          <span>${Number(topic.draftCount || 0)} 份草稿</span>
+          <span>${escapeHtml(hDuplicateLabels[topic.duplicateRisk?.level] || "重复待检查")}</span>
+        </span>
+      </button>
+      ${compact ? "" : `
+        <div class="h-checks">
+          ${hCheckChip("有观点", checks.hasJudgment)}
+          ${hCheckChip("有依据", checks.hasBasis)}
+          ${hCheckChip("对读者有用", checks.useful)}
+          ${hCheckChip("长期价值", checks.longTerm)}
+        </div>
+        <div class="h-topic-card-actions">
+          <button class="primary-button compact" type="button" data-h-topic-status="selected" data-topic-id="${escapeAttr(topic.id)}">值得写</button>
+          <button class="ghost-button compact" type="button" data-h-topic-status="later" data-topic-id="${escapeAttr(topic.id)}">以后再说</button>
+          <button class="ghost-button compact danger" type="button" data-h-topic-status="rejected" data-topic-id="${escapeAttr(topic.id)}">不写</button>
+        </div>
+      `}
+    </article>
+  `;
+}
+
+function renderHSource(source) {
+  const textPreview = String(source.extractedText || "").slice(0, 360);
+  const sourceUrl = safeUrl(source.url);
+  return `
+    <article class="h-source-card">
+      <div class="h-source-card-head">
+        <div>
+          <strong>${escapeHtml(source.title || source.sourceName || "未命名来源")}</strong>
+          <span>${escapeHtml(source.sourceName || "来源待补")}</span>
+        </div>
+        <div class="h-source-badges">
+          <span class="h-source-level level-${escapeAttr(source.sourceLevel)}">${escapeHtml(source.sourceLevel)}级</span>
+          <span>${escapeHtml(source.contentStatus === "full" ? "完整原文" : source.contentStatus === "summary_only" ? "仅摘要" : "缺正文")}</span>
+          <span>${escapeHtml(hPolicyStatusLabels[source.policyStatus] || "状态待确认")}</span>
+          <span>${escapeHtml(source.verifiedAt ? "已核验" : "待核验")}</span>
+        </div>
+      </div>
+      ${textPreview ? `<p>${escapeHtml(textPreview)}${String(source.extractedText || "").length > 360 ? "…" : ""}</p>` : ""}
+      <div class="h-source-actions">
+        ${sourceUrl ? `<a href="${escapeAttr(sourceUrl)}" target="_blank" rel="noopener noreferrer">查看原文</a>` : ""}
+        <div>
+          ${source.contentStatus === "full" && !source.verifiedAt
+            ? `<button class="text-button" type="button" data-h-verify-source="${escapeAttr(source.id)}">标记已核验</button>`
+            : ""}
+          <button class="text-button danger" type="button" data-h-delete-source="${escapeAttr(source.id)}">移除</button>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderHViewpoint(viewpoint) {
+  const isEditing = Number(state.hEditingViewpointId) === Number(viewpoint.id);
+  const viewpointText = viewpoint.editedText || viewpoint.rawText;
+  return `
+    <article class="h-viewpoint-card${viewpoint.isConfirmed ? " confirmed" : ""}">
+      <div class="h-viewpoint-card-head">
+        <span class="h-viewpoint-type">${escapeHtml(viewpoint.inputType === "profile" ? "已确认人物档案" : "本次观点")}</span>
+        <strong>${escapeHtml(viewpoint.isConfirmed ? "已确认可用于成稿" : "尚未确认")}</strong>
+      </div>
+      ${isEditing ? `
+        <form class="h-viewpoint-edit-form" data-h-viewpoint-edit-form data-viewpoint-id="${escapeAttr(viewpoint.id)}">
+          <textarea name="editedText" rows="4" aria-label="编辑 Henry 观点">${escapeHtml(viewpointText)}</textarea>
+          <div class="h-viewpoint-actions">
+            <button class="primary-button compact" type="submit">保存观点</button>
+            <button class="ghost-button compact" type="button" data-h-cancel-viewpoint>取消</button>
+          </div>
+        </form>
+      ` : `<p>${escapeHtml(viewpointText)}</p>`}
+      <div class="h-viewpoint-footer">
+        <small>${escapeHtml(hConfirmationTypeLabels[viewpoint.confirmationType] || "尚未确认")}${viewpoint.confirmedBy && viewpoint.confirmationType !== "profile" ? ` · ${escapeHtml(viewpoint.confirmedBy)}` : ""}</small>
+        ${isEditing ? "" : `
+          <div class="h-viewpoint-actions">
+            ${!viewpoint.isConfirmed
+              ? `<button class="text-button" type="button" data-h-confirm-viewpoint="${escapeAttr(viewpoint.id)}">确认可用于成稿</button>`
+              : ""}
+            <button class="text-button" type="button" data-h-edit-viewpoint="${escapeAttr(viewpoint.id)}">编辑</button>
+            <button class="text-button danger" type="button" data-h-delete-viewpoint="${escapeAttr(viewpoint.id)}">删除</button>
+          </div>
+        `}
+      </div>
+    </article>
+  `;
+}
+
+function getHSelectedDraft(topic) {
+  const drafts = Array.isArray(topic?.drafts) ? topic.drafts : [];
+  return drafts.find((draft) => Number(draft.id) === Number(state.hSelectedDraftId))
+    || drafts.find((draft) => draft.mode === "outline")
+    || drafts[0]
+    || null;
+}
+
+function getHSelectedOutline(topic) {
+  const drafts = Array.isArray(topic?.drafts) ? topic.drafts : [];
+  return drafts.find((draft) => (
+    draft.mode === "outline"
+    && Number(draft.id) === Number(state.hSelectedOutlineId)
+  )) || drafts.find((draft) => draft.mode === "outline") || null;
+}
+
+function getHLatestModeDraft(topic, mode) {
+  const drafts = Array.isArray(topic?.drafts) ? topic.drafts : [];
+  return drafts.find((draft) => draft.mode === mode) || null;
+}
+
+function renderHChannelSuite(topic, sourceOutline, canGenerateSuite) {
+  const failedModes = new Set(state.hSuiteFailedModes || []);
+  return `
+    <section class="h-channel-suite" aria-label="四渠道稿件">
+      <div class="h-channel-suite-head">
+        <div>
+          <span>四渠道稿件</span>
+          <strong>同一内容大纲，四种独立表达</strong>
+        </div>
+        <small>每个版本单独编辑、审校和采用</small>
+      </div>
+      <div class="h-channel-suite-grid">
+        ${hSuiteModes.map((mode) => {
+          const latestDraft = getHLatestModeDraft(topic, mode);
+          const failed = failedModes.has(mode);
+          return `
+            <article class="h-channel-card${failed ? " failed" : ""}">
+              <div>
+                <span>${escapeHtml(hModeLabels[mode])}</span>
+                <strong>${latestDraft ? `v${escapeHtml(latestDraft.versionNo)} · ${escapeHtml(hDraftStatusLabels[latestDraft.status] || latestDraft.status)}` : "待生成"}</strong>
+              </div>
+              ${failed ? '<small>本次生成失败，可单独重试</small>' : `<small>${latestDraft ? escapeHtml(latestDraft.title || "已生成稿件") : "尚无渠道版本"}</small>`}
+              <div class="h-channel-card-actions">
+                ${latestDraft
+                  ? `<button class="ghost-button compact" type="button" data-h-select-draft="${escapeAttr(latestDraft.id)}" data-h-scroll-to-editor>打开</button>`
+                  : ""}
+                ${failed
+                  ? `<button class="primary-button compact" type="button" data-h-generate-channel="${escapeAttr(mode)}" data-outline-id="${escapeAttr(sourceOutline?.id || "")}" data-topic-id="${escapeAttr(topic.id)}" ${!canGenerateSuite ? "disabled" : ""}>重试</button>`
+                  : ""}
+              </div>
+            </article>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderHDraftEditor(topic) {
+  const drafts = Array.isArray(topic.drafts) ? topic.drafts : [];
+  const draft = getHSelectedDraft(topic);
+  const sourceOutline = getHSelectedOutline(topic);
+  if (!draft) {
+    return '<div class="h-empty-card"><strong>还没有大纲</strong><p>先生成内容大纲；选中大纲后，可以在页面最下方一键生成四个渠道版本。</p></div>';
+  }
+  const review = draft.latestReview || null;
+  const reviewUsable = Boolean(review && !review.isStale);
+  const reviewNeedsRevision = Boolean(reviewUsable && (
+    review.conclusion !== "ready_for_henry"
+    || ["l1Status", "l2Status", "l3Status", "l4Status"]
+      .some((key) => review[key] === "needs_revision")
+    || (review.requiredActions || []).length
+    || (review.issues || []).length
+  ));
+  return `
+    <div class="h-draft-workspace" data-h-draft-editor-anchor tabindex="-1">
+      <div class="h-draft-version-list" role="tablist" aria-label="草稿版本">
+        ${drafts.map((item) => `
+          <button class="${Number(item.id) === Number(draft.id) ? "active" : ""}${Number(item.id) === Number(sourceOutline?.id) ? " suite-source" : ""}" type="button" data-h-select-draft="${escapeAttr(item.id)}">
+            <span>${escapeHtml(hModeLabels[item.mode] || item.mode)} · v${escapeHtml(item.versionNo)}</span>
+            <small>${escapeHtml(hDraftStatusLabels[item.status] || item.status)}${Number(item.id) === Number(sourceOutline?.id) ? " · 生成依据" : ""}</small>
+          </button>
+        `).join("")}
+      </div>
+      <div class="h-draft-editor">
+        <div class="h-draft-editor-head">
+          <div>
+            <span class="h-readiness ${escapeAttr(draft.status)}">${escapeHtml(hDraftStatusLabels[draft.status] || draft.status)}</span>
+            <h3>${escapeHtml(draft.title || topic.title)}</h3>
+            <p>${escapeHtml(draft.model)} · ${escapeHtml(draft.skillVersion)} · v${escapeHtml(draft.versionNo)}</p>
+          </div>
+          <div class="h-draft-actions">
+            <button class="ghost-button compact" type="button" data-h-copy-draft="${escapeAttr(draft.id)}">复制 Markdown</button>
+            <button class="ghost-button compact" type="button" data-h-copy-plain="${escapeAttr(draft.id)}">复制纯文本</button>
+            <button class="ghost-button compact" type="button" data-h-export-draft="${escapeAttr(draft.id)}">导出内容包</button>
+          </div>
+        </div>
+        <label class="h-editor-field">
+          <span>标题</span>
+          <input type="text" data-h-draft-title value="${escapeAttr(draft.title || "")}">
+        </label>
+        <label class="h-editor-field">
+          <span>${draft.mode === "outline" ? "大纲内容" : "正文 / 口播"}</span>
+          <textarea data-h-draft-content rows="22">${escapeHtml(draft.contentMarkdown || "")}</textarea>
+        </label>
+        <div class="h-draft-primary-actions">
+          <button class="ghost-button" type="button" data-h-save-draft="${escapeAttr(draft.id)}">保存为新版本</button>
+          ${draft.generationError
+            ? `<button class="ghost-button" type="button" data-h-retry-draft="${escapeAttr(draft.id)}" data-h-mode="${escapeAttr(draft.mode)}">重试完整生成</button>`
+            : ""}
+          <button class="${reviewUsable ? "ghost-button" : "primary-button"}" type="button" data-h-review-draft="${escapeAttr(draft.id)}">${review?.isStale ? "重新运行四层审校" : "运行四层审校"}</button>
+          ${reviewNeedsRevision
+            ? `<button class="primary-button" type="button" data-h-generate-reviewed="${escapeAttr(draft.id)}" title="按最新四层审校意见生成新版本">${draft.mode === "outline" ? "按审校意见更新大纲" : "按审校意见重新生成"}</button>`
+            : ""}
+          ${draft.status === "ready_for_henry" && reviewUsable
+            ? `<button class="ghost-button" type="button" data-h-mark-reviewed="${escapeAttr(draft.id)}">标记已审阅</button>`
+            : ""}
+          ${["ready_for_henry", "henry_reviewed"].includes(draft.status) && reviewUsable
+            ? `<button class="primary-button" type="button" data-h-approve-draft="${escapeAttr(draft.id)}">最终采用</button>`
+            : ""}
+          ${["ready_for_henry", "henry_reviewed"].includes(draft.status)
+            ? `<button class="ghost-button" type="button" data-h-return-draft="${escapeAttr(draft.id)}">退回修改</button>`
+            : ""}
+        </div>
+        ${review ? `
+          <section class="h-review-result ${escapeAttr(review.conclusion)}">
+            <div class="h-review-head">
+              <strong>${escapeHtml(review.conclusion === "ready_for_henry" ? "可进入本人审阅" : review.conclusion === "facts_required" ? "补充事实后审阅" : "暂不建议成稿")}</strong>
+              <span>L1 ${escapeHtml(review.l1Status)} · L2 ${escapeHtml(review.l2Status)} · L3 ${escapeHtml(review.l3Status)} · L4 ${escapeHtml(review.l4Status)}</span>
+            </div>
+            ${review.isStale ? '<p class="h-inline-note">事实包或 Henry 观点在本次审校后发生了变化，这份审校已过期，请重新运行。</p>' : ""}
+            ${(review.requiredActions || []).length ? `
+              <h4>发布前必须处理</h4>
+              <ul>${review.requiredActions.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+            ` : ""}
+            ${(review.issues || []).length ? `
+              <h4>可验证问题</h4>
+              <ul>${review.issues.map((item) => `<li><strong>${escapeHtml(item.layer || "")}</strong> ${escapeHtml(item.message || item)}</li>`).join("")}</ul>
+            ` : ""}
+          </section>
+        ` : '<p class="h-inline-note">生成与审校是两个独立步骤。草稿通过审校前不能最终采用。</p>'}
+      </div>
+    </div>
+  `;
+}
+
+function renderHTopicDetail(topic) {
+  const sources = Array.isArray(topic.sources) ? topic.sources : [];
+  const viewpoints = Array.isArray(topic.viewpoints) ? topic.viewpoints : [];
+  const selectedOutline = getHSelectedOutline(topic);
+  const hasOutline = (topic.drafts || []).some((draft) => draft.mode === "outline");
+  const missingItems = Array.isArray(topic.missingItems) ? topic.missingItems : [];
+  const isSelected = topic.status === "selected";
+  const fullSourceCount = sources.filter((source) => source.contentStatus === "full").length;
+  const pendingFetchCount = sources.filter((source) => source.url && source.contentStatus !== "full").length;
+  const evidenceProgress = sources.length
+    ? `${fullSourceCount}/${sources.length} 已补全文`
+    : "暂无来源";
+  const canGenerateSuite = Boolean(isSelected && selectedOutline);
+  const suiteBlockReason = !isSelected
+    ? "先在候选卡选择“值得写”。"
+    : !hasOutline
+      ? "先生成一个内容大纲。"
+      : "";
+  return `
+    <section class="h-topic-detail">
+      <div class="h-topic-detail-heading">
+        <div>
+          <span class="h-status ${escapeAttr(topic.status)}">${escapeHtml(hStatusLabels[topic.status] || topic.status)}</span>
+          <span class="h-readiness ${escapeAttr(topic.readiness)}">${escapeHtml(hReadinessLabels[topic.readiness] || topic.readiness)}</span>
+          <h2>${escapeHtml(topic.title)}</h2>
+          <p>${escapeHtml(topic.coreQuestion || topic.eventSummary || "")}</p>
+        </div>
+        <button class="ghost-button compact h-mobile-back" type="button" data-h-close-topic>返回候选</button>
+      </div>
+      <div class="h-angle-card">
+        <span>系统建议角度，不等于 Henry 已确认观点</span>
+        <p>${escapeHtml(topic.suggestedAngle || "暂无建议角度")}</p>
+        <small>目标读者：${escapeHtml(topic.targetAudience || "待明确")}</small>
+      </div>
+      <div class="h-duplicate-card ${escapeAttr(topic.duplicateRisk?.level || "unknown")}">
+        <span>近 30 天重复风险</span>
+        <strong>${escapeHtml(hDuplicateLabels[topic.duplicateRisk?.level] || "待检查")}</strong>
+        <p>${escapeHtml(topic.duplicateRisk?.reason || "系统上线后开始积累历史。")}</p>
+      </div>
+      <details class="h-add-panel h-checks-panel">
+        <summary>人工确认 H 四问</summary>
+        <form data-h-checks-form data-topic-id="${escapeAttr(topic.id)}">
+          <p class="h-inline-note">“有观点”和“有依据”由已确认观点及已核验事实自动计算；下面两项允许 H 专栏成员纠正系统判断。</p>
+          <div class="h-checks-form-grid">
+            <label class="h-confirm-check">
+              <input name="useful" type="checkbox" value="1" ${topic.fourChecks?.useful ? "checked" : ""}>
+              <span>对读者有用：能帮助缩小选择、识别风险或采取行动</span>
+            </label>
+            <label class="h-confirm-check">
+              <input name="longTerm" type="checkbox" value="1" ${topic.fourChecks?.longTerm ? "checked" : ""}>
+              <span>能回到长期价值：专业、合规、安全、公平或长期主义</span>
+            </label>
+          </div>
+          <button class="ghost-button" type="submit">保存四问确认</button>
+        </form>
+      </details>
+      ${missingItems.length ? `
+        <div class="h-missing-card">
+          <strong>当前缺口</strong>
+          <ul>${missingItems.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+        </div>
+      ` : ""}
+
+      <section class="h-detail-section">
+        <div class="h-detail-section-head">
+          <div><span>01</span><h3>事实包</h3><small class="h-section-progress">${escapeHtml(evidenceProgress)}</small></div>
+          ${!isSelected
+            ? `<span class="h-inline-note">${sources.length && fullSourceCount === sources.length ? "来源正文已齐，选择后直接继续" : "选择“值得写”后自动补全文"}</span>`
+            : pendingFetchCount
+              ? `<button class="ghost-button compact" type="button" data-h-fetch-evidence="${escapeAttr(topic.id)}">重试未补全文</button>`
+              : `<span class="h-inline-note">${sources.length ? "正文已自动补全" : "暂无可抓取链接"}</span>`}
+        </div>
+        <div class="h-source-list">
+          ${sources.length ? sources.map(renderHSource).join("") : '<div class="h-empty-card">暂无来源。</div>'}
+        </div>
+        <details class="h-add-panel">
+          <summary>手动补充来源</summary>
+          <form data-h-source-form data-topic-id="${escapeAttr(topic.id)}">
+            <div class="h-form-grid">
+              <label><span>来源名称</span><input name="sourceName" placeholder="如 USCIS"></label>
+              <label><span>原文链接</span><input name="url" type="url" placeholder="https://"></label>
+              <label><span>来源等级</span><select name="sourceLevel"><option value="A">A级 官方原文</option><option value="B">B级 权威媒体</option><option value="C" selected>C级 行业解读</option><option value="D">D级 未核验材料</option></select></label>
+              <label><span>政策状态</span><select name="policyStatus"><option value="effective">已生效</option><option value="announced">已公布待生效</option><option value="pending">进行中</option><option value="proposed">拟议</option><option value="media_report" selected>媒体报道</option><option value="opinion">观点</option><option value="not_applicable">非政策题</option></select></label>
+            </div>
+            <label><span>标题</span><input name="title"></label>
+            <label><span>完整原文或可核验材料</span><textarea name="extractedText" rows="7"></textarea></label>
+            <label class="h-confirm-check"><input name="verified" type="checkbox" value="1"><span>已人工核验</span></label>
+            <button class="ghost-button" type="submit">保存来源</button>
+          </form>
+        </details>
+      </section>
+
+      <section class="h-detail-section">
+        <div class="h-detail-section-head">
+          <div><span>02</span><h3>Henry 观点</h3></div>
+        </div>
+        <div class="h-viewpoint-list">
+          ${viewpoints.length ? viewpoints.map(renderHViewpoint).join("") : '<div class="h-empty-card">尚无已确认观点。系统建议角度不会自动冒充本人观点。</div>'}
+        </div>
+        <form class="h-viewpoint-form" data-h-viewpoint-form data-topic-id="${escapeAttr(topic.id)}">
+          <label>
+            <span>补一句真实观点</span>
+            <textarea name="rawText" rows="4" placeholder="这件事真正想表达什么？最担心客户误解哪一点？"></textarea>
+          </label>
+          <label class="h-confirm-check"><input name="confirm" type="checkbox" value="1" checked><span>确认可用于成稿</span></label>
+          <button class="ghost-button" type="submit">保存观点</button>
+        </form>
+      </section>
+
+      <section class="h-detail-section">
+        <div class="h-detail-section-head">
+          <div><span>03</span><h3>大纲与稿件编辑</h3></div>
+          <span>${escapeHtml(hReadinessLabels[topic.readiness] || topic.readiness)}</span>
+        </div>
+        <div class="h-mode-actions">
+          <button class="ghost-button" type="button" data-h-generate="outline" data-topic-id="${escapeAttr(topic.id)}" ${!isSelected ? "disabled" : ""}>${hasOutline ? "重新生成大纲" : "生成大纲"}</button>
+        </div>
+        ${renderHDraftEditor(topic)}
+      </section>
+
+      <section class="h-detail-section h-output-section">
+        <div class="h-detail-section-head">
+          <div><span>04</span><h3>内容产出</h3></div>
+          <span>${selectedOutline ? `当前依据：大纲 v${escapeHtml(selectedOutline.versionNo)}` : "请选择大纲"}</span>
+        </div>
+        <div class="h-production-toolbar">
+          <div class="h-mode-actions">
+            <button class="primary-button" type="button" data-h-generate-suite="${escapeAttr(selectedOutline?.id || "")}" data-topic-id="${escapeAttr(topic.id)}" ${!canGenerateSuite ? "disabled" : ""}>一键生成整套稿件</button>
+          </div>
+          <details class="h-single-channel-menu">
+            <summary>单独生成一个渠道</summary>
+            <div>
+              ${hSuiteModes.map((mode) => `
+                <button class="ghost-button compact" type="button" data-h-generate-channel="${escapeAttr(mode)}" data-outline-id="${escapeAttr(selectedOutline?.id || "")}" data-topic-id="${escapeAttr(topic.id)}" ${!canGenerateSuite ? "disabled" : ""}>${escapeHtml(hModeLabels[mode])}</button>
+              `).join("")}
+            </div>
+          </details>
+        </div>
+        ${suiteBlockReason
+          ? `<p class="h-inline-note">${escapeHtml(suiteBlockReason)}</p>`
+          : '<p class="h-inline-note">系统会按照当前选中的大纲，结合现有事实包和已确认观点生成四个渠道版本；生成后再分别审校。</p>'}
+        ${renderHChannelSuite(topic, selectedOutline, canGenerateSuite)}
+      </section>
+    </section>
+  `;
+}
+
+function renderHHistory() {
+  if (!state.hHistory.length) {
+    return '<div class="h-empty-card"><strong>尚无历史内容</strong><p>近30天重复检查将从系统上线后开始积累。</p></div>';
+  }
+  return `<div class="h-history-list">${state.hHistory.map((topic) => `
+    <button type="button" data-h-open-topic="${escapeAttr(topic.id)}">
+      <time>${escapeHtml(topic.date)}</time>
+      <strong>${escapeHtml(topic.title)}</strong>
+      <span>${escapeHtml(hStatusLabels[topic.status] || topic.status)} · ${escapeHtml(hReadinessLabels[topic.readiness] || topic.readiness)}</span>
+    </button>
+  `).join("")}</div>`;
+}
+
+const hGenerationProgressCopy = {
+  outline: {
+    title: "正在生成内容大纲",
+    detail: "正在整理主轴、事实边界、Henry 观点和文章结构，请稍候。",
+  },
+  wechat_article: {
+    title: "正在生成公众号文章",
+    detail: "正在依据已核验事实和确认观点组织完整文章。",
+  },
+  short_video: {
+    title: "正在生成 H 快评",
+    detail: "正在把事实和观点整理成 60—120 秒口播。",
+  },
+  run_and_talk_video: {
+    title: "正在生成 H 边跑边聊",
+    detail: "正在组织适合边跑边聊的叙事节奏和口播结构。",
+  },
+  deep_video: {
+    title: "正在生成 H 深聊",
+    detail: "正在展开事实、观点、风险和长期价值。",
+  },
+  review: {
+    title: "正在运行四层审校",
+    detail: "正在核验事实、观点边界、内容结构和发布风险，请稍候。",
+  },
+  review_revision: {
+    title: "正在生成修订稿",
+    detail: "正在按最新审校意见修改当前稿件并生成新版本，旧版本会保留。",
+  },
+  candidate_refresh: {
+    title: "正在刷新今日候选",
+    detail: "正在重新分析公共日报、查重并筛选今日候选，请稍候。",
+  },
+  suite: {
+    title: "正在生成四渠道稿件",
+    detail: "公众号文章、H快评、H边跑边聊和H深聊正在并行生成。",
+  },
+};
+
+function renderHGenerationProgress() {
+  if (!state.hGeneratingMode) return "";
+  const copy = hGenerationProgressCopy[state.hGeneratingMode] || {
+    title: "正在生成内容",
+    detail: "正在整理事实包和 Henry 观点，请稍候。",
+  };
+  const progress = state.hGenerationProgress;
+  const progressPercent = progress?.total
+    ? Math.round((Number(progress.completed || 0) / Number(progress.total)) * 100)
+    : 0;
+  return `
+    <div class="h-generation-backdrop">
+      <section
+        class="h-generation-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="hGenerationTitle"
+        aria-describedby="hGenerationDetail"
+      >
+        <span class="h-generation-spinner" aria-hidden="true"></span>
+        <small>${progress?.total ? `AI 正在处理 · ${escapeHtml(progress.completed)}/${escapeHtml(progress.total)}` : "AI 正在处理"}</small>
+        <strong id="hGenerationTitle">${escapeHtml(copy.title)}</strong>
+        <p id="hGenerationDetail">${escapeHtml(progress?.label || copy.detail)}</p>
+        ${progress?.total ? `
+          <div
+            class="h-generation-track"
+            role="progressbar"
+            aria-label="四渠道稿件生成进度"
+            aria-valuemin="0"
+            aria-valuemax="${escapeAttr(progress.total)}"
+            aria-valuenow="${escapeAttr(progress.completed || 0)}"
+          ><span style="width:${progressPercent}%"></span></div>
+        ` : ""}
+        <div class="h-generation-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+      </section>
+    </div>
+  `;
+}
+
+function setHColumnMarkup(markup) {
+  const previousRailScrollTop = hColumnApp.querySelector(".h-topic-rail")?.scrollTop || 0;
+  hColumnApp.innerHTML = markup;
+  const nextRail = hColumnApp.querySelector(".h-topic-rail");
+  if (nextRail) nextRail.scrollTop = previousRailScrollTop;
+
+  const busy = state.hLoading || state.hSaving || Boolean(state.hGeneratingMode);
+  hColumnApp.setAttribute("aria-busy", String(busy));
+  if (busy) {
+    hColumnApp.querySelectorAll("button, input, textarea, select").forEach((control) => {
+      control.disabled = true;
+    });
+  }
+  if (hColumnDate) hColumnDate.disabled = busy;
+  const refreshButton = document.querySelector("#hColumnRefresh");
+  if (refreshButton) refreshButton.disabled = busy;
+}
+
+function renderHColumn() {
+  if (!hColumnApp) return;
+  if (state.hTab === "confirm") state.hTab = "today";
+  if (hColumnDate && state.hDate && hColumnDate.value !== state.hDate) {
+    hColumnDate.value = state.hDate;
+  }
+  if (state.hLoading && !state.hTopics.length && !state.hTopic) {
+    setHColumnMarkup('<div class="h-loading-card" role="status"><span class="h-pulse"></span><strong>正在准备今日候选</strong><p>系统会先做选题判断，不会为了凑数量强制生成文章。</p></div>');
+    return;
+  }
+  if (state.hError && !state.hTopics.length && !state.hTopic) {
+    setHColumnMarkup(`
+      <div class="h-error-card" role="alert">
+        <strong>H 专栏暂不可用</strong>
+        <p>${escapeHtml(state.hError)}</p>
+        <button class="ghost-button" type="button" data-h-retry>重试</button>
+      </div>
+    `);
+    return;
+  }
+
+  const selectedCount = state.hTopics.filter((topic) => topic.status === "selected").length;
+  const readyCount = state.hTopics.filter((topic) => topic.readiness === "draft_ready").length;
+  const confirmCount = state.hTopics.filter((topic) => topic.readiness === "needs_viewpoint").length
+    + state.hTopics.reduce((total, topic) => total + Number(topic.readyForHenryDraftCount || 0), 0);
+  const filteredTopics = state.hTab === "confirm"
+    ? state.hTopics.filter((topic) => (
+      topic.readiness === "needs_viewpoint"
+      || Number(topic.readyForHenryDraftCount || 0) > 0
+    ))
+    : state.hTopics;
+  let body = "";
+  if (state.hTab === "history") {
+    body = renderHHistory();
+  } else if (state.hTab === "drafts") {
+    const withDrafts = state.hTopics.filter((topic) => Number(topic.draftCount || topic.drafts?.length || 0) > 0);
+    body = withDrafts.length
+      ? `<div class="h-column-grid${state.hTopic ? " has-detail" : ""}"><div class="h-topic-rail">${withDrafts.map((topic) => renderHTopicCard(topic, true)).join("")}</div>${state.hTopic ? renderHTopicDetail(state.hTopic) : '<div class="h-empty-card">选择一份草稿继续处理。</div>'}</div>`
+      : '<div class="h-empty-card"><strong>草稿库为空</strong><p>从今日候选选择“值得写”后再生成内容。</p></div>';
+  } else {
+    body = filteredTopics.length
+      ? `<div class="h-column-grid${state.hTopic ? " has-detail" : ""}"><div class="h-topic-rail">${filteredTopics.map((topic) => renderHTopicCard(topic)).join("")}</div>${state.hTopic ? renderHTopicDetail(state.hTopic) : '<div class="h-empty-card h-detail-placeholder"><strong>选择一个候选</strong><p>查看事实包、确认观点并生成内容。</p></div>'}</div>`
+      : '<div class="h-empty-card"><strong>今天没有足够值得 Henry 专门成稿的题目</strong><p>系统没有为了凑数量生成内容。你可以刷新候选，或等待公共日报出现新的实质变化。</p></div>';
+  }
+
+  setHColumnMarkup(`
+    <div class="h-overview">
+      <div><span>今日候选</span><strong>${state.hTopics.length}</strong></div>
+      <div><span>已选择</span><strong>${selectedCount}</strong></div>
+      <div><span>资料已齐</span><strong>${readyCount}</strong></div>
+      <div><span>待确认</span><strong>${confirmCount}</strong></div>
+      <div class="h-actor-card">
+        <span>H 专栏成员</span>
+        <strong>${escapeHtml(state.hActor?.name || "未识别")}</strong>
+      </div>
+    </div>
+    <div class="h-tabbar" role="tablist">
+      <button class="${state.hTab === "today" ? "active" : ""}" type="button" role="tab" aria-selected="${state.hTab === "today"}" data-h-tab="today">今日候选</button>
+      <button class="${state.hTab === "drafts" ? "active" : ""}" type="button" role="tab" aria-selected="${state.hTab === "drafts"}" data-h-tab="drafts">草稿库</button>
+      <button class="${state.hTab === "history" ? "active" : ""}" type="button" role="tab" aria-selected="${state.hTab === "history"}" data-h-tab="history">历史</button>
+    </div>
+    ${state.hError ? `<div class="h-message h-error-message" role="alert"><span>${escapeHtml(state.hError)}</span><button class="text-button" type="button" data-h-dismiss-error>关闭</button></div>` : ""}
+    ${state.hMessage ? `<div class="h-message" role="status">${escapeHtml(state.hMessage)}</div>` : ""}
+    ${state.hSaving && !state.hGeneratingMode ? '<div class="h-saving-bar" role="status">正在处理，请稍候…</div>' : ""}
+    ${body}
+    ${renderHGenerationProgress()}
+  `);
+}
+
+async function loadHColumn({ date, force = false } = {}) {
+  if (window.location.protocol === "file:") return;
+  state.hDate = date || state.hDate || getShanghaiDateString();
+  const requestedDate = state.hDate;
+  const loadToken = ++state.hLoadToken;
+  state.hTopicLoadToken += 1;
+  state.hLoading = true;
+  state.hError = "";
+  state.hMessage = "";
+  renderHColumn();
+  try {
+    const params = new URLSearchParams({ date: requestedDate });
+    if (force) params.set("sync", "1");
+    const response = await fetch(`/api/h/topics?${params.toString()}`, {
+      headers: { accept: "application/json" },
+    });
+    const data = await response.json();
+    if (loadToken !== state.hLoadToken) return;
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.hActor = data.actor || state.hActor;
+    state.hTopics = Array.isArray(data.topics) ? data.topics : [];
+    if (response.status === 202 || data.running) {
+      state.hMessage = "候选正在后台生成，稍后会自动刷新。";
+      window.setTimeout(() => {
+        if (state.view === "h-column" && state.hDate === requestedDate) {
+          loadHColumn({ date: requestedDate, force: true });
+        }
+      }, 2500);
+    }
+    if (state.hTopic) {
+      const stillVisible = state.hTopics.some((topic) => Number(topic.id) === Number(state.hTopic.id));
+      if (!stillVisible) {
+        state.hTopic = null;
+        state.hSelectedDraftId = null;
+        state.hSelectedOutlineId = null;
+      }
+    }
+  } catch (error) {
+    if (loadToken !== state.hLoadToken) return;
+    state.hTopics = [];
+    state.hTopic = null;
+    state.hSelectedDraftId = null;
+    state.hSelectedOutlineId = null;
+    state.hError = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (loadToken !== state.hLoadToken) return;
+    state.hLoading = false;
+    renderHColumn();
+  }
+}
+
+async function loadHTopic(topicId) {
+  const loadToken = ++state.hTopicLoadToken;
+  state.hLoading = true;
+  state.hError = "";
+  renderHColumn();
+  try {
+    const response = await fetch(`/api/h/topics/${encodeURIComponent(topicId)}`, {
+      headers: { accept: "application/json" },
+    });
+    const data = await response.json();
+    if (loadToken !== state.hTopicLoadToken) return;
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    state.hActor = data.actor || state.hActor;
+    state.hTopic = data.topic || null;
+    state.hSelectedDraftId = getHSelectedDraft(state.hTopic)?.id || null;
+    state.hSelectedOutlineId = getHSelectedOutline(state.hTopic)?.id || null;
+    const index = state.hTopics.findIndex((topic) => Number(topic.id) === Number(topicId));
+    if (index >= 0 && state.hTopic) {
+      state.hTopics[index] = { ...state.hTopics[index], ...state.hTopic, draftCount: state.hTopic.drafts?.length || 0 };
+    }
+  } catch (error) {
+    if (loadToken !== state.hTopicLoadToken) return;
+    state.hError = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (loadToken !== state.hTopicLoadToken) return;
+    state.hLoading = false;
+    renderHColumn();
+  }
+}
+
+async function loadHHistory() {
+  try {
+    const response = await fetch("/api/h/topics/history", { headers: { accept: "application/json" } });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    state.hHistory = Array.isArray(data.topics) ? data.topics : [];
+  } catch (error) {
+    state.hError = error instanceof Error ? error.message : String(error);
+  }
+  renderHColumn();
+}
+
+async function withHGenerationProgress(mode, action, initialProgress = null) {
+  const startedAt = Date.now();
+  state.hGeneratingMode = mode || "content";
+  state.hGenerationProgress = initialProgress;
+  renderHColumn();
+  try {
+    return await action();
+  } finally {
+    const remaining = 650 - (Date.now() - startedAt);
+    if (remaining > 0) {
+      await new Promise((resolve) => window.setTimeout(resolve, remaining));
+    }
+    state.hGeneratingMode = null;
+    state.hGenerationProgress = null;
+    renderHColumn();
+  }
+}
+
+async function requestHChannelFromOutline(outlineDraftId, mode) {
+  const response = await fetch(`/api/h/drafts/${encodeURIComponent(outlineDraftId)}/generate`, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      mode,
+      fromOutline: true,
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+
+async function hApiAction(url, options = {}, successMessage = "") {
+  state.hSaving = true;
+  state.hError = "";
+  state.hMessage = "";
+  renderHColumn();
+  try {
+    const response = await fetch(url, {
+      ...options,
+      headers: {
+        accept: "application/json",
+        ...(options.body ? { "content-type": "application/json" } : {}),
+        ...(options.headers || {}),
+      },
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    state.hActor = data.actor || state.hActor;
+    if (data.topic) {
+      state.hTopic = data.topic;
+      state.hSelectedDraftId = getHSelectedDraft(data.topic)?.id || state.hSelectedDraftId;
+      state.hSelectedOutlineId = getHSelectedOutline(data.topic)?.id || state.hSelectedOutlineId;
+      const index = state.hTopics.findIndex((topic) => Number(topic.id) === Number(data.topic.id));
+      if (index >= 0) state.hTopics[index] = { ...state.hTopics[index], ...data.topic, draftCount: data.topic.drafts?.length || 0 };
+    }
+    if (data.draft) {
+      state.hSelectedDraftId = data.draft.id;
+      if (data.draft.mode === "outline") state.hSelectedOutlineId = data.draft.id;
+      await loadHTopic(data.draft.topicId);
+    }
+    if (Array.isArray(data.topics)) state.hTopics = data.topics;
+    state.hMessage = typeof successMessage === "function"
+      ? successMessage(data)
+      : successMessage;
+    return data;
+  } catch (error) {
+    state.hError = error instanceof Error ? error.message : String(error);
+    return null;
+  } finally {
+    state.hSaving = false;
+    renderHColumn();
+  }
+}
+
 function renderContent() {
   const items = filteredItems();
   renderFilters();
@@ -3035,6 +3886,31 @@ async function loadSsoIdentity() {
   }
 }
 
+function updateHAccessUI() {
+  const navItem = document.querySelector("[data-h-column-nav]");
+  if (navItem) navItem.hidden = !state.hAccess;
+}
+
+async function loadHAccess() {
+  state.hAccess = false;
+  state.hActor = null;
+  if (window.location.protocol !== "file:") {
+    try {
+      const response = await fetch("/api/h/me", {
+        headers: { accept: "application/json" },
+      });
+      const data = await response.json();
+      if (response.ok && data.ok && data.actor) {
+        state.hAccess = true;
+        state.hActor = data.actor;
+      }
+    } catch {
+      /* H access fails closed when identity or the API is unavailable. */
+    }
+  }
+  updateHAccessUI();
+}
+
 function setView(routeValue) {
   const route = parseHashRoute(routeValue);
   let viewName = route.view;
@@ -3047,6 +3923,9 @@ function setView(routeValue) {
 
   if (authViews.includes(viewName) && !state.user) {
     viewName = "login";
+  }
+  if (viewName === "h-column" && !state.hAccess) {
+    viewName = "home";
   }
 
   state.view = viewName;
@@ -3079,6 +3958,9 @@ function setView(routeValue) {
         loadPersonalDaily({ date: state.dailyDate || undefined });
       }
     }
+  }
+  if (viewName === "h-column" && !state.hLoading) {
+    loadHColumn({ date: state.hDate || getShanghaiDateString() });
   }
   if (viewName === "subscriptions" && !state.subscriptionLoaded && !state.subscriptionLoading) {
     loadSubscriptions();
@@ -3334,6 +4216,398 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("click", async (event) => {
+  const hTabButton = event.target.closest("[data-h-tab]");
+  if (hTabButton) {
+    state.hTab = hTabButton.dataset.hTab || "today";
+    state.hTopic = null;
+    state.hSelectedDraftId = null;
+    state.hSelectedOutlineId = null;
+    state.hSuiteFailedModes = [];
+    if (state.hTab === "history") await loadHHistory();
+    else renderHColumn();
+    return;
+  }
+
+  const hOpenTopicButton = event.target.closest("[data-h-open-topic]");
+  if (hOpenTopicButton) {
+    const topicId = hOpenTopicButton.dataset.hOpenTopic;
+    state.hEditingViewpointId = null;
+    state.hSelectedDraftId = null;
+    state.hSelectedOutlineId = null;
+    state.hSuiteFailedModes = [];
+    if (state.hTab === "history") {
+      const historyTopic = state.hHistory.find((topic) => Number(topic.id) === Number(topicId));
+      state.hDate = historyTopic?.date || state.hDate;
+      state.hTab = "today";
+      await loadHColumn({ date: state.hDate });
+    }
+    await loadHTopic(topicId);
+    return;
+  }
+
+  if (event.target.closest("[data-h-dismiss-error]")) {
+    state.hError = "";
+    renderHColumn();
+    return;
+  }
+
+  if (event.target.closest("[data-h-close-topic]")) {
+    state.hTopic = null;
+    state.hSelectedDraftId = null;
+    state.hSelectedOutlineId = null;
+    state.hEditingViewpointId = null;
+    state.hSuiteFailedModes = [];
+    renderHColumn();
+    return;
+  }
+
+  if (event.target.closest("[data-h-retry]")) {
+    await loadHColumn({ date: state.hDate, force: true });
+    return;
+  }
+
+  const hStatusButton = event.target.closest("[data-h-topic-status]");
+  if (hStatusButton) {
+    const topicId = hStatusButton.dataset.topicId;
+    const status = hStatusButton.dataset.hTopicStatus;
+    const message = status === "selected"
+      ? (data) => {
+          const sourceCount = Number(data.topic?.sourceCount || 0);
+          const fullSourceCount = Number(data.topic?.fullSourceCount || 0);
+          if (!sourceCount) return "已标记为值得写。当前没有可抓取链接，可在事实包中补充来源。";
+          if (fullSourceCount >= sourceCount) {
+            return `已标记为值得写，并自动补全 ${fullSourceCount}/${sourceCount} 条来源正文。`;
+          }
+          if (fullSourceCount > 0) {
+            return `已标记为值得写，已自动补全 ${fullSourceCount}/${sourceCount} 条来源正文；其余可在事实包中重试。`;
+          }
+          return "已标记为值得写，系统已自动尝试补全文；暂未取得完整正文，可在事实包中重试。";
+        }
+      : status === "later"
+        ? "已放入以后再说。"
+        : "已记录为不写。";
+    await hApiAction(`/api/h/topics/${encodeURIComponent(topicId)}`, {
+      method: "PUT",
+      body: JSON.stringify({ status }),
+    }, message);
+    return;
+  }
+
+  const hFetchEvidenceButton = event.target.closest("[data-h-fetch-evidence]");
+  if (hFetchEvidenceButton) {
+    await hApiAction(`/api/h/topics/${encodeURIComponent(hFetchEvidenceButton.dataset.hFetchEvidence)}/evidence/fetch`, {
+      method: "POST",
+    }, "事实包已重新抓取，并按来源等级与完整度更新。");
+    return;
+  }
+
+  const hDeleteSourceButton = event.target.closest("[data-h-delete-source]");
+  if (hDeleteSourceButton) {
+    if (!window.confirm("确定从本选题移除这条来源吗？这不会删除公共日报原始数据。")) return;
+    await hApiAction(`/api/h/sources/${encodeURIComponent(hDeleteSourceButton.dataset.hDeleteSource)}`, {
+      method: "DELETE",
+    }, "来源已从本选题移除。");
+    return;
+  }
+
+  const hVerifySourceButton = event.target.closest("[data-h-verify-source]");
+  if (hVerifySourceButton) {
+    await hApiAction(`/api/h/sources/${encodeURIComponent(hVerifySourceButton.dataset.hVerifySource)}`, {
+      method: "PUT",
+      body: JSON.stringify({ verified: true }),
+    }, "来源已由当前账号标记为人工核验。");
+    return;
+  }
+
+  const hConfirmViewpointButton = event.target.closest("[data-h-confirm-viewpoint]");
+  if (hConfirmViewpointButton) {
+    await hApiAction(`/api/h/viewpoints/${encodeURIComponent(hConfirmViewpointButton.dataset.hConfirmViewpoint)}/confirm`, {
+      method: "POST",
+    }, "该观点已确认，可用于成稿。");
+    return;
+  }
+
+  const hEditViewpointButton = event.target.closest("[data-h-edit-viewpoint]");
+  if (hEditViewpointButton) {
+    state.hEditingViewpointId = Number(hEditViewpointButton.dataset.hEditViewpoint);
+    renderHColumn();
+    return;
+  }
+
+  if (event.target.closest("[data-h-cancel-viewpoint]")) {
+    state.hEditingViewpointId = null;
+    renderHColumn();
+    return;
+  }
+
+  const hDeleteViewpointButton = event.target.closest("[data-h-delete-viewpoint]");
+  if (hDeleteViewpointButton) {
+    if (!window.confirm("确定删除这条 Henry 观点吗？删除后不会再用于新草稿。")) return;
+    const data = await hApiAction(`/api/h/viewpoints/${encodeURIComponent(hDeleteViewpointButton.dataset.hDeleteViewpoint)}`, {
+      method: "DELETE",
+    }, "观点已删除。");
+    if (data) state.hEditingViewpointId = null;
+    return;
+  }
+
+  const hGenerateButton = event.target.closest("[data-h-generate]");
+  if (hGenerateButton) {
+    const mode = hGenerateButton.dataset.hGenerate;
+    await withHGenerationProgress(mode, () => hApiAction(
+      `/api/h/topics/${encodeURIComponent(hGenerateButton.dataset.topicId)}/drafts`,
+      {
+        method: "POST",
+        body: JSON.stringify({ mode }),
+      },
+      `${hModeLabels[mode] || "内容"}已生成。`,
+    ));
+    return;
+  }
+
+  const hGenerateSuiteButton = event.target.closest("[data-h-generate-suite]");
+  if (hGenerateSuiteButton) {
+    const outlineDraftId = hGenerateSuiteButton.dataset.hGenerateSuite;
+    const topicId = hGenerateSuiteButton.dataset.topicId;
+    state.hSuiteFailedModes = [];
+    const results = await withHGenerationProgress(
+      "suite",
+      async () => {
+        let completed = 0;
+        const outcomes = await Promise.all(hSuiteModes.map(async (mode) => {
+          let outcome;
+          try {
+            const data = await requestHChannelFromOutline(outlineDraftId, mode);
+            outcome = { mode, ok: true, data };
+          } catch (error) {
+            outcome = {
+              mode,
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+          completed += 1;
+          state.hGenerationProgress = {
+            completed,
+            total: hSuiteModes.length,
+            label: outcome.ok
+              ? `${hModeLabels[mode]}已生成，正在等待其余渠道…`
+              : `${hModeLabels[mode]}生成失败，其他渠道仍在继续…`,
+          };
+          renderHColumn();
+          return outcome;
+        }));
+        const failed = outcomes.filter((item) => !item.ok);
+        const succeeded = outcomes.filter((item) => item.ok);
+        await loadHTopic(topicId);
+        const reloadError = state.hError;
+        state.hActor = succeeded.find((item) => item.data?.actor)?.data?.actor || state.hActor;
+        state.hSuiteFailedModes = failed.map((item) => item.mode);
+        state.hMessage = succeeded.length
+          ? `整套稿件已生成 ${succeeded.length}/${hSuiteModes.length} 个渠道；每个版本需要单独审校。`
+          : "";
+        state.hError = [
+          reloadError,
+          failed.length
+            ? `${failed.map((item) => hModeLabels[item.mode]).join("、")}生成失败，可在渠道卡片中单独重试。`
+            : "",
+        ].filter(Boolean).join(" ");
+        renderHColumn();
+        return outcomes;
+      },
+      {
+        completed: 0,
+        total: hSuiteModes.length,
+        label: "四个渠道已同时开始生成，请稍候…",
+      },
+    );
+    if (!results) renderHColumn();
+    return;
+  }
+
+  const hGenerateChannelButton = event.target.closest("[data-h-generate-channel]");
+  if (hGenerateChannelButton) {
+    const mode = hGenerateChannelButton.dataset.hGenerateChannel;
+    const outlineDraftId = hGenerateChannelButton.dataset.outlineId;
+    const topicId = hGenerateChannelButton.dataset.topicId;
+    await withHGenerationProgress(mode, async () => {
+      try {
+        const data = await requestHChannelFromOutline(outlineDraftId, mode);
+        state.hActor = data.actor || state.hActor;
+        await loadHTopic(topicId);
+        state.hSelectedDraftId = data.draft?.id || state.hSelectedDraftId;
+        state.hSuiteFailedModes = (state.hSuiteFailedModes || []).filter((item) => item !== mode);
+        state.hMessage = `${hModeLabels[mode]}已生成新版本，旧版本已保留。`;
+        state.hError = "";
+      } catch (error) {
+        state.hSuiteFailedModes = Array.from(new Set([...(state.hSuiteFailedModes || []), mode]));
+        state.hError = error instanceof Error ? error.message : String(error);
+      }
+      renderHColumn();
+    });
+    return;
+  }
+
+  const hSelectDraftButton = event.target.closest("[data-h-select-draft]");
+  if (hSelectDraftButton) {
+    const selectedDraftId = Number(hSelectDraftButton.dataset.hSelectDraft);
+    const selectedDraft = state.hTopic?.drafts?.find((draft) => Number(draft.id) === selectedDraftId);
+    const shouldScrollToEditor = hSelectDraftButton.hasAttribute("data-h-scroll-to-editor");
+    state.hSelectedDraftId = selectedDraftId;
+    if (selectedDraft?.mode === "outline") state.hSelectedOutlineId = selectedDraftId;
+    renderHColumn();
+    if (shouldScrollToEditor) {
+      window.requestAnimationFrame(() => {
+        const editorAnchor = hColumnApp?.querySelector("[data-h-draft-editor-anchor]");
+        if (!editorAnchor) return;
+        const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+        editorAnchor.scrollIntoView({
+          behavior: reduceMotion ? "auto" : "smooth",
+          block: "start",
+        });
+        editorAnchor.focus({ preventScroll: true });
+        editorAnchor.classList.add("is-located");
+        window.setTimeout(() => editorAnchor.classList.remove("is-located"), 1400);
+      });
+    }
+    return;
+  }
+
+  const hCopyDraftButton = event.target.closest("[data-h-copy-draft]");
+  if (hCopyDraftButton) {
+    const draft = getHSelectedDraft(state.hTopic);
+    if (!draft) return;
+    try {
+      await navigator.clipboard.writeText(`# ${draft.title || state.hTopic?.title || ""}\n\n${draft.contentMarkdown || ""}`);
+      state.hMessage = "Markdown 草稿已复制。";
+    } catch {
+      state.hMessage = "浏览器未允许复制，请在正文框中手动复制。";
+    }
+    renderHColumn();
+    return;
+  }
+
+  const hCopyPlainButton = event.target.closest("[data-h-copy-plain]");
+  if (hCopyPlainButton) {
+    const draft = getHSelectedDraft(state.hTopic);
+    if (!draft) return;
+    try {
+      await navigator.clipboard.writeText([
+        draft.title || state.hTopic?.title || "",
+        markdownToPlainText(draft.contentMarkdown || ""),
+      ].filter(Boolean).join("\n\n"));
+      state.hMessage = "纯文本草稿已复制。";
+    } catch {
+      state.hMessage = "浏览器未允许复制，请在正文框中手动复制。";
+    }
+    renderHColumn();
+    return;
+  }
+
+  const hExportDraftButton = event.target.closest("[data-h-export-draft]");
+  if (hExportDraftButton) {
+    state.hSaving = true;
+    renderHColumn();
+    try {
+      const response = await fetch(`/api/h/drafts/${encodeURIComponent(hExportDraftButton.dataset.hExportDraft)}/export`, {
+        headers: { accept: "application/json" },
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      const blob = new Blob([data.content || ""], { type: "text/markdown;charset=utf-8" });
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = `H内容包-${state.hTopic?.date || state.hDate || getShanghaiDateString()}-${hExportDraftButton.dataset.hExportDraft}.md`;
+      link.click();
+      URL.revokeObjectURL(href);
+      state.hMessage = "内容包已导出。";
+    } catch (error) {
+      state.hError = error instanceof Error ? error.message : String(error);
+    } finally {
+      state.hSaving = false;
+      renderHColumn();
+    }
+    return;
+  }
+
+  const hSaveDraftButton = event.target.closest("[data-h-save-draft]");
+  if (hSaveDraftButton) {
+    const editor = hSaveDraftButton.closest(".h-draft-editor");
+    await hApiAction(`/api/h/drafts/${encodeURIComponent(hSaveDraftButton.dataset.hSaveDraft)}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        title: editor?.querySelector("[data-h-draft-title]")?.value || "",
+        contentMarkdown: editor?.querySelector("[data-h-draft-content]")?.value || "",
+      }),
+    }, "修改已保存为新版本。");
+    return;
+  }
+
+  const hRetryDraftButton = event.target.closest("[data-h-retry-draft]");
+  if (hRetryDraftButton) {
+    const mode = hRetryDraftButton.dataset.hMode;
+    await withHGenerationProgress(mode, () => hApiAction(
+      `/api/h/topics/${encodeURIComponent(state.hTopic?.id)}/drafts`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          mode,
+          refresh: true,
+        }),
+      },
+      "已重新生成一个完整版本。",
+    ));
+    return;
+  }
+
+  const hReviewDraftButton = event.target.closest("[data-h-review-draft]");
+  if (hReviewDraftButton) {
+    await withHGenerationProgress("review", () => hApiAction(
+      `/api/h/drafts/${encodeURIComponent(hReviewDraftButton.dataset.hReviewDraft)}/review`,
+      { method: "POST" },
+      "四层审校已完成。",
+    ));
+    return;
+  }
+
+  const hGenerateReviewedButton = event.target.closest("[data-h-generate-reviewed]");
+  if (hGenerateReviewedButton) {
+    await withHGenerationProgress("review_revision", () => hApiAction(
+      `/api/h/drafts/${encodeURIComponent(hGenerateReviewedButton.dataset.hGenerateReviewed)}/generate`,
+      { method: "POST" },
+      "已按最新审校意见生成新版本，旧版本已保留。",
+    ));
+    return;
+  }
+
+  const hMarkReviewedButton = event.target.closest("[data-h-mark-reviewed]");
+  if (hMarkReviewedButton) {
+    await hApiAction(`/api/h/drafts/${encodeURIComponent(hMarkReviewedButton.dataset.hMarkReviewed)}/henry-reviewed`, {
+      method: "POST",
+    }, "已记录本人或授权编辑审阅。");
+    return;
+  }
+
+  const hApproveDraftButton = event.target.closest("[data-h-approve-draft]");
+  if (hApproveDraftButton) {
+    if (!window.confirm("确认将这个版本标记为最终采用吗？系统会记录确认人和时间。")) return;
+    await hApiAction(`/api/h/drafts/${encodeURIComponent(hApproveDraftButton.dataset.hApproveDraft)}/approve`, {
+      method: "POST",
+    }, "该版本已最终采用，并写入操作日志。");
+    return;
+  }
+
+  const hReturnDraftButton = event.target.closest("[data-h-return-draft]");
+  if (hReturnDraftButton) {
+    const note = window.prompt("请填写退回原因（可留空）：", "");
+    if (note === null) return;
+    await hApiAction(`/api/h/drafts/${encodeURIComponent(hReturnDraftButton.dataset.hReturnDraft)}/return`, {
+      method: "POST",
+      body: JSON.stringify({ note }),
+    }, "该版本已退回修改，并写入操作日志。");
+    return;
+  }
+
   const viewButton = event.target.closest("[data-view]");
   if (viewButton) {
     setView(viewButton.dataset.view);
@@ -3628,6 +4902,37 @@ document.querySelector("#refreshFeedbackReview")?.addEventListener("click", () =
   loadFeedbackReview();
 });
 
+document.querySelector("#hColumnRefresh")?.addEventListener("click", async () => {
+  const data = await withHGenerationProgress("candidate_refresh", () => hApiAction(
+    "/api/h/topics/generate",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        date: state.hDate || getShanghaiDateString(),
+        refresh: true,
+      }),
+    },
+    "候选已按最新公共日报重新评估。",
+  ));
+  if (!data) return;
+  state.hTopic = null;
+  state.hSelectedDraftId = null;
+  state.hSelectedOutlineId = null;
+  state.hSuiteFailedModes = [];
+  renderHColumn();
+});
+
+hColumnDate?.addEventListener("change", async (event) => {
+  const date = event.target.value;
+  if (!date) return;
+  state.hTopic = null;
+  state.hSelectedDraftId = null;
+  state.hSelectedOutlineId = null;
+  state.hSuiteFailedModes = [];
+  state.hTab = "today";
+  await loadHColumn({ date });
+});
+
 document.querySelector("#menuToggle").addEventListener("click", () => {
   document.body.classList.toggle("menu-open");
 });
@@ -3656,6 +4961,93 @@ document.querySelector("#copyMarket").addEventListener("click", async () => {
     }, 1400);
   } catch {
     document.querySelector("#copyMarket").textContent = "复制失败";
+  }
+});
+
+document.addEventListener("submit", async (event) => {
+  const viewpointEditForm = event.target.closest("[data-h-viewpoint-edit-form]");
+  if (viewpointEditForm) {
+    event.preventDefault();
+    const formData = new FormData(viewpointEditForm);
+    const editedText = String(formData.get("editedText") || "").trim();
+    if (!editedText) {
+      state.hMessage = "Henry 观点不能为空。";
+      renderHColumn();
+      return;
+    }
+    const data = await hApiAction(`/api/h/viewpoints/${encodeURIComponent(viewpointEditForm.dataset.viewpointId)}`, {
+      method: "PUT",
+      body: JSON.stringify({ editedText }),
+    }, "观点已更新并重新确认。");
+    if (data) {
+      state.hEditingViewpointId = null;
+      renderHColumn();
+    }
+    return;
+  }
+
+  const checksForm = event.target.closest("[data-h-checks-form]");
+  if (checksForm) {
+    event.preventDefault();
+    const formData = new FormData(checksForm);
+    await hApiAction(`/api/h/topics/${encodeURIComponent(checksForm.dataset.topicId)}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        fourChecks: {
+          useful: formData.get("useful") === "1",
+          longTerm: formData.get("longTerm") === "1",
+        },
+      }),
+    }, "H 四问的人工确认已保存。");
+    return;
+  }
+
+  const viewpointForm = event.target.closest("[data-h-viewpoint-form]");
+  if (viewpointForm) {
+    event.preventDefault();
+    const formData = new FormData(viewpointForm);
+    const rawText = String(formData.get("rawText") || "").trim();
+    if (!rawText) {
+      state.hMessage = "请先写下这次选题的真实观点。";
+      renderHColumn();
+      return;
+    }
+    const data = await hApiAction(`/api/h/topics/${encodeURIComponent(viewpointForm.dataset.topicId)}/viewpoints`, {
+      method: "POST",
+      body: JSON.stringify({
+        rawText,
+        confirm: formData.get("confirm") === "1",
+      }),
+    }, "观点已保存。");
+    if (data) viewpointForm.reset();
+    return;
+  }
+
+  const sourceForm = event.target.closest("[data-h-source-form]");
+  if (sourceForm) {
+    event.preventDefault();
+    const formData = new FormData(sourceForm);
+    const extractedText = String(formData.get("extractedText") || "").trim();
+    const url = String(formData.get("url") || "").trim();
+    if (!url && !extractedText) {
+      state.hMessage = "来源链接和可核验材料至少填写一项。";
+      renderHColumn();
+      return;
+    }
+    const data = await hApiAction(`/api/h/topics/${encodeURIComponent(sourceForm.dataset.topicId)}/sources`, {
+      method: "POST",
+      body: JSON.stringify({
+        sourceName: String(formData.get("sourceName") || "").trim(),
+        url,
+        title: String(formData.get("title") || "").trim(),
+        sourceLevel: String(formData.get("sourceLevel") || "C"),
+        policyStatus: String(formData.get("policyStatus") || "media_report"),
+        extractedText,
+        contentStatus: extractedText.length >= 800 ? "full" : extractedText ? "summary_only" : "missing",
+        verified: formData.get("verified") === "1",
+      }),
+    }, "来源已加入事实包。");
+    if (data) sourceForm.reset();
   }
 });
 
@@ -3885,6 +5277,7 @@ document.querySelector("#loginForm").addEventListener("submit", async (event) =>
     state.user = { username: data.username };
     form.reset();
     note.textContent = "";
+    await loadHAccess();
     updateAuthUI();
     setView("home");
   } catch (err) {
@@ -3897,6 +5290,7 @@ document.querySelector("#logoutBtn").addEventListener("click", async () => {
     await fetch("/api/logout", { method: "POST" });
   } catch { /* ignore */ }
   state.user = null;
+  await loadHAccess();
   updateAuthUI();
   setView("home");
 });
@@ -3931,6 +5325,7 @@ async function boot() {
   renderContent();
   loadSourceStats();
   await checkAuth();
+  await loadHAccess();
   updateAuthUI();
   setView(initialView);
   loadLiveNews();
