@@ -22,6 +22,7 @@ http://127.0.0.1:4173
 
 - 深色侧栏信息流界面
 - 精选热点、全部动态、移民日报、政策雷达
+- H 专栏：从公共日报生成 0—3 个 Henry 候选，经事实包、授权观点、草稿版本和四层审校后再由本人或授权编辑采用
 - 市场素材：按“今日新增 / 延续关注 / 无新增项目 / 不建议重复发布”生成素材日报
 - 分类筛选和关键词搜索
 - 实时 RSS 抓取 API：`/api/news`
@@ -95,6 +96,44 @@ npm run peer:seed -- /path/to/all_companies_projects.json data/peer-monitor-proj
 - “有用 / 稍后看 / 已采用 / 没用”反馈写入 `yimin_market_feedback`
 - 历史素材从 `yimin_market_reports` 等快照表读取；同一天重复生成会更新当天记录，不会新增多条
 
+## H 专栏
+
+`#h-column` 是 Henry 的文章与视频内容工作台，使用「Henry 文章与视频写作」Skill。它不是另一份自动日报，也不会每天强制生成文章。
+
+核心流程：
+
+1. 公共日报生成后，系统自动筛出 0—3 个 H 候选；
+2. 任一 H 专栏成员选择“值得写”；
+3. 选择“值得写”后，系统自动复用日报来源并补全文；只有未抓取成功的来源才显示重试入口，编辑仍可补充来源、设置证据等级和政策状态、标记人工核验；
+4. H 四问、事实与观点状态用于提示缺口，不阻断按大纲生成渠道稿；未满足项会在四层审校中阻断最终采用；
+5. 生成并选择一个内容大纲后，即可一键并行生成公众号文章、H快评、H边跑边聊和 H深聊；
+6. 四个渠道从所选大纲、当前事实包和已确认观点独立组织，不把文章机械缩写成视频稿；
+7. 每次生成或编辑都会保留新版本、父版本、输入快照、Skill/人物档案版本和真实操作者；
+8. 四渠道生成支持 0/4—4/4 实时进度、部分成功和失败渠道单独重试；
+9. 四个渠道稿生成后分别审校；审校后事实包或观点发生变化时，旧审校自动失效；
+10. 每个渠道稿与四层审校是独立步骤，审校失败或不可用时默认阻断最终采用；
+11. 渠道稿有必改项时，可人工修改，也可按最新审校意见重新生成；旧稿始终保留；
+12. 候选刷新、生成与审校等长操作会显示加载状态并阻止重复点击；
+13. 内容包可以导出给 Claude、Gemini 等外部模型继续编辑，系统仍保存唯一事实包和最终采用版本；
+14. 草稿支持 Markdown、纯文本复制，并可由任一 H 专栏成员确认、退回或最终采用。
+
+默认权限已经收紧到企业微信 `fanrui / Henry范睿`、`liangshuang / Celine梁爽`、IOD 部门成员和系统管理员。生产环境建议显式配置：
+
+```env
+H_COLUMN_ENABLED=1
+H_COLUMN_AUTO_GENERATE=1
+H_COLUMN_DAILY_MAX_TOPICS=3
+H_COLUMN_MODEL=deepseek-v4-pro
+H_COLUMN_REVIEW_MODEL=deepseek-v4-pro
+H_COLUMN_USER_IDS=fanrui
+H_COLUMN_EDITOR_USER_IDS=liangshuang
+H_COLUMN_DEPARTMENT_NAMES=IOD
+```
+
+H 专栏采用单一权限模型：Henry、Celine、直属部门名称匹配 `H_COLUMN_DEPARTMENT_NAMES` 的成员（默认 IOD 部门）和系统管理员权限完全相同。能看到菜单就能使用全部 H 专栏功能；其他人看不到菜单，且 `/api/h/*` 返回 `403`。
+
+P0 只写系统日志，不发送企业微信通知，也不直接发布到公众号或视频号。详细产品约束见 `docs/henry-column-prd.md`，部署、验证和故障处理见 `docs/henry-column-operations.md`。
+
 ## 数据库
 
 默认数据库名：`yimin_ai_hot`。
@@ -113,6 +152,14 @@ npm run peer:seed -- /path/to/all_companies_projects.json data/peer-monitor-proj
 - `yimin_market_materials`：市场素材明细快照
 - `yimin_market_project_status`：重点项目当日更新状态
 - `yimin_market_feedback`：市场部对素材的采用反馈
+- `yimin_h_topics`：H 每日候选、四问、准备度和选择状态
+- `yimin_h_topic_sources`：事实包来源、完整度、证据等级、政策状态和核验日志
+- `yimin_h_viewpoints`：Henry 观点、人物档案观点、编辑记录及真实确认人
+- `yimin_h_drafts`：文章、口播和大纲的可追溯版本
+- `yimin_h_reviews`：L1—L4 独立审校结果
+- `yimin_h_feedback`：采用、暂缓、拒绝和修改日志
+- `yimin_h_generation_runs`：草稿和审校运行记录
+- `yimin_h_audit_logs`：H 专栏写操作的真实操作者与变更元数据
 - `yimin_sso_login_logs`：企业微信 SSO 访问登记日志
 - `yimin_wx_users`：稳定的企业微信 UserID 身份记录，预留部门同步字段
 - `yimin_user_source_subscriptions`：用户个人信源关注配置
@@ -153,7 +200,7 @@ FIRECRAWL_API_KEYS=fc-backup-1,fc-backup-2
 # 也支持 FIRECRAWL_API_KEY_2=fc-backup-3
 ```
 
-当接口明确返回 `Insufficient credits` 时，本次抓取会立即切换到下一个 key 重试；其他类型错误不会触发 key 轮换。
+当接口明确返回 `Insufficient credits` 或 `Unauthorized: Invalid token` 时，本次抓取会立即跳过当前 key，并切换到下一个 key 重试；其他类型错误不会触发 key 轮换。
 
 ## 后续接入建议
 

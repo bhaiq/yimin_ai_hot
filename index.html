@@ -40,6 +40,10 @@
             <span class="nav-icon">◷</span>
             <span data-i18n="nav.daily">移民日报</span>
           </button>
+          <button class="nav-item" data-view="h-column" data-h-column-nav type="button" hidden>
+            <span class="nav-icon">H</span>
+            <span>H 专栏</span>
+          </button>
           <button class="nav-item" data-view="radar" type="button">
             <span class="nav-icon">◎</span>
             <span data-i18n="nav.radar">政策雷达</span>
@@ -240,6 +244,26 @@
             </div>
           </div>
           <article class="daily-report" id="dailyReport"></article>
+        </section>
+
+        <section class="view wide-view h-column-view" id="view-h-column" aria-labelledby="hColumnTitle">
+          <div class="section-heading h-column-heading">
+            <div>
+              <p class="eyebrow">Henry 内容工作台</p>
+              <h1 id="hColumnTitle">H 专栏</h1>
+              <p class="h-column-subtitle">从公共日报筛出值得 Henry 发表观点的内容，交给「Henry 文章与视频写作」生成可追溯、可审校的文章与口播。</p>
+            </div>
+            <div class="heading-actions h-column-heading-actions">
+              <label class="h-date-field">
+                <span>候选日期</span>
+                <input id="hColumnDate" type="date">
+              </label>
+              <button class="ghost-button" id="hColumnRefresh" type="button">刷新候选</button>
+            </div>
+          </div>
+          <div class="h-column-shell" id="hColumnApp">
+            <div class="empty">正在准备 H 专栏...</div>
+          </div>
         </section>
 
         <section class="view utility-view wide-view" id="view-subscriptions" aria-labelledby="subscriptionsTitle">
