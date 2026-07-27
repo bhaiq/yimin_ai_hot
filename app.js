@@ -33,6 +33,7 @@ const i18n = {
     "nav.feedback": "反馈建议",
     "nav.changelog": "更新日志",
     "nav.subscriptions": "我的关注",
+    "nav.peerMonitor": "同行监控",
     "nav.tools": "工具",
     "nav.market": "市场素材",
     "nav.sources": "信源提报",
@@ -187,6 +188,7 @@ const i18n = {
     "nav.feedback": "Feedback",
     "nav.changelog": "Changelog",
     "nav.subscriptions": "My Sources",
+    "nav.peerMonitor": "Peer Monitor",
     "nav.tools": "Tools",
     "nav.market": "Market Brief",
     "nav.sources": "Submit Source",
@@ -681,6 +683,19 @@ const state = {
   feedbackLoading: false,
   feedbackError: "",
   feedbackStatus: "all",
+  peerMonitorAccess: false,
+  peerMonitorAccessLoaded: false,
+  peerCompetitors: [],
+  peerSelectedCode: "peer-a",
+  peerActiveTab: "projects",
+  peerProjects: [],
+  peerProjectCountries: [],
+  peerArticles: [],
+  peerProjectQuery: "",
+  peerProjectCountry: "",
+  peerMonitorLoading: false,
+  peerMonitorError: "",
+  peerRefreshRun: null,
   ssoUserName: sessionStorage.getItem("yiminSsoUserName") || "",
   ssoUserId: sessionStorage.getItem("yiminSsoUserId") || "",
   ssoLocalTest: false,
@@ -698,7 +713,7 @@ const state = {
 };
 
 const authViews = ["market", "sources", "review", "sso-stats", "department-subscriptions", "feedback-review", "about"];
-const views = ["home", "all", "daily", "h-column", "subscriptions", "market", "radar", "feedback", "login", "sources", "review", "sso-stats", "department-subscriptions", "feedback-review", "about", "changelog"];
+const views = ["home", "all", "daily", "h-column", "subscriptions", "peer-monitor", "market", "radar", "feedback", "login", "sources", "review", "sso-stats", "department-subscriptions", "feedback-review", "about", "changelog"];
 
 const filterStrip = document.querySelector("#filterStrip");
 const featuredFeed = document.querySelector("#featuredFeed");
@@ -722,11 +737,21 @@ const marketReport = document.querySelector("#marketReport");
 const ssoStatsReport = document.querySelector("#ssoStatsReport");
 const feedbackReviewList = document.querySelector("#feedbackReviewList");
 const feedbackReviewFilters = document.querySelector("#feedbackReviewFilters");
+const peerMonitorNav = document.querySelector("#peerMonitorNav");
+const peerCompetitorList = document.querySelector("#peerCompetitorList");
+const peerMonitorSummary = document.querySelector("#peerMonitorSummary");
+const peerMonitorContent = document.querySelector("#peerMonitorContent");
+const peerMonitorStatus = document.querySelector("#peerMonitorStatus");
+const peerProjectToolbar = document.querySelector("#peerProjectToolbar");
+const peerProjectCountry = document.querySelector("#peerProjectCountry");
+const peerProjectCount = document.querySelector("#peerProjectCount");
+const peerMonitorRefresh = document.querySelector("#peerMonitorRefresh");
 const monitorStatus = document.querySelector("#monitorStatus");
 const sourceHealth = document.querySelector("#sourceHealth");
 const refreshNews = document.querySelector("#refreshNews");
 const toolbar = document.querySelector(".toolbar");
 let fetchRunPollTimer = null;
+let peerRefreshPollTimer = null;
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -2350,6 +2375,52 @@ function renderFeedbackReview() {
   `).join("");
 }
 
+function getSelectedPeerCompetitor() {
+  return state.peerCompetitors.find(
+    (competitor) => competitor.code === state.peerSelectedCode,
+  ) || null;
+}
+
+function formatPeerDate(value, { dateOnly = false } = {}) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    ...(dateOnly ? {} : { hour: "2-digit", minute: "2-digit", hour12: false }),
+  }).format(date);
+}
+
+function formatPeerListItem(item) {
+  if (typeof item === "string") return item;
+  if (!item || typeof item !== "object") return String(item || "");
+  const stage = String(item.stage || item.step_label || item.title || "").trim();
+  const details = String(item.details || item.text || item.description || "").trim();
+  if (stage && details) return `${stage}：${details}`;
+  if (stage || details) return stage || details;
+  return Object.values(item)
+    .filter((value) => typeof value === "string" || typeof value === "number")
+    .map((value) => String(value).trim())
+    .filter(Boolean)
+    .join("；");
+}
+
+function renderPeerListSection(title, value) {
+  const items = (Array.isArray(value) ? value : [])
+    .map(formatPeerListItem)
+    .filter(Boolean);
+  if (!items.length) return "";
+  return `
+    <section class="peer-project-section">
+      <h4>${escapeHtml(title)}</h4>
+      <ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+    </section>
+  `;
+}
+
 const hReadinessLabels = {
   not_recommended: "暂不建议成稿",
   topic_only: "仅选题",
@@ -2581,6 +2652,416 @@ function renderHChannelSuite(topic, sourceOutline, canGenerateSuite) {
       </div>
     </section>
   `;
+}
+
+function renderPeerProjectProcess(project) {
+  if (project.processSourceType === "image_only") {
+    return `
+      <section class="peer-project-section peer-process-note">
+        <h4>申请流程</h4>
+        <p>该流程仅以图片公开，按匿名规则未展示。</p>
+      </section>
+    `;
+  }
+  if (project.processSourceType === "missing") {
+    return `
+      <section class="peer-project-section peer-process-note">
+        <h4>申请流程</h4>
+        <p>该官网未公开可展示的文字流程。</p>
+      </section>
+    `;
+  }
+
+  const structured = renderPeerListSection("申请流程", project.applicationProcess);
+  if (structured) return structured;
+  const text = project.processText || project.processSummary;
+  if (!text) return "";
+  return `
+    <section class="peer-project-section">
+      <h4>申请流程</h4>
+      <p>${escapeHtml(text)}</p>
+    </section>
+  `;
+}
+
+function getFilteredPeerProjects() {
+  const query = state.peerProjectQuery.trim().toLowerCase();
+  return state.peerProjects.filter((project) => {
+    if (state.peerProjectCountry && project.country !== state.peerProjectCountry) {
+      return false;
+    }
+    if (!query) return true;
+    const searchable = [
+      project.projectName,
+      project.country,
+      project.categoryRaw,
+      project.introduction,
+      project.investmentAmount,
+      project.identityType,
+      project.residenceRequirement,
+      project.websiteStatusNote,
+      ...(project.investmentRequirements || []).map(formatPeerListItem),
+      ...(project.financialRequirements || []).map(formatPeerListItem),
+      ...(project.advantages || []).map(formatPeerListItem),
+      ...(project.applicationConditions || []).map(formatPeerListItem),
+    ].join(" ").toLowerCase();
+    return searchable.includes(query);
+  });
+}
+
+function renderPeerProjectCard(project) {
+  const hasInvestment = Boolean(
+    project.investmentAmount
+    || project.investmentRequirements?.length
+    || project.financialRequirements?.length,
+  );
+  return `
+    <details class="peer-project-card">
+      <summary>
+        <span>
+          <strong>${escapeHtml(project.projectName || "未命名项目")}</strong>
+          <small>${escapeHtml(project.country || "其他")}${project.categoryRaw && project.categoryRaw !== project.country ? ` · ${escapeHtml(project.categoryRaw)}` : ""}</small>
+        </span>
+        <span class="peer-project-badges">
+          ${project.isInvestmentProject ? '<em>投资类</em>' : ""}
+          ${project.websiteStatusNote ? '<em class="warning">状态提示</em>' : ""}
+        </span>
+      </summary>
+      <div class="peer-project-detail">
+        ${project.websiteStatusNote ? `<p class="peer-status-warning">${escapeHtml(project.websiteStatusNote)}</p>` : ""}
+        ${project.introduction ? `
+          <section class="peer-project-section">
+            <h4>项目介绍</h4>
+            <p>${escapeHtml(project.introduction)}</p>
+          </section>
+        ` : ""}
+        ${project.identityType ? `
+          <section class="peer-project-section">
+            <h4>身份类型</h4>
+            <p>${escapeHtml(project.identityType)}</p>
+          </section>
+        ` : ""}
+        ${project.residenceRequirement ? `
+          <section class="peer-project-section">
+            <h4>居住要求</h4>
+            <p>${escapeHtml(project.residenceRequirement)}</p>
+          </section>
+        ` : ""}
+        ${hasInvestment && project.investmentAmount ? `
+          <section class="peer-project-section">
+            <h4>投资金额</h4>
+            <p>${escapeHtml(project.investmentAmount)}</p>
+          </section>
+        ` : ""}
+        ${renderPeerListSection("投资要求", project.investmentRequirements)}
+        ${renderPeerListSection("财务要求", project.financialRequirements)}
+        ${renderPeerListSection("项目优势", project.advantages)}
+        ${renderPeerListSection("申请条件", project.applicationConditions)}
+        ${project.processSummary ? `
+          <section class="peer-project-section">
+            <h4>流程摘要</h4>
+            <p>${escapeHtml(project.processSummary)}</p>
+          </section>
+        ` : ""}
+        ${renderPeerProjectProcess(project)}
+        <p class="peer-project-footnote">数据采集时间：${escapeHtml(formatPeerDate(project.scrapedAt))} · 仅作同行公开信息观察，不代表当前政策有效性。</p>
+      </div>
+    </details>
+  `;
+}
+
+function isPeerRefreshRunning() {
+  return state.peerRefreshRun?.status === "running";
+}
+
+function renderPeerMonitor() {
+  if (!peerMonitorContent) return;
+  const selected = getSelectedPeerCompetitor();
+  if (peerMonitorNav) {
+    peerMonitorNav.hidden = !state.peerMonitorAccess;
+  }
+
+  peerCompetitorList.innerHTML = state.peerCompetitors.length
+    ? state.peerCompetitors.map((competitor) => `
+        <button class="peer-competitor-item${competitor.code === state.peerSelectedCode ? " active" : ""}" type="button" data-peer-code="${escapeAttr(competitor.code)}">
+          <span>
+            <strong>${escapeHtml(competitor.displayName)}</strong>
+            <small>${escapeHtml(competitor.projectCount || 0)} 个官网项目</small>
+          </span>
+          <em class="${competitor.hasRss ? "connected" : ""}">${competitor.hasRss ? "已接公众号" : "未接公众号"}</em>
+        </button>
+      `).join("")
+    : '<p class="empty">暂无同行档案。</p>';
+  const total = document.querySelector("#peerMonitorTotal");
+  if (total) total.textContent = `${state.peerCompetitors.length || 0} 家`;
+
+  peerMonitorSummary.innerHTML = selected
+    ? `
+      <div>
+        <span>当前对象</span>
+        <strong>${escapeHtml(selected.displayName)}</strong>
+      </div>
+      <div>
+        <span>官网项目</span>
+        <strong>${escapeHtml(selected.projectCount || 0)}</strong>
+      </div>
+      <div>
+        <span>公众号文章</span>
+        <strong>${escapeHtml(selected.articleCount || 0)}</strong>
+      </div>
+      <div>
+        <span>公众号最近刷新</span>
+        <strong class="peer-summary-date">${escapeHtml(selected.hasRss ? formatPeerDate(selected.lastFetchedAt) : "尚未配置")}</strong>
+      </div>
+    `
+    : "";
+
+  document.querySelectorAll("[data-peer-monitor-tab]").forEach((button) => {
+    const active = button.dataset.peerMonitorTab === state.peerActiveTab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+
+  if (peerProjectToolbar) {
+    peerProjectToolbar.hidden = state.peerActiveTab !== "projects";
+  }
+  if (peerProjectCountry) {
+    peerProjectCountry.innerHTML = [
+      '<option value="">全部国家/地区</option>',
+      ...state.peerProjectCountries.map((country) => (
+        `<option value="${escapeAttr(country)}"${state.peerProjectCountry === country ? " selected" : ""}>${escapeHtml(country)}</option>`
+      )),
+    ].join("");
+  }
+
+  const filteredProjects = getFilteredPeerProjects();
+  if (peerProjectCount) {
+    peerProjectCount.textContent = `${filteredProjects.length} / ${state.peerProjects.length} 个项目`;
+  }
+
+  if (peerMonitorRefresh) {
+    peerMonitorRefresh.hidden = !state.user;
+    const refreshable = Boolean(selected?.hasRss);
+    peerMonitorRefresh.disabled = !refreshable || isPeerRefreshRunning();
+    peerMonitorRefresh.textContent = isPeerRefreshRunning()
+      ? "公众号刷新与正文补抓中…"
+      : refreshable
+        ? `刷新并补抓${selected.displayName}公众号`
+        : "尚未配置公众号";
+  }
+
+  if (state.peerRefreshRun) {
+    const run = state.peerRefreshRun;
+    if (run.status === "running") {
+      peerMonitorStatus.innerHTML = `
+        <div class="peer-refresh-banner active">
+          正在刷新公众号并补抓缺失正文：${escapeHtml(run.processedSourceCount || 0)} / ${escapeHtml(run.sourceCount || 0)} 个来源
+        </div>
+      `;
+    } else if (run.status === "completed") {
+      peerMonitorStatus.innerHTML = `
+        <div class="peer-refresh-banner success">
+          刷新完成：读取 ${escapeHtml(run.itemCount || 0)} 篇，新增 ${escapeHtml(run.newItemCount || 0)} 篇。
+        </div>
+      `;
+    } else {
+      peerMonitorStatus.innerHTML = `
+        <div class="peer-refresh-banner error">${escapeHtml(run.error || "公众号刷新失败")}</div>
+      `;
+    }
+  } else if (selected?.lastFetchError) {
+    peerMonitorStatus.innerHTML = `<div class="peer-refresh-banner error">${escapeHtml(selected.lastFetchError)}</div>`;
+  } else {
+    peerMonitorStatus.innerHTML = "";
+  }
+
+  if (state.peerMonitorLoading) {
+    peerMonitorContent.innerHTML = '<p class="empty">正在加载同行监控数据…</p>';
+    return;
+  }
+  if (state.peerMonitorError) {
+    peerMonitorContent.innerHTML = `<p class="empty">${escapeHtml(state.peerMonitorError)}</p>`;
+    return;
+  }
+
+  if (state.peerActiveTab === "articles") {
+    if (!selected?.hasRss) {
+      peerMonitorContent.innerHTML = '<p class="empty">该同行尚未配置公众号 RSS。</p>';
+      return;
+    }
+    peerMonitorContent.innerHTML = state.peerArticles.length
+      ? `<div class="peer-article-list">${state.peerArticles.map((article) => {
+        const hasFullContent = Boolean(article.hasFullContent && String(article.content || "").trim());
+        const actionLabel = hasFullContent ? "阅读全文" : "查看摘要";
+        return `
+          <button
+            class="peer-article-card${hasFullContent ? "" : " awaiting-content"}"
+            type="button"
+            data-peer-article-id="${escapeAttr(article.id)}"
+            aria-label="${actionLabel}：${escapeAttr(article.title || "未命名文章")}"
+          >
+            <span class="peer-article-meta">
+              <span>${escapeHtml(selected.displayName)}公众号</span>
+              <time>${escapeHtml(formatPeerDate(article.publishedAt))}</time>
+            </span>
+            <strong class="peer-article-title">${escapeHtml(article.title || "未命名文章")}</strong>
+            <span class="peer-article-summary">${escapeHtml(article.summary || "该文章未提供摘要。")}</span>
+            <span class="peer-article-read-more">${hasFullContent ? "站内阅读全文 →" : "查看摘要 · 等待自动补全文 →"}</span>
+          </button>
+        `;
+      }).join("")}</div>`
+      : '<p class="empty">尚未刷新公众号文章。</p>';
+    return;
+  }
+
+  peerMonitorContent.innerHTML = filteredProjects.length
+    ? `<div class="peer-project-list">${filteredProjects.map(renderPeerProjectCard).join("")}</div>`
+    : '<p class="empty">没有符合当前筛选条件的官网项目。</p>';
+}
+
+async function loadPeerMonitorAccess() {
+  if (window.location.protocol === "file:") return;
+  try {
+    const response = await fetch("/api/peer-monitor/access", {
+      headers: { accept: "application/json" },
+    });
+    const data = await response.json();
+    state.peerMonitorAccess = Boolean(response.ok && data.ok && data.allowed);
+  } catch {
+    state.peerMonitorAccess = false;
+  } finally {
+    state.peerMonitorAccessLoaded = true;
+    if (peerMonitorNav) peerMonitorNav.hidden = !state.peerMonitorAccess;
+  }
+}
+
+async function loadPeerCompetitorData() {
+  if (!state.peerMonitorAccess || window.location.protocol === "file:") return;
+  state.peerMonitorLoading = true;
+  state.peerMonitorError = "";
+  state.peerProjects = [];
+  state.peerProjectCountries = [];
+  state.peerArticles = [];
+  renderPeerMonitor();
+  try {
+    const code = encodeURIComponent(state.peerSelectedCode);
+    const [projectsResponse, articlesResponse] = await Promise.all([
+      fetch(`/api/peer-monitor/projects?competitor=${code}`, {
+        headers: { accept: "application/json" },
+      }),
+      fetch(`/api/peer-monitor/articles?competitor=${code}`, {
+        headers: { accept: "application/json" },
+      }),
+    ]);
+    const [projectsData, articlesData] = await Promise.all([
+      projectsResponse.json(),
+      articlesResponse.json(),
+    ]);
+    if (!projectsResponse.ok || !projectsData.ok) {
+      throw new Error(projectsData.error || `HTTP ${projectsResponse.status}`);
+    }
+    if (!articlesResponse.ok || !articlesData.ok) {
+      throw new Error(articlesData.error || `HTTP ${articlesResponse.status}`);
+    }
+    state.peerProjects = projectsData.projects || [];
+    state.peerProjectCountries = projectsData.countries || [];
+    state.peerArticles = articlesData.articles || [];
+  } catch (error) {
+    state.peerMonitorError = `同行数据加载失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    state.peerMonitorLoading = false;
+    renderPeerMonitor();
+  }
+}
+
+async function loadPeerMonitor() {
+  if (!state.peerMonitorAccess || window.location.protocol === "file:") return;
+  state.peerMonitorLoading = true;
+  state.peerMonitorError = "";
+  renderPeerMonitor();
+  try {
+    const response = await fetch("/api/peer-monitor/overview", {
+      headers: { accept: "application/json" },
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.peerCompetitors = data.competitors || [];
+    if (!state.peerCompetitors.some((item) => item.code === state.peerSelectedCode)) {
+      state.peerSelectedCode = state.peerCompetitors[0]?.code || "peer-a";
+    }
+    state.peerMonitorLoading = false;
+    await loadPeerCompetitorData();
+  } catch (error) {
+    state.peerMonitorLoading = false;
+    state.peerMonitorError = `同行监控加载失败：${error instanceof Error ? error.message : String(error)}`;
+    renderPeerMonitor();
+  }
+}
+
+function stopPeerRefreshPolling() {
+  if (peerRefreshPollTimer) {
+    clearTimeout(peerRefreshPollTimer);
+    peerRefreshPollTimer = null;
+  }
+}
+
+async function pollPeerRefresh(runKey) {
+  stopPeerRefreshPolling();
+  try {
+    const response = await fetch(`/api/peer-monitor/refresh-runs/${encodeURIComponent(runKey)}`, {
+      headers: { accept: "application/json" },
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.peerRefreshRun = data.run;
+    renderPeerMonitor();
+    if (data.run?.status === "running") {
+      peerRefreshPollTimer = setTimeout(() => pollPeerRefresh(runKey), 1500);
+      return;
+    }
+    await loadPeerMonitor();
+  } catch (error) {
+    state.peerRefreshRun = {
+      status: "failed",
+      error: `刷新状态读取失败：${error instanceof Error ? error.message : String(error)}`,
+    };
+    renderPeerMonitor();
+  }
+}
+
+async function refreshSelectedPeer() {
+  const selected = getSelectedPeerCompetitor();
+  if (!state.user || !selected?.hasRss || isPeerRefreshRunning()) return;
+  peerMonitorRefresh.disabled = true;
+  state.peerMonitorError = "";
+  try {
+    const response = await fetch(
+      `/api/peer-monitor/refresh?competitor=${encodeURIComponent(selected.code)}`,
+      {
+        method: "POST",
+        headers: { accept: "application/json" },
+      },
+    );
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.peerRefreshRun = data.run;
+    renderPeerMonitor();
+    if (data.run?.runKey) {
+      pollPeerRefresh(data.run.runKey);
+    }
+  } catch (error) {
+    state.peerRefreshRun = {
+      status: "failed",
+      error: `公众号刷新失败：${error instanceof Error ? error.message : String(error)}`,
+    };
+    renderPeerMonitor();
+  }
 }
 
 function renderHDraftEditor(topic) {
@@ -3184,6 +3665,7 @@ function renderContent() {
   renderRadar();
   renderSsoStats();
   renderFeedbackReview();
+  renderPeerMonitor();
   renderCounts(items);
   renderStatus(items);
 }
@@ -3924,6 +4406,9 @@ function setView(routeValue) {
   if (authViews.includes(viewName) && !state.user) {
     viewName = "login";
   }
+  if (viewName === "peer-monitor" && !state.peerMonitorAccess) {
+    viewName = "home";
+  }
   if (viewName === "h-column" && !state.hAccess) {
     viewName = "home";
   }
@@ -3964,6 +4449,14 @@ function setView(routeValue) {
   }
   if (viewName === "subscriptions" && !state.subscriptionLoaded && !state.subscriptionLoading) {
     loadSubscriptions();
+  }
+  if (
+    viewName === "peer-monitor"
+    && state.peerMonitorAccess
+    && !state.peerCompetitors.length
+    && !state.peerMonitorLoading
+  ) {
+    loadPeerMonitor();
   }
   if (viewName === "department-subscriptions" && !state.departmentSubscriptionLoading) {
     loadDepartmentSubscriptions();
@@ -4614,6 +5107,45 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const peerCompetitorButton = event.target.closest("[data-peer-code]");
+  if (peerCompetitorButton) {
+    const code = peerCompetitorButton.dataset.peerCode;
+    if (state.peerCompetitors.some((competitor) => competitor.code === code)) {
+      state.peerSelectedCode = code;
+      state.peerProjectQuery = "";
+      state.peerProjectCountry = "";
+      const search = document.querySelector("#peerProjectSearch");
+      if (search) search.value = "";
+      loadPeerCompetitorData();
+    }
+    return;
+  }
+
+  const peerTabButton = event.target.closest("[data-peer-monitor-tab]");
+  if (peerTabButton) {
+    state.peerActiveTab = peerTabButton.dataset.peerMonitorTab === "articles"
+      ? "articles"
+      : "projects";
+    renderPeerMonitor();
+    return;
+  }
+
+  if (event.target.closest("#peerMonitorRefresh")) {
+    refreshSelectedPeer();
+    return;
+  }
+
+  const peerArticleButton = event.target.closest("[data-peer-article-id]");
+  if (peerArticleButton) {
+    const articleId = Number(peerArticleButton.dataset.peerArticleId);
+    const article = state.peerArticles.find((item) => Number(item.id) === articleId);
+    const selected = getSelectedPeerCompetitor();
+    if (article && selected) {
+      showPeerArticleModal(article, selected, peerArticleButton);
+    }
+    return;
+  }
+
   const categoryButton = event.target.closest("[data-category]");
   if (categoryButton) {
     setCategory(categoryButton.dataset.category);
@@ -4673,7 +5205,7 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
-  if (event.target.closest("#modalOverlay") || event.target.closest(".modal-close")) {
+  if (event.target.matches("#modalOverlay") || event.target.closest(".modal-close")) {
     closeArticleModal();
     return;
   }
@@ -4747,6 +5279,16 @@ document.addEventListener("click", async (event) => {
 searchInput.addEventListener("input", (event) => {
   state.query = event.target.value;
   renderContent();
+});
+
+document.querySelector("#peerProjectSearch")?.addEventListener("input", (event) => {
+  state.peerProjectQuery = event.target.value;
+  renderPeerMonitor();
+});
+
+peerProjectCountry?.addEventListener("change", (event) => {
+  state.peerProjectCountry = event.target.value;
+  renderPeerMonitor();
 });
 
 document.querySelector("#subscriptionSearch")?.addEventListener("input", (event) => {
@@ -5255,6 +5797,9 @@ function updateAuthUI() {
     userArea.classList.add("hidden");
     refreshNews.hidden = true;
   }
+  if (peerMonitorRefresh) {
+    peerMonitorRefresh.hidden = !state.user;
+  }
 }
 
 document.querySelector("#loginForm").addEventListener("submit", async (event) => {
@@ -5320,6 +5865,7 @@ if (todayDate) {
 async function boot() {
   await recordSsoVisitFromHash();
   await loadSsoIdentity();
+  await loadPeerMonitorAccess();
   const initialView = window.location.hash.replace("#", "") || "home";
   restoreFilterCategory();
   renderContent();
@@ -5333,6 +5879,8 @@ async function boot() {
 
 boot();
 
+let lastArticleModalTrigger = null;
+
 function showArticleModal(cardEl, url) {
   let overlay = document.getElementById("modalOverlay");
   if (!overlay) {
@@ -5341,6 +5889,7 @@ function showArticleModal(cardEl, url) {
     overlay.className = "modal-overlay";
     document.body.appendChild(overlay);
   }
+  lastArticleModalTrigger = cardEl;
   const title = cardEl.querySelector("h3")?.textContent || "";
   const summary = cardEl.querySelector(".news-body p")?.textContent || "";
   const source = cardEl.querySelector(".meta-row span:nth-child(2)")?.textContent || "";
@@ -5378,10 +5927,57 @@ function showArticleModal(cardEl, url) {
   document.body.style.overflow = "hidden";
 }
 
+function showPeerArticleModal(article, competitor, trigger) {
+  let overlay = document.getElementById("modalOverlay");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "modalOverlay";
+    overlay.className = "modal-overlay";
+    document.body.appendChild(overlay);
+  }
+  const title = article.title || "未命名文章";
+  const hasFullContent = Boolean(article.hasFullContent && String(article.content || "").trim());
+  const content = hasFullContent
+    ? article.content
+    : article.summary || "该订阅源暂未提供摘要或正文。";
+  lastArticleModalTrigger = trigger || document.activeElement;
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", `阅读全文：${title}`);
+  overlay.innerHTML = `
+    <div class="modal-content peer-article-modal">
+      <button class="modal-close" type="button" aria-label="关闭全文">&times;</button>
+      <div class="modal-header">
+        <span class="peer-article-modal-source">${escapeHtml(competitor.displayName)}公众号动态</span>
+        <h2>${escapeHtml(title)}</h2>
+        <div class="modal-meta">
+          <span>${escapeHtml(formatPeerDate(article.publishedAt))}</span>
+        </div>
+      </div>
+      <div class="modal-body peer-article-modal-body">
+        <p>${escapeHtml(content)}</p>
+      </div>
+      <p class="peer-article-modal-note">
+        ${hasFullContent
+          ? "内容已匿名化处理，不提供原文链接、公众号名称或图片。"
+          : "当前订阅源暂未提供全文，现展示摘要；系统会在后续刷新时自动补抓正文。"}
+      </p>
+    </div>
+  `;
+  overlay.classList.add("active");
+  document.body.style.overflow = "hidden";
+  overlay.querySelector(".modal-close")?.focus();
+}
+
 function closeArticleModal() {
   const overlay = document.getElementById("modalOverlay");
   if (overlay) {
     overlay.classList.remove("active");
+    overlay.removeAttribute("role");
+    overlay.removeAttribute("aria-modal");
+    overlay.removeAttribute("aria-label");
   }
   document.body.style.overflow = "";
+  lastArticleModalTrigger?.focus?.();
+  lastArticleModalTrigger = null;
 }

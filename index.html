@@ -62,6 +62,16 @@
           </button>
         </nav>
 
+        <div class="sidebar-section" id="peerMonitorNav" hidden>
+          <p class="section-label">内部情报</p>
+          <nav class="nav-group compact" data-nav>
+            <button class="nav-item" data-view="peer-monitor" type="button">
+              <span class="nav-icon">◉</span>
+              <span data-i18n="nav.peerMonitor">同行监控</span>
+            </button>
+          </nav>
+        </div>
+
         <div class="sidebar-section" data-auth>
           <p class="section-label" data-i18n="nav.tools">工具</p>
           <nav class="nav-group compact" data-nav>
@@ -291,6 +301,50 @@
             <div class="subscription-footer">
               <p class="form-note" id="subscriptionNote">保存后，从下一次打开日报起生效。</p>
               <button class="primary-button" id="saveSubscriptions" type="button" data-i18n="subscriptions.save">保存关注</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="view wide-view" id="view-peer-monitor" aria-labelledby="peerMonitorTitle">
+          <div class="section-heading peer-monitor-heading">
+            <div>
+              <p class="eyebrow">同行监控</p>
+              <h1 id="peerMonitorTitle">匿名同行项目与公众号动态</h1>
+              <p class="peer-monitor-intro">仅向 IOD 与指定负责人开放。页面不会展示真实同行名称、官网、公众号名称、原文链接或图片。</p>
+            </div>
+            <button class="primary-button" id="peerMonitorRefresh" type="button" hidden>立即刷新公众号</button>
+          </div>
+
+          <div class="peer-monitor-layout">
+            <aside class="peer-competitor-panel" aria-label="选择同行">
+              <div class="peer-panel-title">
+                <strong>监控对象</strong>
+                <span id="peerMonitorTotal">9 家</span>
+              </div>
+              <div class="peer-competitor-list" id="peerCompetitorList"></div>
+            </aside>
+
+            <div class="peer-monitor-workspace">
+              <div class="peer-monitor-summary" id="peerMonitorSummary"></div>
+
+              <div class="peer-monitor-tabs" role="tablist" aria-label="同行监控内容">
+                <button class="active" type="button" data-peer-monitor-tab="projects" role="tab">官网项目</button>
+                <button type="button" data-peer-monitor-tab="articles" role="tab">公众号动态</button>
+              </div>
+
+              <div class="peer-project-toolbar" id="peerProjectToolbar">
+                <label class="peer-search">
+                  <span aria-hidden="true">⌕</span>
+                  <input id="peerProjectSearch" type="search" placeholder="搜索项目、国家或条件" autocomplete="off">
+                </label>
+                <select id="peerProjectCountry" aria-label="按国家筛选">
+                  <option value="">全部国家/地区</option>
+                </select>
+                <span id="peerProjectCount">0 个项目</span>
+              </div>
+
+              <div class="peer-monitor-status" id="peerMonitorStatus"></div>
+              <div class="peer-monitor-content" id="peerMonitorContent"></div>
             </div>
           </div>
         </section>

@@ -47,6 +47,42 @@ http://127.0.0.1:4173
 - 部门专属信源：部门重点直接读取本部门订阅信源的当日文章，不依赖公共日报明细；个人关注不能越权订阅其他部门的专属信源
 - 日报完整分类：主题去重后不再按 12/8/8/8 条截断，全部候选都会进入日报分析与明细
 - 日报长期流水线：候选分页全量读取，新增文章分批分析，按事件聚合后生成正文；低相关和重复文章仍保留在完整资讯附录
+- 同行监控：按同行A–同行I匿名展示 420 个官网项目，并抓取已配置同行的公众号 RSS；仅 IOD 与指定负责人可访问
+
+## 同行监控
+
+`#peer-monitor` 是内部同行情报页面，与公共新闻、移民日报和市场素材的数据表完全隔离。
+
+- 当前监控同行A–同行I，共 9 家、420 个官网项目；官网数据只从 `data/peer-monitor-projects.json` 导入，不会自动重新抓取网站
+- 页面和数据接口只返回匿名代号、项目结构化信息和经过清洗的公众号内容；公众号卡片可在站内打开匿名化全文，但不返回真实同行名称、域名、公众号名称、原文链接或图片
+- 当前同行B、C、F、G、H、I已配置公众号 RSS；“刷新并补抓”只对已登录管理员显示，刷新在后台执行并可查询进度
+- RSS 暂未提供正文时，页面明确标记“等待自动补全文”并只展示摘要；后续刷新会重新检查并补入新出现的正文，已入库的正文不会被空内容覆盖
+- 页面访问仅允许企业微信直属部门为 IOD 的用户，以及指定 UserID `fanrui`
+- 可通过 `PEER_MONITOR_USER_IDS` 和 `PEER_MONITOR_DEPARTMENT_NAMES` 追加逗号分隔的允许名单
+
+服务器本地定时任务可以直接请求刷新接口，无需 Token 或登录态：
+
+```bash
+curl -X POST http://127.0.0.1:4173/api/peer-monitor/refresh
+```
+
+该定时请求同时负责公众号新文章刷新和旧文章正文补抓，建议按小时执行。
+
+只刷新某个同行也可以显式指定，例如：
+
+```bash
+curl -X POST 'http://127.0.0.1:4173/api/peer-monitor/refresh?competitor=peer-h'
+```
+
+无登录刷新只接受回环地址且 `Host` 为 `localhost`、`127.0.0.1` 或 `::1` 的请求；通过公开域名或反向代理访问时必须具有管理员登录态。
+
+后续替换或补充官网项目数据时，先生成匿名种子文件：
+
+```bash
+npm run peer:seed -- /path/to/all_companies_projects.json data/peer-monitor-projects.json
+```
+
+服务启动时会按文件内容哈希幂等导入；同一份数据不会重复新增项目。
 
 ## 市场素材
 
@@ -133,6 +169,12 @@ P0 只写系统日志，不发送企业微信通知，也不直接发布到公�
 - `yimin_push_logs`：推送发送记录（含用户、token、发送状态）
 - `yimin_push_open_events`：推送中转页 SDK 调试事件（需 `WX_WORK_OPEN_DEBUG=1`）
 - `yimin_wx_token_cache`：企业微信 access_token 缓存
+- `yimin_peer_competitors`：同行私有配置和匿名代号
+- `yimin_peer_sources`：同行公众号 RSS 私有订阅配置
+- `yimin_peer_projects`：匿名化后的官网项目
+- `yimin_peer_articles`：同行公众号文章，与公共新闻文章隔离
+- `yimin_peer_refresh_runs`：公众号刷新任务和进度
+- `yimin_peer_imports`：官网项目种子文件导入记录
 
 ## 数据来源
 

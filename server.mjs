@@ -92,6 +92,90 @@ const localTestSsoConfig = {
     .map((value) => Number(value.trim()))
     .filter((value) => Number.isSafeInteger(value) && value > 0),
 };
+const peerCompetitorSeeds = [
+  {
+    code: "peer-a",
+    displayName: "同行A",
+    privateName: "桉侨移民",
+    privateDomain: "aqyimin.com",
+    brandTerms: ["桉侨移民", "桉侨", "ANQIAO"],
+  },
+  {
+    code: "peer-b",
+    displayName: "同行B",
+    privateName: "景鸿集团（景鸿移民）",
+    privateDomain: "ekimmigration.com",
+    brandTerms: ["景鸿集团", "景鸿移民", "景鸿"],
+    rssUrl: "https://ai.globevisa.space/feed/MP_WXS_3087573428.rss",
+  },
+  {
+    code: "peer-c",
+    displayName: "同行C",
+    privateName: "侨外出国（侨外移民）",
+    privateDomain: "iqiaowai.com",
+    brandTerms: ["侨外出国", "侨外移民", "侨外"],
+    rssUrl: "https://ai.globevisa.space/feed/MP_WXS_3639875067.rss",
+  },
+  {
+    code: "peer-d",
+    displayName: "同行D",
+    privateName: "亨瑞集团（亨瑞移民）",
+    privateDomain: "visa800.com",
+    brandTerms: ["亨瑞集团", "亨瑞移民", "亨瑞"],
+  },
+  {
+    code: "peer-e",
+    displayName: "同行E",
+    privateName: "世贸通集团（世贸通移民）",
+    privateDomain: "worldwayhk.com",
+    brandTerms: ["世贸通集团", "世贸通移民", "世贸通"],
+  },
+  {
+    code: "peer-f",
+    displayName: "同行F",
+    privateName: "澳星集团（澳星出国）",
+    privateDomain: "austargroup.com",
+    brandTerms: ["澳星集团", "澳星出国", "澳星"],
+    rssUrl: "https://ai.globevisa.space/feed/MP_WXS_3687013568.rss",
+  },
+  {
+    code: "peer-g",
+    displayName: "同行G",
+    privateName: "和中移民（WellTrend）",
+    privateDomain: "welltrendvisa.com",
+    brandTerms: ["和中移民", "和中", "WellTrend"],
+    rssUrl: "https://ai.globevisa.space/feed/MP_WXS_3903727517.rss",
+  },
+  {
+    code: "peer-h",
+    displayName: "同行H",
+    privateName: "外联出国（外联移民）",
+    privateDomain: "wailianvisa.com",
+    brandTerms: ["外联出国", "外联移民", "外联"],
+    rssUrl: "https://ai.globevisa.space/feed/MP_WXS_2396409440.rss",
+  },
+  {
+    code: "peer-i",
+    displayName: "同行I",
+    privateName: "兆龙移民（兆龙出国）",
+    privateDomain: "zlglobal.net",
+    brandTerms: ["兆龙移民", "兆龙出国", "兆龙"],
+    rssUrl: "https://ai.globevisa.space/feed/MP_WXS_3081660335.rss",
+  },
+];
+const peerMonitorConfig = {
+  allowedUserIds: new Set(
+    ["fanrui", ...String(process.env.PEER_MONITOR_USER_IDS || "").split(",")]
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean),
+  ),
+  allowedDepartmentNames: new Set(
+    ["iod", ...String(process.env.PEER_MONITOR_DEPARTMENT_NAMES || "").split(",")]
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean),
+  ),
+  seedPath: join(rootDir, "data", "peer-monitor-projects.json"),
+};
 const firecrawlConfig = {
   apiKeys: getFirecrawlApiKeys(),
   baseUrl: "https://api.firecrawl.dev/v1",
@@ -117,6 +201,7 @@ let dbReadyPromise = null;
 let activeFetchRun = null;
 let activeArticleTranslationPromise = null;
 let activeArticleRelevancePromise = null;
+let activePeerRefresh = null;
 const dailyReportGenerationPromises = new Map();
 const dailyLocalizationGenerationPromises = new Map();
 const departmentDailyGenerationPromises = new Map();
@@ -790,6 +875,112 @@ async function initDb() {
           INDEX idx_department_daily_department (department_id, report_date)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='部门每日重点报告表';
 
+        CREATE TABLE IF NOT EXISTS yimin_peer_competitors (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          code VARCHAR(32) NOT NULL COMMENT '内部稳定代号',
+          display_name VARCHAR(80) NOT NULL COMMENT '前端匿名名称',
+          private_name VARCHAR(200) NOT NULL COMMENT '服务端私有真实名称',
+          private_domain VARCHAR(255) NOT NULL DEFAULT '' COMMENT '服务端私有官网域名',
+          sort_order INT NOT NULL DEFAULT 0 COMMENT '匿名同行排序',
+          enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_peer_competitor_code (code),
+          INDEX idx_peer_competitor_enabled (enabled, sort_order)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行监控匿名档案';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_sources (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          competitor_id BIGINT NOT NULL COMMENT '同行 ID',
+          source_type VARCHAR(32) NOT NULL COMMENT '来源类型（wechat_rss/website_snapshot）',
+          private_url VARCHAR(1400) NOT NULL COMMENT '仅服务端使用的来源地址',
+          enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用',
+          last_fetched_at DATETIME NULL COMMENT '最近成功刷新时间',
+          last_fetch_error TEXT NULL COMMENT '最近刷新错误',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_peer_source_type (competitor_id, source_type),
+          INDEX idx_peer_source_enabled (enabled, source_type),
+          CONSTRAINT fk_peer_source_competitor FOREIGN KEY (competitor_id) REFERENCES yimin_peer_competitors(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行私有数据源';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_projects (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          competitor_id BIGINT NOT NULL COMMENT '同行 ID',
+          source_key CHAR(64) NOT NULL COMMENT '同行、原网址与项目名组合哈希',
+          project_name VARCHAR(600) NOT NULL COMMENT '匿名化项目名称',
+          category_raw VARCHAR(160) NOT NULL DEFAULT '' COMMENT '官网原分类的匿名化文本',
+          country_normalized VARCHAR(120) NOT NULL DEFAULT '其他' COMMENT '统一国家筛选值',
+          introduction LONGTEXT NULL COMMENT '匿名化项目介绍',
+          is_investment_project TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否投资类项目',
+          investment_amount TEXT NULL COMMENT '匿名化投资金额',
+          investment_requirements_json JSON NULL COMMENT '投资要求',
+          financial_requirements_json JSON NULL COMMENT '财务要求',
+          advantages_json JSON NULL COMMENT '项目优势',
+          application_conditions_json JSON NULL COMMENT '申请条件',
+          process_summary TEXT NULL COMMENT '流程摘要',
+          process_source_type VARCHAR(32) NOT NULL DEFAULT 'missing' COMMENT '流程来源类型',
+          process_text LONGTEXT NULL COMMENT '匿名化流程正文',
+          application_process_json JSON NULL COMMENT '结构化申请流程',
+          identity_type VARCHAR(160) NULL COMMENT '身份类型',
+          residence_requirement TEXT NULL COMMENT '居住要求',
+          website_status_note TEXT NULL COMMENT '官网状态提示',
+          scraped_at DATETIME NULL COMMENT '来源采集时间',
+          seed_hash CHAR(64) NOT NULL COMMENT '当前种子数据哈希',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_peer_project_source (competitor_id, source_key),
+          INDEX idx_peer_project_country (competitor_id, country_normalized),
+          INDEX idx_peer_project_name (competitor_id, project_name(191)),
+          CONSTRAINT fk_peer_project_competitor FOREIGN KEY (competitor_id) REFERENCES yimin_peer_competitors(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行官网项目匿名快照';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_articles (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          source_id BIGINT NOT NULL COMMENT '同行 RSS 来源 ID',
+          external_id VARCHAR(255) NOT NULL DEFAULT '' COMMENT 'RSS 稳定文章 ID',
+          dedupe_hash CHAR(64) NOT NULL COMMENT '来源与文章标识去重哈希',
+          title VARCHAR(800) NOT NULL COMMENT '匿名化文章标题',
+          summary TEXT NULL COMMENT '匿名化文章摘要',
+          content_text LONGTEXT NULL COMMENT '匿名化纯文本正文',
+          private_url VARCHAR(1400) NULL COMMENT '仅服务端保留的文章地址',
+          private_image_url VARCHAR(1400) NULL COMMENT '仅服务端保留的封面地址',
+          published_at DATETIME NULL COMMENT '文章发布时间',
+          first_fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '首次入库时间',
+          last_fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最近抓取时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_peer_article_hash (source_id, dedupe_hash),
+          INDEX idx_peer_article_published (source_id, published_at),
+          CONSTRAINT fk_peer_article_source FOREIGN KEY (source_id) REFERENCES yimin_peer_sources(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行公众号文章匿名快照';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_refresh_runs (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          run_key CHAR(32) NOT NULL COMMENT '前端查询任务标识',
+          competitor_code VARCHAR(32) NULL COMMENT '指定同行，空表示全部',
+          status ENUM('running','completed','failed') NOT NULL DEFAULT 'running' COMMENT '刷新状态',
+          source_count INT NOT NULL DEFAULT 0 COMMENT '来源数量',
+          processed_source_count INT NOT NULL DEFAULT 0 COMMENT '已处理来源数量',
+          item_count INT NOT NULL DEFAULT 0 COMMENT '读取文章数',
+          new_item_count INT NOT NULL DEFAULT 0 COMMENT '新增文章数',
+          updated_item_count INT NOT NULL DEFAULT 0 COMMENT '更新文章数',
+          error TEXT NULL COMMENT '错误信息',
+          started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '开始时间',
+          finished_at DATETIME NULL COMMENT '结束时间',
+          UNIQUE KEY uk_peer_refresh_run_key (run_key),
+          INDEX idx_peer_refresh_started (started_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行公众号刷新任务';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_imports (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          source_name VARCHAR(120) NOT NULL COMMENT '种子来源名称',
+          content_hash CHAR(64) NOT NULL COMMENT '种子文件哈希',
+          project_count INT NOT NULL DEFAULT 0 COMMENT '导入项目数量',
+          imported_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '导入时间',
+          UNIQUE KEY uk_peer_import_source (source_name)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行官网种子导入记录';
+
         CREATE TABLE IF NOT EXISTS yimin_h_topics (
           id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'H 专栏候选主键',
           topic_date DATE NOT NULL COMMENT '候选归属日期',
@@ -1348,6 +1539,7 @@ async function initDb() {
 
       await ensureReportDateUniqueness();
       await seedConfiguredSources();
+      await seedPeerMonitorData();
     })();
   }
 
@@ -1405,6 +1597,667 @@ async function seedConfiguredSources() {
   for (const source of sources) {
     await upsertSource(source, { enabled: true });
   }
+}
+
+async function seedPeerMonitorData() {
+  if (!existsSync(peerMonitorConfig.seedPath)) {
+    console.warn(`Peer monitor seed not found: ${peerMonitorConfig.seedPath}`);
+    return;
+  }
+
+  const raw = await readFile(peerMonitorConfig.seedPath, "utf8");
+  const contentHash = createHash("sha256").update(raw).digest("hex");
+  const existingImport = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'contentHash', content_hash,
+      'projectCount', project_count
+    )
+    FROM yimin_peer_imports
+    WHERE source_name = 'peer-monitor-projects'
+    LIMIT 1;
+  `);
+
+  await mysqlExec(`
+    INSERT INTO yimin_peer_competitors (
+      code,
+      display_name,
+      private_name,
+      private_domain,
+      sort_order,
+      enabled
+    )
+    VALUES
+      ${peerCompetitorSeeds.map((competitor, index) => `(
+        ${sqlString(competitor.code)},
+        ${sqlString(competitor.displayName)},
+        ${sqlString(competitor.privateName)},
+        ${sqlString(competitor.privateDomain)},
+        ${sqlNumber(index + 1)},
+        1
+      )`).join(",\n")}
+    ON DUPLICATE KEY UPDATE
+      display_name = VALUES(display_name),
+      private_name = VALUES(private_name),
+      private_domain = VALUES(private_domain),
+      sort_order = VALUES(sort_order),
+      enabled = VALUES(enabled),
+      updated_at = CURRENT_TIMESTAMP;
+  `);
+
+  const competitorRows = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT('id', id, 'code', code)
+    ), JSON_ARRAY())
+    FROM yimin_peer_competitors
+    WHERE code IN (${peerCompetitorSeeds.map((competitor) => sqlString(competitor.code)).join(",")});
+  `)) || [];
+  const competitorIdByCode = new Map(
+    competitorRows.map((row) => [String(row.code), Number(row.id)]),
+  );
+
+  for (const competitor of peerCompetitorSeeds) {
+    if (!competitor.rssUrl) continue;
+    const competitorId = competitorIdByCode.get(competitor.code);
+    if (!competitorId) continue;
+    await mysqlExec(`
+      INSERT INTO yimin_peer_sources (
+        competitor_id,
+        source_type,
+        private_url,
+        enabled
+      )
+      VALUES (
+        ${sqlNumber(competitorId)},
+        'wechat_rss',
+        ${sqlString(competitor.rssUrl)},
+        1
+      )
+      ON DUPLICATE KEY UPDATE
+        private_url = VALUES(private_url),
+        enabled = VALUES(enabled),
+        updated_at = CURRENT_TIMESTAMP;
+    `);
+  }
+
+  if (existingImport?.contentHash === contentHash) {
+    return;
+  }
+
+  const payload = JSON.parse(raw);
+  if (!Array.isArray(payload.competitors)) {
+    throw new Error("Invalid peer monitor seed: competitors must be an array");
+  }
+
+  let importedCount = 0;
+  for (const competitor of payload.competitors) {
+    const competitorId = competitorIdByCode.get(String(competitor.code));
+    if (!competitorId) {
+      throw new Error(`Peer monitor competitor is not configured: ${competitor.code}`);
+    }
+
+    const projects = Array.isArray(competitor.projects) ? competitor.projects : [];
+    for (let offset = 0; offset < projects.length; offset += 20) {
+      const chunk = projects.slice(offset, offset + 20);
+      await mysqlExec(`
+        INSERT INTO yimin_peer_projects (
+          competitor_id,
+          source_key,
+          project_name,
+          category_raw,
+          country_normalized,
+          introduction,
+          is_investment_project,
+          investment_amount,
+          investment_requirements_json,
+          financial_requirements_json,
+          advantages_json,
+          application_conditions_json,
+          process_summary,
+          process_source_type,
+          process_text,
+          application_process_json,
+          identity_type,
+          residence_requirement,
+          website_status_note,
+          scraped_at,
+          seed_hash
+        )
+        VALUES
+          ${chunk.map((project) => `(
+            ${sqlNumber(competitorId)},
+            ${sqlString(project.sourceKey)},
+            ${sqlString(project.projectName)},
+            ${sqlString(project.categoryRaw || "")},
+            ${sqlString(project.country || "其他")},
+            ${sqlString(project.introduction || "")},
+            ${project.isInvestmentProject ? 1 : 0},
+            ${sqlString(project.investmentAmount || "")},
+            ${sqlJson(project.investmentRequirements || [])},
+            ${sqlJson(project.financialRequirements || [])},
+            ${sqlJson(project.advantages || [])},
+            ${sqlJson(project.applicationConditions || [])},
+            ${sqlString(project.processSummary || "")},
+            ${sqlString(project.processSourceType || "missing")},
+            ${sqlString(project.processText || "")},
+            ${sqlJson(project.applicationProcess || [])},
+            ${sqlString(project.identityType || "")},
+            ${sqlString(project.residenceRequirement || "")},
+            ${sqlString(project.websiteStatusNote || "")},
+            ${sqlDate(project.scrapedAt)},
+            ${sqlString(contentHash)}
+          )`).join(",\n")}
+        ON DUPLICATE KEY UPDATE
+          project_name = VALUES(project_name),
+          category_raw = VALUES(category_raw),
+          country_normalized = VALUES(country_normalized),
+          introduction = VALUES(introduction),
+          is_investment_project = VALUES(is_investment_project),
+          investment_amount = VALUES(investment_amount),
+          investment_requirements_json = VALUES(investment_requirements_json),
+          financial_requirements_json = VALUES(financial_requirements_json),
+          advantages_json = VALUES(advantages_json),
+          application_conditions_json = VALUES(application_conditions_json),
+          process_summary = VALUES(process_summary),
+          process_source_type = VALUES(process_source_type),
+          process_text = VALUES(process_text),
+          application_process_json = VALUES(application_process_json),
+          identity_type = VALUES(identity_type),
+          residence_requirement = VALUES(residence_requirement),
+          website_status_note = VALUES(website_status_note),
+          scraped_at = VALUES(scraped_at),
+          seed_hash = VALUES(seed_hash),
+          updated_at = CURRENT_TIMESTAMP;
+      `);
+      importedCount += chunk.length;
+    }
+  }
+
+  await mysqlExec(`
+    DELETE FROM yimin_peer_projects
+    WHERE seed_hash <> ${sqlString(contentHash)};
+
+    INSERT INTO yimin_peer_imports (
+      source_name,
+      content_hash,
+      project_count,
+      imported_at
+    )
+    VALUES (
+      'peer-monitor-projects',
+      ${sqlString(contentHash)},
+      ${sqlNumber(importedCount)},
+      CURRENT_TIMESTAMP
+    )
+    ON DUPLICATE KEY UPDATE
+      content_hash = VALUES(content_hash),
+      project_count = VALUES(project_count),
+      imported_at = CURRENT_TIMESTAMP;
+  `);
+}
+
+function isPeerMonitorDepartmentNameAllowed(name) {
+  const normalized = String(name || "").trim().toLowerCase();
+  if (!normalized) return false;
+  return [...peerMonitorConfig.allowedDepartmentNames].some((allowed) => (
+    normalized === allowed
+    || normalized.startsWith(`${allowed}-`)
+    || normalized.startsWith(`${allowed} `)
+    || normalized.startsWith(`${allowed}（`)
+    || normalized.startsWith(`${allowed}(`)
+  ));
+}
+
+async function getPeerMonitorAccess(req) {
+  const identity = getSsoIdentityFromRequest(req);
+  if (!identity?.userId) {
+    return { allowed: false, identity: null, reason: "missing_identity" };
+  }
+
+  const userId = String(identity.userId).trim().toLowerCase();
+  if (peerMonitorConfig.allowedUserIds.has(userId)) {
+    return { allowed: true, identity, reason: "allowed_user" };
+  }
+
+  if (
+    identity.source === "local-test"
+    && isPeerMonitorDepartmentNameAllowed(localTestSsoConfig.departmentName)
+  ) {
+    return { allowed: true, identity, reason: "allowed_department" };
+  }
+
+  const user = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'departmentIds', COALESCE(departments_json, JSON_ARRAY())
+    )
+    FROM yimin_wx_users
+    WHERE userid = ${sqlString(identity.userId)}
+    LIMIT 1;
+  `);
+  let departmentIds = normalizeDepartmentIds(user?.departmentIds);
+  if (!departmentIds.length && identity.source === "local-test") {
+    departmentIds = await resolveLocalTestDepartmentIds(identity.departmentIds);
+  }
+  if (!departmentIds.length) {
+    return { allowed: false, identity, reason: "department_not_found" };
+  }
+
+  const departmentNames = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(department_name), JSON_ARRAY())
+    FROM yimin_wx_departments
+    WHERE department_id IN (${departmentIds.map(sqlNumber).join(",")});
+  `)) || [];
+  const allowed = departmentNames.some(isPeerMonitorDepartmentNameAllowed);
+  return {
+    allowed,
+    identity,
+    reason: allowed ? "allowed_department" : "department_not_allowed",
+  };
+}
+
+async function listPeerMonitorOverview() {
+  return (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'code', code,
+        'displayName', display_name,
+        'projectCount', project_count,
+        'articleCount', article_count,
+        'hasRss', IF(rss_source_count > 0, CAST(TRUE AS JSON), CAST(FALSE AS JSON)),
+        'lastFetchedAt', last_fetched_at,
+        'lastFetchError', last_fetch_error
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT
+        c.code,
+        c.display_name,
+        c.sort_order,
+        (SELECT COUNT(*) FROM yimin_peer_projects p WHERE p.competitor_id = c.id) AS project_count,
+        (
+          SELECT COUNT(*)
+          FROM yimin_peer_articles a
+          JOIN yimin_peer_sources s ON s.id = a.source_id
+          WHERE s.competitor_id = c.id
+        ) AS article_count,
+        (
+          SELECT COUNT(*)
+          FROM yimin_peer_sources s
+          WHERE s.competitor_id = c.id
+            AND s.source_type = 'wechat_rss'
+            AND s.enabled = 1
+        ) AS rss_source_count,
+        (
+          SELECT IF(
+            MAX(s.last_fetched_at) IS NULL,
+            NULL,
+            DATE_FORMAT(MAX(s.last_fetched_at), '%Y-%m-%dT%H:%i:%s+08:00')
+          )
+          FROM yimin_peer_sources s
+          WHERE s.competitor_id = c.id
+            AND s.source_type = 'wechat_rss'
+        ) AS last_fetched_at,
+        (
+          SELECT MAX(s.last_fetch_error)
+          FROM yimin_peer_sources s
+          WHERE s.competitor_id = c.id
+            AND s.source_type = 'wechat_rss'
+        ) AS last_fetch_error
+      FROM yimin_peer_competitors c
+      WHERE c.enabled = 1
+      ORDER BY c.sort_order, c.id
+    ) peer_overview;
+  `)) || [];
+}
+
+async function listPeerProjects(competitorCode) {
+  const projects = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'id', id,
+        'projectName', project_name,
+        'categoryRaw', category_raw,
+        'country', country_normalized,
+        'introduction', introduction,
+        'isInvestmentProject', IF(is_investment_project = 1, CAST(TRUE AS JSON), CAST(FALSE AS JSON)),
+        'investmentAmount', investment_amount,
+        'investmentRequirements', COALESCE(investment_requirements_json, JSON_ARRAY()),
+        'financialRequirements', COALESCE(financial_requirements_json, JSON_ARRAY()),
+        'advantages', COALESCE(advantages_json, JSON_ARRAY()),
+        'applicationConditions', COALESCE(application_conditions_json, JSON_ARRAY()),
+        'processSummary', process_summary,
+        'processSourceType', process_source_type,
+        'processText', process_text,
+        'applicationProcess', COALESCE(application_process_json, JSON_ARRAY()),
+        'identityType', identity_type,
+        'residenceRequirement', residence_requirement,
+        'websiteStatusNote', website_status_note,
+        'scrapedAt', IF(scraped_at IS NULL, NULL, DATE_FORMAT(scraped_at, '%Y-%m-%dT%H:%i:%s+08:00'))
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT p.*
+      FROM yimin_peer_projects p
+      JOIN yimin_peer_competitors c ON c.id = p.competitor_id
+      WHERE c.code = ${sqlString(competitorCode)}
+        AND c.enabled = 1
+      ORDER BY p.country_normalized, p.project_name, p.id
+    ) peer_projects;
+  `)) || [];
+  const countries = [...new Set(
+    projects.map((project) => String(project.country || "").trim()).filter(Boolean),
+  )].sort((left, right) => left.localeCompare(right, "zh-Hans-CN"));
+  return { projects, countries };
+}
+
+async function listPeerArticles(competitorCode) {
+  const articles = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'id', id,
+        'title', title,
+        'summary', summary,
+        'content', content_text,
+        'hasFullContent', IF(
+          CHAR_LENGTH(TRIM(COALESCE(content_text, ''))) > 0,
+          CAST(TRUE AS JSON),
+          CAST(FALSE AS JSON)
+        ),
+        'publishedAt', published_at
+      )
+    ), JSON_ARRAY())
+    FROM (
+      SELECT
+        a.id,
+        a.title,
+        a.summary,
+        a.content_text,
+        IF(
+          a.published_at IS NULL,
+          NULL,
+          DATE_FORMAT(a.published_at, '%Y-%m-%dT%H:%i:%s+08:00')
+        ) AS published_at
+      FROM yimin_peer_articles a
+      JOIN yimin_peer_sources s ON s.id = a.source_id
+      JOIN yimin_peer_competitors c ON c.id = s.competitor_id
+      WHERE c.code = ${sqlString(competitorCode)}
+        AND c.enabled = 1
+        AND s.enabled = 1
+        AND s.source_type = 'wechat_rss'
+      ORDER BY COALESCE(a.published_at, a.first_fetched_at) DESC, a.id DESC
+      LIMIT 100
+    ) peer_articles;
+  `)) || [];
+  return articles.map((article) => {
+    const content = sanitizePeerText(article.content);
+    return {
+      ...article,
+      title: sanitizePeerText(article.title),
+      summary: sanitizePeerText(article.summary),
+      content,
+      hasFullContent: Boolean(article.hasFullContent && content),
+    };
+  });
+}
+
+async function listPeerRssSources(competitorCode = "") {
+  const codeFilter = competitorCode
+    ? `AND c.code = ${sqlString(competitorCode)}`
+    : "";
+  return (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'id', s.id,
+        'privateUrl', s.private_url,
+        'competitorCode', c.code
+      )
+    ), JSON_ARRAY())
+    FROM yimin_peer_sources s
+    JOIN yimin_peer_competitors c ON c.id = s.competitor_id
+    WHERE s.enabled = 1
+      AND c.enabled = 1
+      AND s.source_type = 'wechat_rss'
+      ${codeFilter};
+  `)) || [];
+}
+
+async function refreshPeerRssSource(source) {
+  const result = await fetchWithTimeout(source.privateUrl);
+  if (!result.ok) {
+    throw new Error(`RSS 返回 HTTP ${result.status}`);
+  }
+  if (result.text.length > 8_000_000) {
+    throw new Error("RSS 内容超过 8 MB 安全上限");
+  }
+
+  const items = parsePeerFeed(result.text, source.id);
+  if (!items.length) {
+    throw new Error("RSS 中没有可识别的文章");
+  }
+
+  const existingHashes = new Set((await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(dedupe_hash), JSON_ARRAY())
+    FROM yimin_peer_articles
+    WHERE source_id = ${sqlNumber(source.id)};
+  `)) || []);
+  const newItemCount = items.filter((item) => !existingHashes.has(item.dedupeHash)).length;
+
+  for (let offset = 0; offset < items.length; offset += 10) {
+    const chunk = items.slice(offset, offset + 10);
+    await mysqlExec(`
+      INSERT INTO yimin_peer_articles (
+        source_id,
+        external_id,
+        dedupe_hash,
+        title,
+        summary,
+        content_text,
+        private_url,
+        private_image_url,
+        published_at,
+        first_fetched_at,
+        last_fetched_at
+      )
+      VALUES
+        ${chunk.map((item) => `(
+          ${sqlNumber(source.id)},
+          ${sqlString(item.externalId)},
+          ${sqlString(item.dedupeHash)},
+          ${sqlString(item.title)},
+          ${sqlString(item.summary || "")},
+          ${sqlString(item.contentText || "")},
+          ${sqlString(item.privateUrl || "")},
+          ${sqlString(item.privateImageUrl || "")},
+          ${sqlDate(item.publishedAt)},
+          CURRENT_TIMESTAMP,
+          CURRENT_TIMESTAMP
+        )`).join(",\n")}
+      ON DUPLICATE KEY UPDATE
+        external_id = VALUES(external_id),
+        title = VALUES(title),
+        summary = VALUES(summary),
+        content_text = IF(
+          CHAR_LENGTH(TRIM(VALUES(content_text))) > 0,
+          VALUES(content_text),
+          content_text
+        ),
+        private_url = VALUES(private_url),
+        private_image_url = VALUES(private_image_url),
+        published_at = VALUES(published_at),
+        last_fetched_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP;
+    `);
+  }
+
+  await mysqlExec(`
+    UPDATE yimin_peer_sources
+    SET last_fetched_at = CURRENT_TIMESTAMP,
+        last_fetch_error = NULL,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ${sqlNumber(source.id)};
+  `);
+  return {
+    itemCount: items.length,
+    newItemCount,
+    updatedItemCount: items.length - newItemCount,
+  };
+}
+
+async function getPeerRefreshRun(runKey) {
+  return mysqlJson(`
+    SELECT JSON_OBJECT(
+      'runKey', run_key,
+      'competitorCode', competitor_code,
+      'status', status,
+      'sourceCount', source_count,
+      'processedSourceCount', processed_source_count,
+      'itemCount', item_count,
+      'newItemCount', new_item_count,
+      'updatedItemCount', updated_item_count,
+      'error', error,
+      'startedAt', DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'finishedAt', IF(finished_at IS NULL, NULL, DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%s+08:00'))
+    )
+    FROM yimin_peer_refresh_runs
+    WHERE run_key = ${sqlString(runKey)}
+    LIMIT 1;
+  `);
+}
+
+async function getLatestPeerRefreshRun() {
+  return mysqlJson(`
+    SELECT JSON_OBJECT(
+      'runKey', run_key,
+      'competitorCode', competitor_code,
+      'status', status,
+      'sourceCount', source_count,
+      'processedSourceCount', processed_source_count,
+      'itemCount', item_count,
+      'newItemCount', new_item_count,
+      'updatedItemCount', updated_item_count,
+      'error', error,
+      'startedAt', DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'finishedAt', IF(finished_at IS NULL, NULL, DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%s+08:00'))
+    )
+    FROM yimin_peer_refresh_runs
+    ORDER BY id DESC
+    LIMIT 1;
+  `);
+}
+
+async function runPeerRefresh(runKey, sources) {
+  let processedSourceCount = 0;
+  let itemCount = 0;
+  let newItemCount = 0;
+  let updatedItemCount = 0;
+  const errors = [];
+
+  try {
+    for (const source of sources) {
+      try {
+        const result = await refreshPeerRssSource(source);
+        itemCount += result.itemCount;
+        newItemCount += result.newItemCount;
+        updatedItemCount += result.updatedItemCount;
+      } catch (error) {
+        const cleanError = sanitizePeerText(
+          error instanceof Error ? error.message : String(error),
+        );
+        errors.push(cleanError);
+        await mysqlExec(`
+          UPDATE yimin_peer_sources
+          SET last_fetch_error = ${sqlString(cleanError)},
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = ${sqlNumber(source.id)};
+        `);
+      }
+      processedSourceCount += 1;
+      await mysqlExec(`
+        UPDATE yimin_peer_refresh_runs
+        SET processed_source_count = ${sqlNumber(processedSourceCount)},
+            item_count = ${sqlNumber(itemCount)},
+            new_item_count = ${sqlNumber(newItemCount)},
+            updated_item_count = ${sqlNumber(updatedItemCount)},
+            error = ${errors.length ? sqlString(errors.join("；")) : "NULL"}
+        WHERE run_key = ${sqlString(runKey)};
+      `);
+    }
+
+    const status = errors.length === sources.length ? "failed" : "completed";
+    await mysqlExec(`
+      UPDATE yimin_peer_refresh_runs
+      SET status = ${sqlString(status)},
+          processed_source_count = ${sqlNumber(processedSourceCount)},
+          item_count = ${sqlNumber(itemCount)},
+          new_item_count = ${sqlNumber(newItemCount)},
+          updated_item_count = ${sqlNumber(updatedItemCount)},
+          error = ${errors.length ? sqlString(errors.join("；")) : "NULL"},
+          finished_at = CURRENT_TIMESTAMP
+      WHERE run_key = ${sqlString(runKey)};
+    `);
+  } catch (error) {
+    const cleanError = sanitizePeerText(
+      error instanceof Error ? error.message : String(error),
+    );
+    await mysqlExec(`
+      UPDATE yimin_peer_refresh_runs
+      SET status = 'failed',
+          error = ${sqlString(cleanError)},
+          finished_at = CURRENT_TIMESTAMP
+      WHERE run_key = ${sqlString(runKey)};
+    `);
+  }
+}
+
+async function startPeerRefresh(competitorCode = "") {
+  if (activePeerRefresh) {
+    return {
+      started: false,
+      active: true,
+      run: await getPeerRefreshRun(activePeerRefresh.runKey),
+    };
+  }
+
+  const sources = await listPeerRssSources(competitorCode);
+  if (!sources.length) {
+    return {
+      started: false,
+      active: false,
+      error: competitorCode ? "该同行尚未配置公众号 RSS" : "尚未配置可用的同行 RSS",
+    };
+  }
+
+  const runKey = randomBytes(16).toString("hex");
+  await mysqlExec(`
+    INSERT INTO yimin_peer_refresh_runs (
+      run_key,
+      competitor_code,
+      status,
+      source_count
+    )
+    VALUES (
+      ${sqlString(runKey)},
+      ${competitorCode ? sqlString(competitorCode) : "NULL"},
+      'running',
+      ${sqlNumber(sources.length)}
+    );
+  `);
+
+  activePeerRefresh = { runKey };
+  void runPeerRefresh(runKey, sources)
+    .catch((error) => {
+      console.error("Peer monitor refresh failed:", error);
+    })
+    .finally(() => {
+      if (activePeerRefresh?.runKey === runKey) {
+        activePeerRefresh = null;
+      }
+    });
+
+  return {
+    started: true,
+    active: true,
+    run: await getPeerRefreshRun(runKey),
+  };
 }
 
 async function upsertSource(source, { enabled = true } = {}) {
@@ -4317,6 +5170,7 @@ function sanitizeTextArtifacts(value) {
   return String(value || "")
     .replace(/雇主担(?:�|&(?:amp;)?#65533;|\\ufffd)+/gi, "雇主担保")
     .replace(/担(?:�|&(?:amp;)?#65533;|\\ufffd)+/gi, "担保")
+    .replace(/置业(?:�|&(?:amp;)?#65533;|\\ufffd)+民/gi, "置业移民")
     .replace(/(?:�|&(?:amp;)?#65533;|\\ufffd)+/gi, "")
     .trim();
 }
@@ -4346,6 +5200,87 @@ function cleanText(value) {
       .replace(/\s+/g, " ")
       .trim(),
   ));
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const peerSensitiveTerms = [...new Set(
+  peerCompetitorSeeds.flatMap((competitor) => [
+    competitor.privateName,
+    competitor.privateDomain,
+    ...competitor.brandTerms,
+  ]),
+)]
+  .filter(Boolean)
+  .sort((left, right) => right.length - left.length);
+const peerSensitivePattern = new RegExp(
+  peerSensitiveTerms.map(escapeRegExp).join("|"),
+  "gi",
+);
+
+function sanitizePeerText(value) {
+  return sanitizeTextArtifacts(String(value || "")
+    .replace(peerSensitivePattern, "该机构")
+    .replace(/(?:https?:\/\/|www\.)[^\s<>"']+/gi, "")
+    .replace(/\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b/gi, "")
+    .replace(/该机构(?:集团|移民|出国)/g, "该机构")
+    .replace(/\s+/g, " ")
+    .trim());
+}
+
+function getXmlAttribute(block, tagName, attributeName) {
+  const tag = block.match(new RegExp(`<${tagName}\\b([^>]*)>`, "i"))?.[1] || "";
+  return decodeEntities(
+    tag.match(new RegExp(`\\b${attributeName}=["']([^"']+)["']`, "i"))?.[1] || "",
+  );
+}
+
+function parsePeerFeed(xml, sourceId) {
+  return getBlocks(xml)
+    .map((block) => {
+      const externalId =
+        cleanText(getTag(block, "id"))
+        || cleanText(getTag(block, "guid"));
+      const title = sanitizePeerText(cleanText(cleanText(getTag(block, "title"))));
+      const description = sanitizePeerText(cleanText(cleanText(getTag(block, "description"))));
+      const rssLink = cleanText(getTag(block, "link"));
+      const privateUrl =
+        rssLink
+        || cleanText(getTag(block, "guid"))
+        || decodeEntities(getAtomLink(block));
+      const rawContent =
+        getTag(block, "content:encoded")
+        || getTag(block, "content")
+        || getTag(block, "summary");
+      const contentText = truncate(
+        sanitizePeerText(cleanText(cleanText(rawContent))),
+        20000,
+      );
+      const publishedAt =
+        normalizeDate(getTag(block, "pubDate"))
+        || normalizeDate(getTag(block, "published"))
+        || normalizeDate(getTag(block, "updated"))
+        || null;
+      const privateImageUrl = getXmlAttribute(block, "enclosure", "url");
+      const stableValue = externalId || privateUrl || `${title}\n${publishedAt || ""}`;
+      const dedupeHash = createHash("sha256")
+        .update(`${sourceId}\n${stableValue}`)
+        .digest("hex");
+
+      return {
+        externalId: externalId.slice(0, 255),
+        dedupeHash,
+        title: title.slice(0, 800),
+        summary: truncate(description || contentText, 500),
+        contentText,
+        privateUrl,
+        privateImageUrl,
+        publishedAt,
+      };
+    })
+    .filter((item) => item.title);
 }
 
 function truncate(value, maxLength = 150) {
@@ -9626,8 +10561,16 @@ async function serveStatic(req, res) {
   const cleanPath = normalize(decodedPath).replace(/^(\.\.[/\\])+/, "");
   const relativePath = cleanPath === "/" ? "index.html" : cleanPath.replace(/^[/\\]/, "");
   const filePath = resolve(rootDir, relativePath);
+  const publicFiles = new Set(["index.html", "styles.css", "app.js"]);
+  const isPublicUpload = relativePath.startsWith("uploads/")
+    && !relativePath.split("/").some((segment) => segment.startsWith("."));
+  const isPublicFile = publicFiles.has(relativePath) || isPublicUpload;
 
-  if (!(filePath === rootDir || filePath.startsWith(`${rootDir}/`)) || !existsSync(filePath)) {
+  if (
+    !isPublicFile
+    || !(filePath === rootDir || filePath.startsWith(`${rootDir}/`))
+    || !existsSync(filePath)
+  ) {
     sendText(res, 404, "Not found");
     return;
   }
@@ -10956,6 +11899,123 @@ const server = createServer(async (req, res) => {
         userId: identity?.userId || "",
         localTest: identity?.source === "local-test",
       });
+      return;
+    }
+
+    if (url.pathname === "/api/peer-monitor/access" && req.method === "GET") {
+      await initDb();
+      const access = await getPeerMonitorAccess(req);
+      sendJson(res, 200, {
+        ok: true,
+        allowed: access.allowed,
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/peer-monitor/overview" && req.method === "GET") {
+      await initDb();
+      const access = await getPeerMonitorAccess(req);
+      if (!access.allowed) {
+        sendJson(res, 403, { ok: false, error: "无权访问同行监控" });
+        return;
+      }
+      sendJson(res, 200, {
+        ok: true,
+        competitors: await listPeerMonitorOverview(),
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/peer-monitor/projects" && req.method === "GET") {
+      await initDb();
+      const access = await getPeerMonitorAccess(req);
+      if (!access.allowed) {
+        sendJson(res, 403, { ok: false, error: "无权访问同行监控" });
+        return;
+      }
+      const competitorCode = String(url.searchParams.get("competitor") || "");
+      if (!/^peer-[a-i]$/.test(competitorCode)) {
+        sendJson(res, 400, { ok: false, error: "competitor 参数无效" });
+        return;
+      }
+      const payload = await listPeerProjects(competitorCode);
+      sendJson(res, 200, { ok: true, ...payload });
+      return;
+    }
+
+    if (url.pathname === "/api/peer-monitor/articles" && req.method === "GET") {
+      await initDb();
+      const access = await getPeerMonitorAccess(req);
+      if (!access.allowed) {
+        sendJson(res, 403, { ok: false, error: "无权访问同行监控" });
+        return;
+      }
+      const competitorCode = String(url.searchParams.get("competitor") || "");
+      if (!/^peer-[a-i]$/.test(competitorCode)) {
+        sendJson(res, 400, { ok: false, error: "competitor 参数无效" });
+        return;
+      }
+      sendJson(res, 200, {
+        ok: true,
+        articles: await listPeerArticles(competitorCode),
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/peer-monitor/refresh" && req.method === "POST") {
+      await initDb();
+      const session = requireAuth(req);
+      if (!session && !isLoopbackRequest(req)) {
+        sendJson(res, 403, { ok: false, error: "无权刷新同行公众号" });
+        return;
+      }
+      const competitorCode = String(url.searchParams.get("competitor") || "");
+      if (competitorCode && !/^peer-[a-i]$/.test(competitorCode)) {
+        sendJson(res, 400, { ok: false, error: "competitor 参数无效" });
+        return;
+      }
+      const result = await startPeerRefresh(competitorCode);
+      if (result.error) {
+        sendJson(res, 409, { ok: false, error: result.error });
+        return;
+      }
+      sendJson(res, result.started ? 202 : 200, {
+        ok: true,
+        started: result.started,
+        active: result.active,
+        run: result.run,
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/peer-monitor/refresh-runs/latest" && req.method === "GET") {
+      await initDb();
+      const access = await getPeerMonitorAccess(req);
+      if (!access.allowed && !isLoopbackRequest(req)) {
+        sendJson(res, 403, { ok: false, error: "无权查看同行刷新任务" });
+        return;
+      }
+      sendJson(res, 200, {
+        ok: true,
+        run: await getLatestPeerRefreshRun(),
+      });
+      return;
+    }
+
+    const peerRefreshRunMatch = url.pathname.match(/^\/api\/peer-monitor\/refresh-runs\/([a-f0-9]{32})$/);
+    if (peerRefreshRunMatch && req.method === "GET") {
+      await initDb();
+      const access = await getPeerMonitorAccess(req);
+      if (!access.allowed && !isLoopbackRequest(req)) {
+        sendJson(res, 403, { ok: false, error: "无权查看同行刷新任务" });
+        return;
+      }
+      const run = await getPeerRefreshRun(peerRefreshRunMatch[1]);
+      if (!run) {
+        sendJson(res, 404, { ok: false, error: "刷新任务不存在" });
+        return;
+      }
+      sendJson(res, 200, { ok: true, run });
       return;
     }
 
