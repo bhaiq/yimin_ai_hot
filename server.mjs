@@ -2014,6 +2014,7 @@ async function listPeerArticles(competitorCode) {
       title: exposeOriginalName(article.title),
       summary: exposeOriginalName(article.summary),
       content,
+      url: normalizePeerArticleUrl(article.url),
       hasFullContent: Boolean(article.hasFullContent && content),
     };
   });
@@ -5228,6 +5229,19 @@ function normalizePeerText(value) {
     .trim());
 }
 
+function normalizePeerArticleUrl(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  try {
+    const url = new URL(text);
+    if (!["http:", "https:"].includes(url.protocol)) return "";
+    url.pathname = url.pathname.replace(/\/{2,}/g, "/");
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
 function getXmlAttribute(block, tagName, attributeName) {
   const tag = block.match(new RegExp(`<${tagName}\\b([^>]*)>`, "i"))?.[1] || "";
   return decodeEntities(
@@ -5244,10 +5258,11 @@ function parsePeerFeed(xml, sourceId) {
       const title = normalizePeerText(cleanText(cleanText(getTag(block, "title"))));
       const description = normalizePeerText(cleanText(cleanText(getTag(block, "description"))));
       const rssLink = cleanText(getTag(block, "link"));
-      const privateUrl =
+      const privateUrl = normalizePeerArticleUrl(
         rssLink
         || cleanText(getTag(block, "guid"))
-        || decodeEntities(getAtomLink(block));
+        || decodeEntities(getAtomLink(block)),
+      );
       const rawContent =
         getTag(block, "content:encoded")
         || getTag(block, "content")

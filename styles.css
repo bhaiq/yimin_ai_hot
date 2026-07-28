@@ -2285,28 +2285,12 @@ img {
 }
 
 .peer-article-card {
-  display: grid;
-  grid-template-columns: 152px minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
   width: 100%;
   padding: 16px;
   color: var(--text);
   text-align: left;
   cursor: pointer;
   transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
-}
-
-.peer-article-card:not(.has-cover) {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.peer-article-cover {
-  width: 152px;
-  aspect-ratio: 16 / 10;
-  object-fit: cover;
-  border-radius: 7px;
-  background: var(--panel-soft);
 }
 
 .peer-article-card-copy {
@@ -2365,10 +2349,6 @@ img {
 
 .peer-article-modal {
   max-width: 760px;
-}
-
-.peer-article-modal-image {
-  max-height: 320px;
 }
 
 .peer-article-modal-source {
@@ -3500,15 +3480,6 @@ img {
 
   .peer-competitor-list {
     grid-template-columns: 1fr;
-  }
-
-  .peer-article-card {
-    grid-template-columns: 1fr;
-  }
-
-  .peer-article-cover {
-    width: 100%;
-    max-height: 190px;
   }
 
   .lead-story,

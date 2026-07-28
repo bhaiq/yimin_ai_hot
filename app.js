@@ -804,11 +804,6 @@ function safeUrl(value) {
   }
 }
 
-function safePeerImageUrl(value) {
-  const url = safeUrl(value);
-  return url.startsWith("http://") ? `https://${url.slice("http://".length)}` : url;
-}
-
 function linkifyPlainUrls(root) {
   if (!root) {
     return;
@@ -2898,15 +2893,13 @@ function renderPeerMonitor() {
       ? `<div class="peer-article-list">${state.peerArticles.map((article) => {
         const hasFullContent = Boolean(article.hasFullContent && String(article.content || "").trim());
         const actionLabel = hasFullContent ? "阅读全文" : "查看摘要";
-        const imageUrl = safePeerImageUrl(article.imageUrl);
         return `
           <button
-            class="peer-article-card${hasFullContent ? "" : " awaiting-content"}${imageUrl ? " has-cover" : ""}"
+            class="peer-article-card${hasFullContent ? "" : " awaiting-content"}"
             type="button"
             data-peer-article-id="${escapeAttr(article.id)}"
             aria-label="${actionLabel}：${escapeAttr(article.title || "未命名文章")}"
           >
-            ${imageUrl ? `<img class="peer-article-cover" src="${escapeAttr(imageUrl)}" alt="" loading="lazy">` : ""}
             <span class="peer-article-card-copy">
               <span class="peer-article-meta">
                 <span>${escapeHtml(selected.displayName)}公众号</span>
@@ -5950,7 +5943,6 @@ function showPeerArticleModal(article, competitor, trigger) {
     ? article.content
     : article.summary || "该订阅源暂未提供摘要或正文。";
   const articleUrl = safeUrl(article.url);
-  const imageUrl = safePeerImageUrl(article.imageUrl);
   lastArticleModalTrigger = trigger || document.activeElement;
   overlay.setAttribute("role", "dialog");
   overlay.setAttribute("aria-modal", "true");
@@ -5958,7 +5950,6 @@ function showPeerArticleModal(article, competitor, trigger) {
   overlay.innerHTML = `
     <div class="modal-content peer-article-modal">
       <button class="modal-close" type="button" aria-label="关闭全文">&times;</button>
-      ${imageUrl ? `<img class="modal-image peer-article-modal-image" src="${escapeAttr(imageUrl)}" alt="${escapeAttr(title)}封面">` : ""}
       <div class="modal-header">
         <span class="peer-article-modal-source">${escapeHtml(competitor.displayName)}公众号动态</span>
         <h2>${escapeHtml(title)}</h2>
