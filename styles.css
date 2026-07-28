@@ -1945,6 +1945,9 @@ img {
 .peer-competitor-panel {
   position: sticky;
   top: 18px;
+  display: flex;
+  flex-direction: column;
+  max-height: var(--peer-panel-max-height, calc(100dvh - 36px));
   overflow: hidden;
 }
 
@@ -1963,8 +1966,15 @@ img {
 
 .peer-competitor-list {
   display: grid;
+  flex: 1 1 auto;
   gap: 4px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
   padding: 8px;
+  scrollbar-gutter: stable;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
 }
 
 .peer-competitor-item {
@@ -3432,10 +3442,17 @@ img {
 
   .peer-competitor-panel {
     position: static;
+    max-height: none;
+    overflow: visible;
   }
 
   .peer-competitor-list {
+    flex: 0 1 auto;
     grid-template-columns: repeat(3, minmax(0, 1fr));
+    overflow-y: visible;
+    overscroll-behavior-y: auto;
+    scrollbar-gutter: auto;
+    touch-action: auto;
   }
 
   .subscription-toolbar {

@@ -752,6 +752,7 @@ const refreshNews = document.querySelector("#refreshNews");
 const toolbar = document.querySelector(".toolbar");
 let fetchRunPollTimer = null;
 let peerRefreshPollTimer = null;
+let peerPanelLayoutFrame = null;
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -2774,8 +2775,34 @@ function isPeerRefreshRunning() {
   return state.peerRefreshRun?.status === "running";
 }
 
+function syncPeerCompetitorPanelHeight() {
+  if (peerPanelLayoutFrame !== null) return;
+  peerPanelLayoutFrame = window.requestAnimationFrame(() => {
+    peerPanelLayoutFrame = null;
+    const panel = peerCompetitorList?.closest(".peer-competitor-panel");
+    if (!panel) return;
+    if (state.view !== "peer-monitor" || !window.matchMedia("(min-width: 981px)").matches) {
+      panel.style.removeProperty("--peer-panel-max-height");
+      return;
+    }
+
+    const stickyTop = 18;
+    const viewportBottomGap = 18;
+    const panelTop = Math.max(stickyTop, panel.getBoundingClientRect().top);
+    const availableHeight = Math.max(
+      200,
+      Math.floor(window.innerHeight - panelTop - viewportBottomGap),
+    );
+    panel.style.setProperty("--peer-panel-max-height", `${availableHeight}px`);
+  });
+}
+
+window.addEventListener("resize", syncPeerCompetitorPanelHeight, { passive: true });
+window.addEventListener("scroll", syncPeerCompetitorPanelHeight, { passive: true });
+
 function renderPeerMonitor() {
   if (!peerMonitorContent) return;
+  syncPeerCompetitorPanelHeight();
   const selected = getSelectedPeerCompetitor();
   if (peerMonitorNav) {
     peerMonitorNav.hidden = !state.peerMonitorAccess;
