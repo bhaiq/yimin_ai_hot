@@ -804,6 +804,11 @@ function safeUrl(value) {
   }
 }
 
+function safePeerImageUrl(value) {
+  const url = safeUrl(value);
+  return url.startsWith("http://") ? `https://${url.slice("http://".length)}` : url;
+}
+
 function linkifyPlainUrls(root) {
   if (!root) {
     return;
@@ -2786,7 +2791,7 @@ function renderPeerMonitor() {
         <button class="peer-competitor-item${competitor.code === state.peerSelectedCode ? " active" : ""}" type="button" data-peer-code="${escapeAttr(competitor.code)}">
           <span>
             <strong>${escapeHtml(competitor.displayName)}</strong>
-            <small>${escapeHtml(competitor.projectCount || 0)} 个官网项目</small>
+            <small>${competitor.websiteDomain ? `${escapeHtml(competitor.websiteDomain)} · ` : ""}${escapeHtml(competitor.projectCount || 0)} 个官网项目</small>
           </span>
           <em class="${competitor.hasRss ? "connected" : ""}">${competitor.hasRss ? "已接公众号" : "未接公众号"}</em>
         </button>
@@ -2893,20 +2898,24 @@ function renderPeerMonitor() {
       ? `<div class="peer-article-list">${state.peerArticles.map((article) => {
         const hasFullContent = Boolean(article.hasFullContent && String(article.content || "").trim());
         const actionLabel = hasFullContent ? "阅读全文" : "查看摘要";
+        const imageUrl = safePeerImageUrl(article.imageUrl);
         return `
           <button
-            class="peer-article-card${hasFullContent ? "" : " awaiting-content"}"
+            class="peer-article-card${hasFullContent ? "" : " awaiting-content"}${imageUrl ? " has-cover" : ""}"
             type="button"
             data-peer-article-id="${escapeAttr(article.id)}"
             aria-label="${actionLabel}：${escapeAttr(article.title || "未命名文章")}"
           >
-            <span class="peer-article-meta">
-              <span>${escapeHtml(selected.displayName)}公众号</span>
-              <time>${escapeHtml(formatPeerDate(article.publishedAt))}</time>
+            ${imageUrl ? `<img class="peer-article-cover" src="${escapeAttr(imageUrl)}" alt="" loading="lazy">` : ""}
+            <span class="peer-article-card-copy">
+              <span class="peer-article-meta">
+                <span>${escapeHtml(selected.displayName)}公众号</span>
+                <time>${escapeHtml(formatPeerDate(article.publishedAt))}</time>
+              </span>
+              <strong class="peer-article-title">${escapeHtml(article.title || "未命名文章")}</strong>
+              <span class="peer-article-summary">${escapeHtml(article.summary || "该文章未提供摘要。")}</span>
+              <span class="peer-article-read-more">${hasFullContent ? "查看 RSS 全文与原文链接 →" : "查看摘要与原文链接 →"}</span>
             </span>
-            <strong class="peer-article-title">${escapeHtml(article.title || "未命名文章")}</strong>
-            <span class="peer-article-summary">${escapeHtml(article.summary || "该文章未提供摘要。")}</span>
-            <span class="peer-article-read-more">${hasFullContent ? "站内阅读全文 →" : "查看摘要 · 等待自动补全文 →"}</span>
           </button>
         `;
       }).join("")}</div>`
@@ -5940,6 +5949,8 @@ function showPeerArticleModal(article, competitor, trigger) {
   const content = hasFullContent
     ? article.content
     : article.summary || "该订阅源暂未提供摘要或正文。";
+  const articleUrl = safeUrl(article.url);
+  const imageUrl = safePeerImageUrl(article.imageUrl);
   lastArticleModalTrigger = trigger || document.activeElement;
   overlay.setAttribute("role", "dialog");
   overlay.setAttribute("aria-modal", "true");
@@ -5947,6 +5958,7 @@ function showPeerArticleModal(article, competitor, trigger) {
   overlay.innerHTML = `
     <div class="modal-content peer-article-modal">
       <button class="modal-close" type="button" aria-label="关闭全文">&times;</button>
+      ${imageUrl ? `<img class="modal-image peer-article-modal-image" src="${escapeAttr(imageUrl)}" alt="${escapeAttr(title)}封面">` : ""}
       <div class="modal-header">
         <span class="peer-article-modal-source">${escapeHtml(competitor.displayName)}公众号动态</span>
         <h2>${escapeHtml(title)}</h2>
@@ -5957,10 +5969,15 @@ function showPeerArticleModal(article, competitor, trigger) {
       <div class="modal-body peer-article-modal-body">
         <p>${escapeHtml(content)}</p>
       </div>
+      ${articleUrl ? `
+        <div class="modal-actions peer-article-modal-actions">
+          <a href="${escapeAttr(articleUrl)}" target="_blank" rel="noopener noreferrer" class="modal-link">查看公众号原文 →</a>
+        </div>
+      ` : ""}
       <p class="peer-article-modal-note">
         ${hasFullContent
-          ? "内容已匿名化处理，不提供原文链接、公众号名称或图片。"
-          : "当前订阅源暂未提供全文，现展示摘要；系统会在后续刷新时自动补抓正文。"}
+          ? "以上为 RSS 当前提供的正文内容。"
+          : "当前 RSS 暂未提供全文，现展示已有摘要；可通过原文链接查看公众号页面。"}
       </p>
     </div>
   `;

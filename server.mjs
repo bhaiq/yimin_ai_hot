@@ -1864,7 +1864,9 @@ async function listPeerMonitorOverview() {
     SELECT COALESCE(JSON_ARRAYAGG(
       JSON_OBJECT(
         'code', code,
-        'displayName', display_name,
+        'displayName', private_name,
+        'anonymousName', display_name,
+        'websiteDomain', private_domain,
         'projectCount', project_count,
         'articleCount', article_count,
         'hasRss', IF(rss_source_count > 0, CAST(TRUE AS JSON), CAST(FALSE AS JSON)),
@@ -1876,6 +1878,8 @@ async function listPeerMonitorOverview() {
       SELECT
         c.code,
         c.display_name,
+        c.private_name,
+        c.private_domain,
         c.sort_order,
         (SELECT COUNT(*) FROM yimin_peer_projects p WHERE p.competitor_id = c.id) AS project_count,
         (
@@ -1962,6 +1966,9 @@ async function listPeerArticles(competitorCode) {
         'title', title,
         'summary', summary,
         'content', content_text,
+        'url', private_url,
+        'imageUrl', private_image_url,
+        'competitorName', competitor_name,
         'hasFullContent', IF(
           CHAR_LENGTH(TRIM(COALESCE(content_text, ''))) > 0,
           CAST(TRUE AS JSON),
@@ -1976,6 +1983,9 @@ async function listPeerArticles(competitorCode) {
         a.title,
         a.summary,
         a.content_text,
+        a.private_url,
+        a.private_image_url,
+        c.private_name AS competitor_name,
         IF(
           a.published_at IS NULL,
           NULL,
@@ -1993,11 +2003,16 @@ async function listPeerArticles(competitorCode) {
     ) peer_articles;
   `)) || [];
   return articles.map((article) => {
-    const content = sanitizePeerText(article.content);
+    const competitorName = normalizePeerText(article.competitorName);
+    const exposeOriginalName = (value) => {
+      const text = normalizePeerText(value);
+      return competitorName ? text.replace(/该机构/g, competitorName) : text;
+    };
+    const content = exposeOriginalName(article.content);
     return {
       ...article,
-      title: sanitizePeerText(article.title),
-      summary: sanitizePeerText(article.summary),
+      title: exposeOriginalName(article.title),
+      summary: exposeOriginalName(article.summary),
       content,
       hasFullContent: Boolean(article.hasFullContent && content),
     };
@@ -2164,7 +2179,7 @@ async function runPeerRefresh(runKey, sources) {
         newItemCount += result.newItemCount;
         updatedItemCount += result.updatedItemCount;
       } catch (error) {
-        const cleanError = sanitizePeerText(
+        const cleanError = normalizePeerText(
           error instanceof Error ? error.message : String(error),
         );
         errors.push(cleanError);
@@ -2200,7 +2215,7 @@ async function runPeerRefresh(runKey, sources) {
       WHERE run_key = ${sqlString(runKey)};
     `);
   } catch (error) {
-    const cleanError = sanitizePeerText(
+    const cleanError = normalizePeerText(
       error instanceof Error ? error.message : String(error),
     );
     await mysqlExec(`
@@ -5207,30 +5222,8 @@ function cleanText(value) {
   ));
 }
 
-function escapeRegExp(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-const peerSensitiveTerms = [...new Set(
-  peerCompetitorSeeds.flatMap((competitor) => [
-    competitor.privateName,
-    competitor.privateDomain,
-    ...competitor.brandTerms,
-  ]),
-)]
-  .filter(Boolean)
-  .sort((left, right) => right.length - left.length);
-const peerSensitivePattern = new RegExp(
-  peerSensitiveTerms.map(escapeRegExp).join("|"),
-  "gi",
-);
-
-function sanitizePeerText(value) {
+function normalizePeerText(value) {
   return sanitizeTextArtifacts(String(value || "")
-    .replace(peerSensitivePattern, "该机构")
-    .replace(/(?:https?:\/\/|www\.)[^\s<>"']+/gi, "")
-    .replace(/\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b/gi, "")
-    .replace(/该机构(?:集团|移民|出国)/g, "该机构")
     .replace(/\s+/g, " ")
     .trim());
 }
@@ -5248,8 +5241,8 @@ function parsePeerFeed(xml, sourceId) {
       const externalId =
         cleanText(getTag(block, "id"))
         || cleanText(getTag(block, "guid"));
-      const title = sanitizePeerText(cleanText(cleanText(getTag(block, "title"))));
-      const description = sanitizePeerText(cleanText(cleanText(getTag(block, "description"))));
+      const title = normalizePeerText(cleanText(cleanText(getTag(block, "title"))));
+      const description = normalizePeerText(cleanText(cleanText(getTag(block, "description"))));
       const rssLink = cleanText(getTag(block, "link"));
       const privateUrl =
         rssLink
@@ -5259,10 +5252,7 @@ function parsePeerFeed(xml, sourceId) {
         getTag(block, "content:encoded")
         || getTag(block, "content")
         || getTag(block, "summary");
-      const contentText = truncate(
-        sanitizePeerText(cleanText(cleanText(rawContent))),
-        20000,
-      );
+      const contentText = normalizePeerText(cleanText(cleanText(rawContent)));
       const publishedAt =
         normalizeDate(getTag(block, "pubDate"))
         || normalizeDate(getTag(block, "published"))
