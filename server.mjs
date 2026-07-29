@@ -170,7 +170,7 @@ const peerMonitorConfig = {
       .filter(Boolean),
   ),
   allowedDepartmentNames: new Set(
-    ["iod", ...String(process.env.PEER_MONITOR_DEPARTMENT_NAMES || "").split(",")]
+    ["iod", "md", ...String(process.env.PEER_MONITOR_DEPARTMENT_NAMES || "").split(",")]
       .map((value) => value.trim().toLowerCase())
       .filter(Boolean),
   ),
