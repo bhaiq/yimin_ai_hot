@@ -691,6 +691,10 @@ const state = {
   peerProjects: [],
   peerProjectCountries: [],
   peerArticles: [],
+  peerArticlesHasMore: false,
+  peerArticlesNextOffset: 0,
+  peerArticlesLoadingMore: false,
+  peerArticlesLoadError: "",
   peerProjectQuery: "",
   peerProjectCountry: "",
   peerMonitorLoading: false,
@@ -2917,7 +2921,8 @@ function renderPeerMonitor() {
       return;
     }
     peerMonitorContent.innerHTML = state.peerArticles.length
-      ? `<div class="peer-article-list">${state.peerArticles.map((article) => {
+      ? `
+        <div class="peer-article-list">${state.peerArticles.map((article) => {
         const hasFullContent = Boolean(article.hasFullContent && String(article.content || "").trim());
         const actionLabel = hasFullContent ? "阅读全文" : "查看摘要";
         return `
@@ -2938,7 +2943,27 @@ function renderPeerMonitor() {
             </span>
           </button>
         `;
-      }).join("")}</div>`
+      }).join("")}</div>
+        <div class="peer-article-pagination">
+          ${state.peerArticlesLoadError
+            ? `<p class="peer-article-load-error">${escapeHtml(state.peerArticlesLoadError)}</p>`
+            : ""}
+          ${state.peerArticlesHasMore
+            ? `
+              <button
+                class="ghost-button"
+                id="peerArticlesLoadMore"
+                type="button"
+                ${state.peerArticlesLoadingMore ? "disabled" : ""}
+              >
+                ${state.peerArticlesLoadingMore
+                  ? "加载中…"
+                  : `加载更多（已显示 ${escapeHtml(state.peerArticles.length)} / ${escapeHtml(selected.articleCount || state.peerArticles.length)}）`}
+              </button>
+            `
+            : ""}
+        </div>
+      `
       : '<p class="empty">尚未刷新公众号文章。</p>';
     return;
   }
@@ -2966,19 +2991,24 @@ async function loadPeerMonitorAccess() {
 
 async function loadPeerCompetitorData() {
   if (!state.peerMonitorAccess || window.location.protocol === "file:") return;
+  const competitorCode = state.peerSelectedCode;
   state.peerMonitorLoading = true;
   state.peerMonitorError = "";
   state.peerProjects = [];
   state.peerProjectCountries = [];
   state.peerArticles = [];
+  state.peerArticlesHasMore = false;
+  state.peerArticlesNextOffset = 0;
+  state.peerArticlesLoadingMore = false;
+  state.peerArticlesLoadError = "";
   renderPeerMonitor();
   try {
-    const code = encodeURIComponent(state.peerSelectedCode);
+    const code = encodeURIComponent(competitorCode);
     const [projectsResponse, articlesResponse] = await Promise.all([
       fetch(`/api/peer-monitor/projects?competitor=${code}`, {
         headers: { accept: "application/json" },
       }),
-      fetch(`/api/peer-monitor/articles?competitor=${code}`, {
+      fetch(`/api/peer-monitor/articles?competitor=${code}&limit=20&offset=0`, {
         headers: { accept: "application/json" },
       }),
     ]);
@@ -2992,14 +3022,73 @@ async function loadPeerCompetitorData() {
     if (!articlesResponse.ok || !articlesData.ok) {
       throw new Error(articlesData.error || `HTTP ${articlesResponse.status}`);
     }
+    if (state.peerSelectedCode !== competitorCode) return;
+
     state.peerProjects = projectsData.projects || [];
     state.peerProjectCountries = projectsData.countries || [];
     state.peerArticles = articlesData.articles || [];
+    state.peerArticlesHasMore = Boolean(articlesData.hasMore);
+    state.peerArticlesNextOffset = Number(
+      articlesData.nextOffset ?? state.peerArticles.length,
+    );
   } catch (error) {
-    state.peerMonitorError = `同行数据加载失败：${error instanceof Error ? error.message : String(error)}`;
+    if (state.peerSelectedCode === competitorCode) {
+      state.peerMonitorError =
+        `同行数据加载失败：${error instanceof Error ? error.message : String(error)}`;
+    }
   } finally {
-    state.peerMonitorLoading = false;
-    renderPeerMonitor();
+    if (state.peerSelectedCode === competitorCode) {
+      state.peerMonitorLoading = false;
+      renderPeerMonitor();
+    }
+  }
+}
+
+async function loadMorePeerArticles() {
+  if (
+    !state.peerMonitorAccess
+    || state.peerArticlesLoadingMore
+    || !state.peerArticlesHasMore
+    || window.location.protocol === "file:"
+  ) {
+    return;
+  }
+
+  const competitorCode = state.peerSelectedCode;
+  const offset = state.peerArticlesNextOffset || state.peerArticles.length;
+  state.peerArticlesLoadingMore = true;
+  state.peerArticlesLoadError = "";
+  renderPeerMonitor();
+
+  try {
+    const response = await fetch(
+      `/api/peer-monitor/articles?competitor=${encodeURIComponent(competitorCode)}&limit=20&offset=${encodeURIComponent(offset)}`,
+      { headers: { accept: "application/json" } },
+    );
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    if (state.peerSelectedCode !== competitorCode) return;
+
+    const existingIds = new Set(state.peerArticles.map((article) => Number(article.id)));
+    const newArticles = (data.articles || [])
+      .filter((article) => !existingIds.has(Number(article.id)));
+    state.peerArticles = [...state.peerArticles, ...newArticles];
+    state.peerArticlesHasMore = Boolean(data.hasMore);
+    state.peerArticlesNextOffset = Number(
+      data.nextOffset ?? offset + (data.articles || []).length,
+    );
+  } catch (error) {
+    if (state.peerSelectedCode === competitorCode) {
+      state.peerArticlesLoadError =
+        `加载更多失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+  } finally {
+    if (state.peerSelectedCode === competitorCode) {
+      state.peerArticlesLoadingMore = false;
+      renderPeerMonitor();
+    }
   }
 }
 
@@ -5161,6 +5250,11 @@ document.addEventListener("click", async (event) => {
 
   if (event.target.closest("#peerMonitorRefresh")) {
     refreshSelectedPeer();
+    return;
+  }
+
+  if (event.target.closest("#peerArticlesLoadMore")) {
+    loadMorePeerArticles();
     return;
   }
 

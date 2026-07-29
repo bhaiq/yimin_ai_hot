@@ -12,6 +12,14 @@ const port = Number(process.env.PORT || 4173);
 const host = process.env.HOST || "0.0.0.0";
 const cacheTtlMs = Number(process.env.CACHE_TTL_MS || 10 * 60 * 1000);
 const requestTimeoutMs = Number(process.env.FEED_TIMEOUT_MS || 9000);
+const peerRssMaxBytes = Math.max(
+  1_000_000,
+  Number(process.env.PEER_MONITOR_RSS_MAX_BYTES) || 32 * 1024 * 1024,
+);
+const peerRssTimeoutMs = Math.max(
+  requestTimeoutMs,
+  Number(process.env.PEER_MONITOR_RSS_TIMEOUT_MS) || 60_000,
+);
 const maxItemsPerSource = Number(process.env.MAX_ITEMS_PER_SOURCE || 16);
 const maxTotalItems = Number(process.env.MAX_TOTAL_ITEMS || 80);
 const dailyCandidatePageSize = Math.max(50, Number(process.env.DAILY_CANDIDATE_PAGE_SIZE || 200));
@@ -1958,8 +1966,10 @@ async function listPeerProjects(competitorCode) {
   return { projects, countries };
 }
 
-async function listPeerArticles(competitorCode) {
-  const articles = (await mysqlJson(`
+async function listPeerArticles(competitorCode, { limit = 20, offset = 0 } = {}) {
+  const pageSize = Math.min(50, Math.max(1, Number(limit) || 20));
+  const pageOffset = Math.max(0, Number(offset) || 0);
+  const rows = (await mysqlJson(`
     SELECT COALESCE(JSON_ARRAYAGG(
       JSON_OBJECT(
         'id', id,
@@ -1999,10 +2009,12 @@ async function listPeerArticles(competitorCode) {
         AND s.enabled = 1
         AND s.source_type = 'wechat_rss'
       ORDER BY COALESCE(a.published_at, a.first_fetched_at) DESC, a.id DESC
-      LIMIT 100
+      LIMIT ${sqlNumber(pageSize + 1)}
+      OFFSET ${sqlNumber(pageOffset)}
     ) peer_articles;
   `)) || [];
-  return articles.map((article) => {
+  const hasMore = rows.length > pageSize;
+  const articles = rows.slice(0, pageSize).map((article) => {
     const competitorName = normalizePeerText(article.competitorName);
     const exposeOriginalName = (value) => {
       const text = normalizePeerText(value);
@@ -2018,6 +2030,11 @@ async function listPeerArticles(competitorCode) {
       hasFullContent: Boolean(article.hasFullContent && content),
     };
   });
+  return {
+    articles,
+    hasMore,
+    nextOffset: pageOffset + articles.length,
+  };
 }
 
 async function listPeerRssSources(competitorCode = "") {
@@ -2042,12 +2059,18 @@ async function listPeerRssSources(competitorCode = "") {
 }
 
 async function refreshPeerRssSource(source) {
-  const result = await fetchWithTimeout(source.privateUrl);
+  const result = await fetchWithTimeout(
+    source.privateUrl,
+    {},
+    peerRssTimeoutMs,
+  );
   if (!result.ok) {
     throw new Error(`RSS 返回 HTTP ${result.status}`);
   }
-  if (result.text.length > 8_000_000) {
-    throw new Error("RSS 内容超过 8 MB 安全上限");
+  const contentBytes = Buffer.byteLength(result.text, "utf8");
+  if (contentBytes > peerRssMaxBytes) {
+    const maxMegabytes = Math.round(peerRssMaxBytes / 1024 / 1024);
+    throw new Error(`RSS 内容超过 ${maxMegabytes} MB 安全上限`);
   }
 
   const items = parsePeerFeed(result.text, source.id);
@@ -2055,15 +2078,34 @@ async function refreshPeerRssSource(source) {
     throw new Error("RSS 中没有可识别的文章");
   }
 
-  const existingHashes = new Set((await mysqlJson(`
-    SELECT COALESCE(JSON_ARRAYAGG(dedupe_hash), JSON_ARRAY())
+  const existingRows = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'dedupeHash', dedupe_hash,
+        'hasFullContent', IF(
+          CHAR_LENGTH(TRIM(COALESCE(content_text, ''))) > 0,
+          CAST(TRUE AS JSON),
+          CAST(FALSE AS JSON)
+        )
+      )
+    ), JSON_ARRAY())
     FROM yimin_peer_articles
     WHERE source_id = ${sqlNumber(source.id)};
-  `)) || []);
-  const newItemCount = items.filter((item) => !existingHashes.has(item.dedupeHash)).length;
+  `)) || [];
+  const existingByHash = new Map(
+    existingRows.map((row) => [String(row.dedupeHash || ""), row]),
+  );
+  const newItems = items.filter((item) => !existingByHash.has(item.dedupeHash));
+  const contentBackfillItems = items.filter((item) => {
+    const existing = existingByHash.get(item.dedupeHash);
+    return existing && !existing.hasFullContent && Boolean(item.contentText.trim());
+  });
+  const itemsToWrite = [...newItems, ...contentBackfillItems];
+  const newItemCount = newItems.length;
+  const updatedItemCount = contentBackfillItems.length;
 
-  for (let offset = 0; offset < items.length; offset += 10) {
-    const chunk = items.slice(offset, offset + 10);
+  for (let offset = 0; offset < itemsToWrite.length; offset += 10) {
+    const chunk = itemsToWrite.slice(offset, offset + 10);
     await mysqlExec(`
       INSERT INTO yimin_peer_articles (
         source_id,
@@ -2119,7 +2161,7 @@ async function refreshPeerRssSource(source) {
   return {
     itemCount: items.length,
     newItemCount,
-    updatedItemCount: items.length - newItemCount,
+    updatedItemCount,
   };
 }
 
@@ -4871,9 +4913,13 @@ async function listEnabledSourcesForFetch() {
   }));
 }
 
-async function fetchWithTimeout(url, extraHeaders = {}) {
+async function fetchWithTimeout(
+  url,
+  extraHeaders = {},
+  timeoutMs = requestTimeoutMs,
+) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(url, {
@@ -11965,9 +12011,18 @@ const server = createServer(async (req, res) => {
         sendJson(res, 400, { ok: false, error: "competitor 参数无效" });
         return;
       }
+      const limit = Math.min(
+        50,
+        Math.max(1, Number.parseInt(url.searchParams.get("limit") || "20", 10) || 20),
+      );
+      const offset = Math.max(
+        0,
+        Number.parseInt(url.searchParams.get("offset") || "0", 10) || 0,
+      );
+      const payload = await listPeerArticles(competitorCode, { limit, offset });
       sendJson(res, 200, {
         ok: true,
-        articles: await listPeerArticles(competitorCode),
+        ...payload,
       });
       return;
     }

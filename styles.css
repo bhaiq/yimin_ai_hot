@@ -2166,6 +2166,23 @@ img {
   gap: 10px;
 }
 
+.peer-article-pagination {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 16px 0 0;
+}
+
+.peer-article-pagination .ghost-button {
+  min-width: 180px;
+}
+
+.peer-article-load-error {
+  margin: 0;
+  color: var(--red);
+  font-size: 12px;
+}
+
 .peer-project-card,
 .peer-article-card {
   border: 1px solid var(--line);
