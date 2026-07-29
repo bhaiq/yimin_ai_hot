@@ -11974,11 +11974,6 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === "/api/peer-monitor/refresh" && req.method === "POST") {
       await initDb();
-      const session = requireAuth(req);
-      if (!session && !isLoopbackRequest(req)) {
-        sendJson(res, 403, { ok: false, error: "无权刷新同行公众号" });
-        return;
-      }
       const competitorCode = String(url.searchParams.get("competitor") || "");
       if (competitorCode && !/^peer-[a-i]$/.test(competitorCode)) {
         sendJson(res, 400, { ok: false, error: "competitor 参数无效" });

@@ -60,10 +60,12 @@ http://127.0.0.1:4173
 - 页面访问仅允许企业微信直属部门为 IOD 或 MD 的用户，以及指定 UserID `fanrui`
 - 可通过 `PEER_MONITOR_USER_IDS` 和 `PEER_MONITOR_DEPARTMENT_NAMES` 追加逗号分隔的允许名单
 
-服务器本地定时任务可以直接请求刷新接口，无需 Token 或登录态：
+服务器本地或外部定时任务都可以直接请求刷新接口，无需 Token 或登录态：
 
 ```bash
 curl -X POST http://127.0.0.1:4173/api/peer-monitor/refresh
+# 或通过公网域名
+curl -X POST https://your-domain.example/api/peer-monitor/refresh
 ```
 
 该定时请求同时负责公众号新文章刷新和旧文章正文补抓，建议按小时执行。
@@ -74,7 +76,7 @@ curl -X POST http://127.0.0.1:4173/api/peer-monitor/refresh
 curl -X POST 'http://127.0.0.1:4173/api/peer-monitor/refresh?competitor=peer-h'
 ```
 
-无登录刷新只接受回环地址且 `Host` 为 `localhost`、`127.0.0.1` 或 `::1` 的请求；通过公开域名或反向代理访问时必须具有管理员登录态。
+刷新接口允许公网匿名调用，但同一服务进程同时只运行一个刷新任务；已有任务运行时会直接返回当前任务。建议在反向代理层配置合理的请求频率限制，避免接口被反复触发。
 
 后续替换或补充官网项目数据时，先生成匿名种子文件：
 
