@@ -14,8 +14,10 @@ H_COLUMN_AUTO_GENERATE=1
 H_COLUMN_DAILY_MAX_TOPICS=3
 H_COLUMN_MODEL=deepseek-v4-pro
 H_COLUMN_REVIEW_MODEL=deepseek-v4-pro
-H_COLUMN_PREGENERATE_MODES=wechat_article
+H_COLUMN_PREGENERATE_MODES=wechat_article,short_video,run_and_talk_video,deep_video
 H_COLUMN_PREGENERATE_CONCURRENCY=2
+H_COLUMN_PREGENERATE_MAX_ATTEMPTS=3
+H_COLUMN_PREGENERATE_RETRY_DELAY_MS=2000
 H_COLUMN_USER_IDS=fanrui
 H_COLUMN_EDITOR_USER_IDS=liangshuang
 H_COLUMN_DEPARTMENT_NAMES=IOD
@@ -35,7 +37,7 @@ H_COLUMN_DEPARTMENT_NAMES=IOD
 ## 3. 日常工作流
 
 1. 公共日报成功后，定时任务请求预生成接口；系统筛选 0—3 个 H 候选，没有合适内容时允许为 0。
-2. 系统自动选择默认候选、补充原文、生成大纲和公众号文章。重复请求默认复用文章；只有显式 `refresh=1` 才创建新版本。
+2. 系统自动选择默认候选、补充原文、生成大纲和四个渠道稿件。重复请求默认复用已有稿件并补齐缺失渠道；只有显式 `refresh=1` 才全部创建新版本。
 3. 编辑核对来源完整度、证据等级、政策状态，并显式标记人工核验。
 4. 任一 H 专栏成员输入并确认本次核心观点；历史观点可编辑或软删除。
 5. 生成一个或多个内容大纲，并在版本列表中选择本次要采用的大纲。
@@ -79,13 +81,15 @@ curl "http://127.0.0.1:4173/api/h/automation/pre-generate/status?date=2026-07-30
 
 - `date=YYYY-MM-DD`：默认上海时区当天；
 - `topicIds=12,13`：只处理指定日期的选题；
-- `modes=wechat_article,short_video`：默认读取 `H_COLUMN_PREGENERATE_MODES`；
+- `modes=wechat_article,short_video`：只生成指定渠道；默认同时生成四个渠道；
 - `limit=3`：不超过 `H_COLUMN_DAILY_MAX_TOPICS`；
 - `refreshTopics=1` / `refreshDrafts=1`：分别刷新候选或稿件；
 - `refresh=1`：同时刷新候选和稿件；
 - `sync=1`：同步等待，否则后台执行。
 
 同一天的并发请求会合并。状态结果保存在当前 Node 进程内；服务重启后状态回到 `idle`，已经写入数据库的稿件不会丢失。
+
+大纲和每个渠道默认最多尝试 3 次，间隔由 `H_COLUMN_PREGENERATE_RETRY_DELAY_MS` 控制。返回结果的 `attempts` 表示实际尝试次数，`recoveredAfterRetry=true` 表示该渠道在自动重试后恢复；超过最大次数仍失败时，批次返回 `207 partial_failed`，其他成功渠道继续保留，下一次普通请求只补失败或缺失渠道。
 
 ## 5. 最小验收
 

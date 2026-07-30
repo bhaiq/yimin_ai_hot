@@ -3582,7 +3582,7 @@ function renderHColumn() {
     hColumnDate.value = state.hDate;
   }
   if (state.hLoading && !state.hTopics.length && !state.hTopic) {
-    setHColumnMarkup('<div class="h-loading-card" role="status"><span class="h-pulse"></span><strong>正在准备今日选题与文章</strong><p>定时任务会提前生成默认选题的可编辑初稿，事实缺口仍会保留供人工核验。</p></div>');
+    setHColumnMarkup('<div class="h-loading-card" role="status"><span class="h-pulse"></span><strong>正在准备今日选题与四渠道稿件</strong><p>定时任务会提前生成公众号文章和三种视频稿，事实缺口仍会保留供人工核验。</p></div>');
     return;
   }
   if (state.hError && !state.hTopics.length && !state.hTopic) {
@@ -3613,7 +3613,7 @@ function renderHColumn() {
     const withDrafts = state.hTopics.filter((topic) => Number(topic.draftCount || topic.drafts?.length || 0) > 0);
     body = withDrafts.length
       ? `<div class="h-column-grid${state.hTopic ? " has-detail" : ""}"><div class="h-topic-rail">${withDrafts.map((topic) => renderHTopicCard(topic, true)).join("")}</div>${state.hTopic ? renderHTopicDetail(state.hTopic) : '<div class="h-empty-card">选择一份草稿继续处理。</div>'}</div>`
-      : '<div class="h-empty-card"><strong>草稿库为空</strong><p>定时预生成完成后，默认选题文章会出现在这里；也可以从今日候选手动生成。</p></div>';
+      : '<div class="h-empty-card"><strong>草稿库为空</strong><p>定时预生成完成后，默认选题的四渠道稿件会出现在这里；也可以从今日候选手动生成。</p></div>';
   } else {
     body = filteredTopics.length
       ? `<div class="h-column-grid${state.hTopic ? " has-detail" : ""}"><div class="h-topic-rail">${filteredTopics.map((topic) => renderHTopicCard(topic)).join("")}</div>${state.hTopic ? renderHTopicDetail(state.hTopic) : '<div class="h-empty-card h-detail-placeholder"><strong>选择一个候选</strong><p>查看事实包、确认观点并生成内容。</p></div>'}</div>`

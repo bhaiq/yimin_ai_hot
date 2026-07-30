@@ -62,11 +62,13 @@ const hColumnConfig = {
   maxTopics: Math.min(3, Math.max(1, Number(process.env.H_COLUMN_DAILY_MAX_TOPICS || 3))),
   model: process.env.H_COLUMN_MODEL || process.env.DEEPSEEK_MODEL || "deepseek-chat",
   reviewModel: process.env.H_COLUMN_REVIEW_MODEL || process.env.H_COLUMN_MODEL || process.env.DEEPSEEK_MODEL || "deepseek-chat",
-  preGenerateModes: String(process.env.H_COLUMN_PREGENERATE_MODES || "wechat_article")
+  preGenerateModes: String(process.env.H_COLUMN_PREGENERATE_MODES || "wechat_article,short_video,run_and_talk_video,deep_video")
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean),
   preGenerateConcurrency: Math.min(3, Math.max(1, Number(process.env.H_COLUMN_PREGENERATE_CONCURRENCY || 2))),
+  preGenerateMaxAttempts: Math.min(4, Math.max(1, Number(process.env.H_COLUMN_PREGENERATE_MAX_ATTEMPTS || 3))),
+  preGenerateRetryDelayMs: Math.min(10000, Math.max(0, Number(process.env.H_COLUMN_PREGENERATE_RETRY_DELAY_MS || 2000))),
   ownerUserIds: new Set(String(process.env.H_COLUMN_USER_IDS || "fanrui").split(",").map((value) => value.trim()).filter(Boolean)),
   editorUserIds: new Set(String(process.env.H_COLUMN_EDITOR_USER_IDS || "liangshuang").split(",").map((value) => value.trim()).filter(Boolean)),
   ownerNames: new Set(String(process.env.H_COLUMN_OWNER_NAMES || "Henry范睿,范睿").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean)),
@@ -10089,7 +10091,12 @@ function normalizeHPreGenerationModes(value) {
   const modes = source
     .map((item) => normalizeHMode(item, ""))
     .filter((mode) => mode && mode !== "outline");
-  return [...new Set(modes.length ? modes : ["wechat_article"])];
+  return [...new Set(modes.length ? modes : [
+    "wechat_article",
+    "short_video",
+    "run_and_talk_video",
+    "deep_video",
+  ])];
 }
 
 function normalizeHPreGenerationTopicIds(value) {
@@ -10112,6 +10119,71 @@ async function getLatestUsableHDraft(topicId, mode) {
     LIMIT 1;
   `);
   return row?.id ? getHDraft(row.id) : null;
+}
+
+function waitForHPreGenerationRetry(attempt) {
+  const delayMs = hColumnConfig.preGenerateRetryDelayMs * Math.max(1, attempt);
+  return delayMs > 0
+    ? new Promise((resolvePromise) => setTimeout(resolvePromise, delayMs))
+    : Promise.resolve();
+}
+
+async function generateHOutlineWithRetry(topicId, actor) {
+  let lastDraft = null;
+  for (let attempt = 1; attempt <= hColumnConfig.preGenerateMaxAttempts; attempt += 1) {
+    lastDraft = await generateHDraft(topicId, {
+      mode: "outline",
+      refresh: true,
+    }, actor);
+    if (lastDraft && !lastDraft.generationError) {
+      return {
+        draft: lastDraft,
+        attempts: attempt,
+      };
+    }
+    if (attempt < hColumnConfig.preGenerateMaxAttempts) {
+      await waitForHPreGenerationRetry(attempt);
+    }
+  }
+  const error = new Error(
+    lastDraft?.generationError
+      ? `大纲生成自动重试 ${hColumnConfig.preGenerateMaxAttempts} 次后仍失败：${lastDraft.generationError}`
+      : `大纲生成自动重试 ${hColumnConfig.preGenerateMaxAttempts} 次后仍未返回内容`,
+  );
+  error.code = "H_OUTLINE_GENERATION_FAILED";
+  throw error;
+}
+
+async function generateHChannelWithRetry(outlineId, mode, actor) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= hColumnConfig.preGenerateMaxAttempts; attempt += 1) {
+    try {
+      const draft = await generateHDraftFromReview(outlineId, {
+        fromOutline: true,
+        mode,
+      }, actor);
+      return {
+        mode,
+        id: Number(draft.id),
+        versionNo: Number(draft.versionNo),
+        created: true,
+        attempts: attempt,
+        recoveredAfterRetry: attempt > 1,
+      };
+    } catch (error) {
+      lastError = error;
+      if (attempt < hColumnConfig.preGenerateMaxAttempts) {
+        await waitForHPreGenerationRetry(attempt);
+      }
+    }
+  }
+  return {
+    mode,
+    created: false,
+    attempts: hColumnConfig.preGenerateMaxAttempts,
+    error: lastError instanceof Error ? lastError.message : String(lastError),
+    code: lastError?.code || "",
+  };
 }
 
 async function preGenerateHTopicArticles(
@@ -10164,6 +10236,8 @@ async function preGenerateHTopicArticles(
           id: Number(existingDrafts.get(mode).id),
           versionNo: Number(existingDrafts.get(mode).versionNo),
           created: false,
+          attempts: 0,
+          recoveredAfterRetry: false,
         })),
       };
     }
@@ -10187,11 +10261,11 @@ async function preGenerateHTopicArticles(
   }
 
   let outline = refreshDrafts ? null : await getLatestUsableHDraft(topic.id, "outline");
+  let outlineAttempts = 0;
   if (!outline) {
-    outline = await generateHDraft(topic.id, {
-      mode: "outline",
-      refresh: refreshDrafts,
-    }, actor);
+    const outlineResult = await generateHOutlineWithRetry(topic.id, actor);
+    outline = outlineResult.draft;
+    outlineAttempts = outlineResult.attempts;
   }
   if (!outline) {
     throw new Error("大纲生成失败");
@@ -10205,38 +10279,27 @@ async function preGenerateHTopicArticles(
         id: Number(existing.id),
         versionNo: Number(existing.versionNo),
         created: false,
+        attempts: 0,
+        recoveredAfterRetry: false,
       };
     }
-    try {
-      const draft = await generateHDraftFromReview(outline.id, {
-        fromOutline: true,
-        mode,
-      }, actor);
-      return {
-        mode,
-        id: Number(draft.id),
-        versionNo: Number(draft.versionNo),
-        created: true,
-      };
-    } catch (error) {
-      return {
-        mode,
-        created: false,
-        error: error instanceof Error ? error.message : String(error),
-        code: error?.code || "",
-      };
-    }
+    return generateHChannelWithRetry(outline.id, mode, actor);
   });
   const failedCount = draftResults.filter((draft) => draft.error).length;
   const createdCount = draftResults.filter((draft) => draft.created).length;
+  const retriedCount = draftResults.filter((draft) => Number(draft.attempts || 0) > 1).length;
   return {
     topicId: Number(topic.id),
     title: topic.title,
     status: failedCount
       ? (failedCount === draftResults.length ? "failed" : "partial_failed")
       : (createdCount ? "generated" : "existing"),
-    reason: failedCount ? "部分或全部文章生成失败，可用 refresh=1 重试" : "",
+    reason: failedCount
+      ? `部分或全部渠道自动重试 ${hColumnConfig.preGenerateMaxAttempts} 次后仍失败，可再次请求补跑`
+      : "",
     outlineDraftId: Number(outline.id),
+    outlineAttempts,
+    retriedChannelCount: retriedCount,
     drafts: draftResults,
   };
 }
@@ -10305,6 +10368,10 @@ async function preGenerateHArticles({
     .flatMap((item) => item.drafts || [])
     .filter((draft) => !draft.created && !draft.error && draft.id)
     .length;
+  const retriedChannelCount = results
+    .flatMap((item) => item.drafts || [])
+    .filter((draft) => Number(draft.attempts || 0) > 1)
+    .length;
   const result = {
     ok: failedTopicCount === 0,
     date,
@@ -10315,6 +10382,7 @@ async function preGenerateHArticles({
     requestedTopicCount: topics.length,
     generatedArticleCount,
     existingArticleCount,
+    retriedChannelCount,
     skippedTopicCount,
     failedTopicCount,
     startedAt,
@@ -10328,6 +10396,7 @@ async function preGenerateHArticles({
     requestedTopicCount: topics.length,
     generatedArticleCount,
     existingArticleCount,
+    retriedChannelCount,
     skippedTopicCount,
     failedTopicCount,
   });

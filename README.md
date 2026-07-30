@@ -131,8 +131,10 @@ H_COLUMN_AUTO_GENERATE=1
 H_COLUMN_DAILY_MAX_TOPICS=3
 H_COLUMN_MODEL=deepseek-v4-pro
 H_COLUMN_REVIEW_MODEL=deepseek-v4-pro
-H_COLUMN_PREGENERATE_MODES=wechat_article
+H_COLUMN_PREGENERATE_MODES=wechat_article,short_video,run_and_talk_video,deep_video
 H_COLUMN_PREGENERATE_CONCURRENCY=2
+H_COLUMN_PREGENERATE_MAX_ATTEMPTS=3
+H_COLUMN_PREGENERATE_RETRY_DELAY_MS=2000
 H_COLUMN_USER_IDS=fanrui
 H_COLUMN_EDITOR_USER_IDS=liangshuang
 H_COLUMN_DEPARTMENT_NAMES=IOD
@@ -154,7 +156,7 @@ curl -X POST "http://127.0.0.1:4173/api/h/automation/pre-generate?sync=1"
 curl -X POST "http://127.0.0.1:4173/api/h/automation/pre-generate?sync=1&refresh=1"
 ```
 
-接口还支持 `date=YYYY-MM-DD`、`topicIds=12,13`、`modes=wechat_article,short_video` 和 `limit=3`。重复请求会按日期合并；不传 `refresh=1` 时复用已有可编辑文章，避免定时任务重复创建版本。自动生成只产出待审草稿，不自动标记事实已核验、不自动通过四层审校，也不直接发布。
+接口默认同时生成公众号文章、H快评、H边跑边聊和 H深聊，也支持通过 `modes` 只跑指定渠道。每个大纲和渠道最多自动尝试 `H_COLUMN_PREGENERATE_MAX_ATTEMPTS` 次，已成功渠道会保留，失败渠道不会影响其他结果。接口还支持 `date=YYYY-MM-DD`、`topicIds=12,13` 和 `limit=3`。重复请求会按日期合并；不传 `refresh=1` 时复用已有可编辑稿件，只补缺失渠道。自动生成只产出待审草稿，不自动标记事实已核验、不自动通过四层审校，也不直接发布。
 
 P0 只写系统日志，不发送企业微信通知，也不直接发布到公众号或视频号。详细产品约束见 `docs/henry-column-prd.md`，部署、验证和故障处理见 `docs/henry-column-operations.md`。
 
