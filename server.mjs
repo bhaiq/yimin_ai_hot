@@ -62,6 +62,11 @@ const hColumnConfig = {
   maxTopics: Math.min(3, Math.max(1, Number(process.env.H_COLUMN_DAILY_MAX_TOPICS || 3))),
   model: process.env.H_COLUMN_MODEL || process.env.DEEPSEEK_MODEL || "deepseek-chat",
   reviewModel: process.env.H_COLUMN_REVIEW_MODEL || process.env.H_COLUMN_MODEL || process.env.DEEPSEEK_MODEL || "deepseek-chat",
+  preGenerateModes: String(process.env.H_COLUMN_PREGENERATE_MODES || "wechat_article")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean),
+  preGenerateConcurrency: Math.min(3, Math.max(1, Number(process.env.H_COLUMN_PREGENERATE_CONCURRENCY || 2))),
   ownerUserIds: new Set(String(process.env.H_COLUMN_USER_IDS || "fanrui").split(",").map((value) => value.trim()).filter(Boolean)),
   editorUserIds: new Set(String(process.env.H_COLUMN_EDITOR_USER_IDS || "liangshuang").split(",").map((value) => value.trim()).filter(Boolean)),
   ownerNames: new Set(String(process.env.H_COLUMN_OWNER_NAMES || "Henry范睿,范睿").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean)),
@@ -7975,6 +7980,15 @@ function isDailyReportGenerationRunning(date, { windowMode = "calendar", languag
 
 let hContentProfileCache = null;
 const hTopicGenerationPromises = new Map();
+const hArticlePreGenerationPromises = new Map();
+const hArticlePreGenerationResults = new Map();
+const hAutomationActor = Object.freeze({
+  id: "automation:h-column",
+  name: "H 专栏定时任务",
+  source: "automation",
+  role: "system",
+  confirmationType: "unconfirmed",
+});
 
 async function saveHAuditLog(entityType, entityId, action, actor, metadata = {}) {
   const normalizedActor = actor || {
@@ -10060,6 +10074,305 @@ async function generateHDraftFromReview(draftId, data = {}, actor) {
   return getHDraft(row?.id);
 }
 
+function parseHAutomationBoolean(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  if (value === undefined || value === null || value === "") return fallback;
+  return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
+}
+
+function normalizeHPreGenerationModes(value) {
+  const requested = Array.isArray(value)
+    ? value
+    : String(value || "").split(",");
+  const configured = requested.map((item) => String(item || "").trim()).filter(Boolean);
+  const source = configured.length ? configured : hColumnConfig.preGenerateModes;
+  const modes = source
+    .map((item) => normalizeHMode(item, ""))
+    .filter((mode) => mode && mode !== "outline");
+  return [...new Set(modes.length ? modes : ["wechat_article"])];
+}
+
+function normalizeHPreGenerationTopicIds(value) {
+  const values = Array.isArray(value) ? value : String(value || "").split(",");
+  return [...new Set(values
+    .map((item) => Number(item))
+    .filter((item) => Number.isInteger(item) && item > 0))]
+    .slice(0, hColumnConfig.maxTopics);
+}
+
+async function getLatestUsableHDraft(topicId, mode) {
+  const row = await mysqlJson(`
+    SELECT JSON_OBJECT('id', id)
+    FROM yimin_h_drafts
+    WHERE topic_id = ${sqlNumber(topicId)}
+      AND mode = ${sqlString(mode)}
+      AND status <> 'failed'
+      AND generation_error IS NULL
+    ORDER BY id DESC
+    LIMIT 1;
+  `);
+  return row?.id ? getHDraft(row.id) : null;
+}
+
+async function preGenerateHTopicArticles(
+  topic,
+  {
+    modes,
+    refreshDrafts = false,
+    actor = hAutomationActor,
+  } = {},
+) {
+  const requestedModes = normalizeHPreGenerationModes(modes);
+  if (["later", "rejected", "archived"].includes(topic.status)) {
+    return {
+      topicId: Number(topic.id),
+      title: topic.title,
+      status: "skipped",
+      reason: `选题状态为 ${topic.status}，保留人工决定`,
+      outlineDraftId: null,
+      drafts: [],
+    };
+  }
+  if (topic.readiness === "not_recommended") {
+    return {
+      topicId: Number(topic.id),
+      title: topic.title,
+      status: "skipped",
+      reason: "H 四问仅满足 0—1 项，暂不自动成稿",
+      outlineDraftId: null,
+      drafts: [],
+    };
+  }
+
+  const existingDrafts = new Map();
+  if (!refreshDrafts) {
+    const rows = await Promise.all(
+      requestedModes.map(async (mode) => [mode, await getLatestUsableHDraft(topic.id, mode)]),
+    );
+    rows.forEach(([mode, draft]) => {
+      if (draft) existingDrafts.set(mode, draft);
+    });
+    if (existingDrafts.size === requestedModes.length) {
+      return {
+        topicId: Number(topic.id),
+        title: topic.title,
+        status: "existing",
+        reason: "已存在可编辑文章版本",
+        outlineDraftId: null,
+        drafts: requestedModes.map((mode) => ({
+          mode,
+          id: Number(existingDrafts.get(mode).id),
+          versionNo: Number(existingDrafts.get(mode).versionNo),
+          created: false,
+        })),
+      };
+    }
+  }
+
+  const preparedTopic = topic.status === "selected"
+    ? await fetchHTopicEvidence(topic.id, actor)
+    : await updateHTopic(topic.id, { status: "selected" }, actor);
+  if (!preparedTopic) {
+    throw new Error("选题不存在");
+  }
+  if (preparedTopic.readiness === "not_recommended") {
+    return {
+      topicId: Number(topic.id),
+      title: topic.title,
+      status: "skipped",
+      reason: "补充事实后仍不满足自动成稿条件",
+      outlineDraftId: null,
+      drafts: [],
+    };
+  }
+
+  let outline = refreshDrafts ? null : await getLatestUsableHDraft(topic.id, "outline");
+  if (!outline) {
+    outline = await generateHDraft(topic.id, {
+      mode: "outline",
+      refresh: refreshDrafts,
+    }, actor);
+  }
+  if (!outline) {
+    throw new Error("大纲生成失败");
+  }
+
+  const draftResults = await runWithConcurrency(requestedModes, 2, async (mode) => {
+    const existing = existingDrafts.get(mode);
+    if (existing && !refreshDrafts) {
+      return {
+        mode,
+        id: Number(existing.id),
+        versionNo: Number(existing.versionNo),
+        created: false,
+      };
+    }
+    try {
+      const draft = await generateHDraftFromReview(outline.id, {
+        fromOutline: true,
+        mode,
+      }, actor);
+      return {
+        mode,
+        id: Number(draft.id),
+        versionNo: Number(draft.versionNo),
+        created: true,
+      };
+    } catch (error) {
+      return {
+        mode,
+        created: false,
+        error: error instanceof Error ? error.message : String(error),
+        code: error?.code || "",
+      };
+    }
+  });
+  const failedCount = draftResults.filter((draft) => draft.error).length;
+  const createdCount = draftResults.filter((draft) => draft.created).length;
+  return {
+    topicId: Number(topic.id),
+    title: topic.title,
+    status: failedCount
+      ? (failedCount === draftResults.length ? "failed" : "partial_failed")
+      : (createdCount ? "generated" : "existing"),
+    reason: failedCount ? "部分或全部文章生成失败，可用 refresh=1 重试" : "",
+    outlineDraftId: Number(outline.id),
+    drafts: draftResults,
+  };
+}
+
+async function preGenerateHArticles({
+  date = getShanghaiDate(),
+  topicIds = [],
+  modes = hColumnConfig.preGenerateModes,
+  limit = hColumnConfig.maxTopics,
+  refreshTopics = false,
+  refreshDrafts = false,
+  actor = hAutomationActor,
+} = {}) {
+  await initDb();
+  const normalizedTopicIds = normalizeHPreGenerationTopicIds(topicIds);
+  const normalizedModes = normalizeHPreGenerationModes(modes);
+  const safeLimit = Math.min(
+    hColumnConfig.maxTopics,
+    Math.max(1, Number(limit) || hColumnConfig.maxTopics),
+  );
+  let sourceTopics;
+  if (normalizedTopicIds.length) {
+    sourceTopics = (await Promise.all(normalizedTopicIds.map((topicId) => getHTopicBase(topicId))))
+      .filter(Boolean)
+      .filter((topic) => topic.date === date);
+  } else {
+    sourceTopics = await generateHTopics(date, {
+      refresh: refreshTopics,
+      actor,
+    });
+  }
+  const topics = sourceTopics
+    .filter((topic) => ["candidate", "selected", "later", "rejected"].includes(topic.status))
+    .slice(0, safeLimit);
+  const startedAt = formatShanghaiDateTimeISO(new Date());
+  const results = await runWithConcurrency(
+    topics,
+    hColumnConfig.preGenerateConcurrency,
+    async (topic) => {
+      try {
+        return await preGenerateHTopicArticles(topic, {
+          modes: normalizedModes,
+          refreshDrafts,
+          actor,
+        });
+      } catch (error) {
+        return {
+          topicId: Number(topic.id),
+          title: topic.title,
+          status: "failed",
+          reason: error instanceof Error ? error.message : String(error),
+          code: error?.code || "",
+          outlineDraftId: null,
+          drafts: [],
+        };
+      }
+    },
+  );
+  const failedTopicCount = results.filter((item) => ["failed", "partial_failed"].includes(item.status)).length;
+  const skippedTopicCount = results.filter((item) => item.status === "skipped").length;
+  const generatedArticleCount = results
+    .flatMap((item) => item.drafts || [])
+    .filter((draft) => draft.created && !draft.error)
+    .length;
+  const existingArticleCount = results
+    .flatMap((item) => item.drafts || [])
+    .filter((draft) => !draft.created && !draft.error && draft.id)
+    .length;
+  const result = {
+    ok: failedTopicCount === 0,
+    date,
+    status: failedTopicCount ? "partial_failed" : "completed",
+    modes: normalizedModes,
+    refreshTopics,
+    refreshDrafts,
+    requestedTopicCount: topics.length,
+    generatedArticleCount,
+    existingArticleCount,
+    skippedTopicCount,
+    failedTopicCount,
+    startedAt,
+    finishedAt: formatShanghaiDateTimeISO(new Date()),
+    topics: results,
+  };
+  await saveHAuditLog("topic_date", date, "articles.pre_generate", actor, {
+    modes: normalizedModes,
+    refreshTopics,
+    refreshDrafts,
+    requestedTopicCount: topics.length,
+    generatedArticleCount,
+    existingArticleCount,
+    skippedTopicCount,
+    failedTopicCount,
+  });
+  return result;
+}
+
+function startHArticlePreGenerationInBackground(date, options = {}) {
+  if (hArticlePreGenerationPromises.has(date)) {
+    return hArticlePreGenerationPromises.get(date);
+  }
+  hArticlePreGenerationResults.set(date, {
+    ok: true,
+    date,
+    status: "running",
+    running: true,
+    startedAt: formatShanghaiDateTimeISO(new Date()),
+  });
+  const promise = preGenerateHArticles({ ...options, date })
+    .then((result) => {
+      hArticlePreGenerationResults.set(date, { ...result, running: false });
+      return result;
+    })
+    .catch((error) => {
+      const result = {
+        ok: false,
+        date,
+        status: "failed",
+        running: false,
+        error: error instanceof Error ? error.message : String(error),
+        code: error?.code || "",
+        finishedAt: formatShanghaiDateTimeISO(new Date()),
+      };
+      hArticlePreGenerationResults.set(date, result);
+      console.error(`H article pre-generation failed for ${date}:`, result.error);
+      return result;
+    })
+    .finally(() => hArticlePreGenerationPromises.delete(date));
+  hArticlePreGenerationPromises.set(date, promise);
+  return promise;
+}
+
+function isHArticlePreGenerationRunning(date) {
+  return hArticlePreGenerationPromises.has(date);
+}
+
 function buildHReviewPrompt(topic, draft, sources, viewpoints, profile, recentTopics) {
   return `请对 Henry 内容草稿执行四层发布前质检，只返回严格 JSON 对象。
 
@@ -10399,8 +10712,97 @@ function sendHApiError(res, error) {
   });
 }
 
+async function handleHColumnAutomationApi(req, res, url) {
+  const generatePath = "/api/h/automation/pre-generate";
+  const statusPath = "/api/h/automation/pre-generate/status";
+  if (![generatePath, statusPath].includes(url.pathname)) return false;
+  if (!hColumnConfig.enabled) {
+    sendJson(res, 503, { ok: false, error: "H 专栏未启用" });
+    return true;
+  }
+
+  const date = String(url.searchParams.get("date") || getShanghaiDate());
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    sendJson(res, 400, { ok: false, error: "date must use YYYY-MM-DD" });
+    return true;
+  }
+
+  if (url.pathname === statusPath) {
+    if (req.method !== "GET") {
+      sendJson(res, 405, { ok: false, error: "Method not allowed" });
+      return true;
+    }
+    const lastResult = hArticlePreGenerationResults.get(date) || null;
+    sendJson(res, 200, {
+      ok: true,
+      date,
+      running: isHArticlePreGenerationRunning(date),
+      status: isHArticlePreGenerationRunning(date)
+        ? "running"
+        : (lastResult?.status || "idle"),
+      result: lastResult,
+    });
+    return true;
+  }
+
+  if (req.method !== "POST") {
+    sendJson(res, 405, { ok: false, error: "Method not allowed" });
+    return true;
+  }
+  const body = await readOptionalJsonOrFormBody(req);
+  const requestDate = String(body.date || date);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(requestDate)) {
+    sendJson(res, 400, { ok: false, error: "date must use YYYY-MM-DD" });
+    return true;
+  }
+  const refresh = parseHAutomationBoolean(body.refresh ?? url.searchParams.get("refresh"));
+  const refreshTopics = parseHAutomationBoolean(
+    body.refreshTopics ?? url.searchParams.get("refreshTopics"),
+    refresh,
+  );
+  const refreshDrafts = parseHAutomationBoolean(
+    body.refreshDrafts ?? url.searchParams.get("refreshDrafts"),
+    refresh,
+  );
+  const sync = parseHAutomationBoolean(body.sync ?? url.searchParams.get("sync"));
+  const topicIds = body.topicIds ?? body.topicId ?? url.searchParams.get("topicIds") ?? url.searchParams.get("topicId");
+  const modes = body.modes ?? body.mode ?? url.searchParams.get("modes") ?? url.searchParams.get("mode");
+  const limit = body.limit ?? url.searchParams.get("limit") ?? hColumnConfig.maxTopics;
+  const alreadyRunning = isHArticlePreGenerationRunning(requestDate);
+  const promise = startHArticlePreGenerationInBackground(requestDate, {
+    topicIds,
+    modes,
+    limit,
+    refreshTopics,
+    refreshDrafts,
+    actor: hAutomationActor,
+  });
+
+  if (!sync) {
+    sendJson(res, 202, {
+      ok: true,
+      date: requestDate,
+      running: true,
+      status: alreadyRunning ? "running" : "queued",
+      modes: normalizeHPreGenerationModes(modes),
+      message: "H 专栏文章预生成已在后台开始；重复调用默认复用已有版本，传 refresh=1 可重新生成新版本。",
+      statusUrl: `/api/h/automation/pre-generate/status?date=${encodeURIComponent(requestDate)}`,
+    });
+    return true;
+  }
+
+  const result = await promise;
+  if (!result.ok && result.error) {
+    sendJson(res, result.code === "H_DAILY_MISSING" ? 409 : 500, result);
+    return true;
+  }
+  sendJson(res, result.failedTopicCount ? 207 : 200, result);
+  return true;
+}
+
 async function handleHColumnApi(req, res, url) {
   if (!url.pathname.startsWith("/api/h/")) return false;
+  if (await handleHColumnAutomationApi(req, res, url)) return true;
   const actor = await getHColumnActor(req);
   if (!actor) {
     sendJson(res, 403, {

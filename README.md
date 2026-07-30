@@ -22,7 +22,7 @@ http://127.0.0.1:4173
 
 - 深色侧栏信息流界面
 - 精选热点、全部动态、移民日报、政策雷达
-- H 专栏：从公共日报生成 0—3 个 Henry 候选，经事实包、授权观点、草稿版本和四层审校后再由本人或授权编辑采用
+- H 专栏：从公共日报生成 0—3 个 Henry 候选，并可由无鉴权定时接口提前生成可编辑文章；事实包、版本和四层审校继续保留
 - 市场素材：按“今日新增 / 延续关注 / 无新增项目 / 不建议重复发布”生成素材日报
 - 分类筛选和关键词搜索
 - 实时 RSS 抓取 API：`/api/news`
@@ -104,13 +104,13 @@ npm run peer:seed -- /path/to/all_companies_projects.json data/peer-monitor-proj
 
 ## H 专栏
 
-`#h-column` 是 Henry 的文章与视频内容工作台，使用「Henry 文章与视频写作」Skill。它不是另一份自动日报，也不会每天强制生成文章。
+`#h-column` 是 Henry 的文章与视频内容工作台，使用「Henry 文章与视频写作」Skill。公共日报完成后，定时任务可以提前为默认候选生成可编辑文章；事实不足、观点待确认和发布前审校不会因自动生成而被跳过。
 
 核心流程：
 
 1. 公共日报生成后，系统自动筛出 0—3 个 H 候选；
-2. 任一 H 专栏成员选择“值得写”；
-3. 选择“值得写”后，系统自动复用日报来源并补全文；只有未抓取成功的来源才显示重试入口，编辑仍可补充来源、设置证据等级和政策状态、标记人工核验；
+2. 定时任务调用公开预生成接口后，系统自动选择合适的默认候选、复用日报来源并补全文；
+3. 系统先生成内容大纲，再为每个默认候选生成公众号文章；已有文章默认复用，`refresh=1` 才创建新版本；
 4. H 四问、事实与观点状态用于提示缺口，不阻断按大纲生成渠道稿；未满足项会在四层审校中阻断最终采用；
 5. 生成并选择一个内容大纲后，即可一键并行生成公众号文章、H快评、H边跑边聊和 H深聊；
 6. 四个渠道从所选大纲、当前事实包和已确认观点独立组织，不把文章机械缩写成视频稿；
@@ -131,12 +131,30 @@ H_COLUMN_AUTO_GENERATE=1
 H_COLUMN_DAILY_MAX_TOPICS=3
 H_COLUMN_MODEL=deepseek-v4-pro
 H_COLUMN_REVIEW_MODEL=deepseek-v4-pro
+H_COLUMN_PREGENERATE_MODES=wechat_article
+H_COLUMN_PREGENERATE_CONCURRENCY=2
 H_COLUMN_USER_IDS=fanrui
 H_COLUMN_EDITOR_USER_IDS=liangshuang
 H_COLUMN_DEPARTMENT_NAMES=IOD
 ```
 
-H 专栏采用单一权限模型：Henry、Celine、直属部门名称匹配 `H_COLUMN_DEPARTMENT_NAMES` 的成员（默认 IOD 部门）和系统管理员权限完全相同。能看到菜单就能使用全部 H 专栏功能；其他人看不到菜单，且 `/api/h/*` 返回 `403`。
+H 专栏采用单一权限模型：Henry、Celine、直属部门名称匹配 `H_COLUMN_DEPARTMENT_NAMES` 的成员（默认 IOD 部门）和系统管理员权限完全相同。能看到菜单就能使用全部 H 专栏功能；其他人看不到菜单，且普通 `/api/h/*` 返回 `403`。定时任务专用的 `/api/h/automation/pre-generate` 与状态接口按部署要求明确不做身份校验。
+
+定时预生成默认异步返回 `202`，适合由 cron 或其他调度器直接请求：
+
+```bash
+curl -X POST "http://127.0.0.1:4173/api/h/automation/pre-generate"
+curl "http://127.0.0.1:4173/api/h/automation/pre-generate/status?date=2026-07-30"
+```
+
+需要同步等待结果时使用 `sync=1`；需要重新生成候选、大纲和文章的新版本时使用 `refresh=1`：
+
+```bash
+curl -X POST "http://127.0.0.1:4173/api/h/automation/pre-generate?sync=1"
+curl -X POST "http://127.0.0.1:4173/api/h/automation/pre-generate?sync=1&refresh=1"
+```
+
+接口还支持 `date=YYYY-MM-DD`、`topicIds=12,13`、`modes=wechat_article,short_video` 和 `limit=3`。重复请求会按日期合并；不传 `refresh=1` 时复用已有可编辑文章，避免定时任务重复创建版本。自动生成只产出待审草稿，不自动标记事实已核验、不自动通过四层审校，也不直接发布。
 
 P0 只写系统日志，不发送企业微信通知，也不直接发布到公众号或视频号。详细产品约束见 `docs/henry-column-prd.md`，部署、验证和故障处理见 `docs/henry-column-operations.md`。
 

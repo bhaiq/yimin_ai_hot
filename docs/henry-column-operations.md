@@ -14,6 +14,8 @@ H_COLUMN_AUTO_GENERATE=1
 H_COLUMN_DAILY_MAX_TOPICS=3
 H_COLUMN_MODEL=deepseek-v4-pro
 H_COLUMN_REVIEW_MODEL=deepseek-v4-pro
+H_COLUMN_PREGENERATE_MODES=wechat_article
+H_COLUMN_PREGENERATE_CONCURRENCY=2
 H_COLUMN_USER_IDS=fanrui
 H_COLUMN_EDITOR_USER_IDS=liangshuang
 H_COLUMN_DEPARTMENT_NAMES=IOD
@@ -25,14 +27,15 @@ H_COLUMN_DEPARTMENT_NAMES=IOD
 
 - `fanrui / Henry范睿`、`liangshuang / Celine梁爽`、IOD 部门直属成员和系统管理员采用同一权限；
 - 能看到 H 菜单的成员可以使用候选、事实包、观点确认、草稿、审校、退回和最终采用等全部功能；
-- 其他用户：`/api/h/*` 返回 `403`。
+- 其他用户：普通 `/api/h/*` 返回 `403`。
+- `/api/h/automation/pre-generate` 和 `/api/h/automation/pre-generate/status` 专供定时任务使用，按部署要求不校验登录态、签名或令牌。
 
 所有 H 写操作仍记录真实操作者。P0 不发送企业微信通知，也不直接发布内容。
 
 ## 3. 日常工作流
 
-1. 公共日报成功后，后台生成 0—3 个 H 候选；没有合适内容时允许为 0。
-2. 任一 H 专栏成员选择“值得写”后，系统立即自动补充原文；只有未抓取成功的来源才需要在事实包中点击重试。
+1. 公共日报成功后，定时任务请求预生成接口；系统筛选 0—3 个 H 候选，没有合适内容时允许为 0。
+2. 系统自动选择默认候选、补充原文、生成大纲和公众号文章。重复请求默认复用文章；只有显式 `refresh=1` 才创建新版本。
 3. 编辑核对来源完整度、证据等级、政策状态，并显式标记人工核验。
 4. 任一 H 专栏成员输入并确认本次核心观点；历史观点可编辑或软删除。
 5. 生成一个或多个内容大纲，并在版本列表中选择本次要采用的大纲。
@@ -46,7 +49,45 @@ H_COLUMN_DEPARTMENT_NAMES=IOD
 
 H 专栏页面地址为 `/#h-column`。当日公共日报缺失时，候选生成返回 `409`，应先生成公共日报。
 
-## 4. 最小验收
+## 4. 定时任务接口
+
+后台异步生成，立即返回 `202`：
+
+```bash
+curl -X POST "http://127.0.0.1:4173/api/h/automation/pre-generate"
+```
+
+同步等待并取得逐选题结果：
+
+```bash
+curl -X POST "http://127.0.0.1:4173/api/h/automation/pre-generate?sync=1"
+```
+
+强制重新生成候选、大纲和文章版本：
+
+```bash
+curl -X POST "http://127.0.0.1:4173/api/h/automation/pre-generate?sync=1&refresh=1"
+```
+
+查询当前进程内最近一次运行状态：
+
+```bash
+curl "http://127.0.0.1:4173/api/h/automation/pre-generate/status?date=2026-07-30"
+```
+
+可选参数：
+
+- `date=YYYY-MM-DD`：默认上海时区当天；
+- `topicIds=12,13`：只处理指定日期的选题；
+- `modes=wechat_article,short_video`：默认读取 `H_COLUMN_PREGENERATE_MODES`；
+- `limit=3`：不超过 `H_COLUMN_DAILY_MAX_TOPICS`；
+- `refreshTopics=1` / `refreshDrafts=1`：分别刷新候选或稿件；
+- `refresh=1`：同时刷新候选和稿件；
+- `sync=1`：同步等待，否则后台执行。
+
+同一天的并发请求会合并。状态结果保存在当前 Node 进程内；服务重启后状态回到 `idle`，已经写入数据库的稿件不会丢失。
+
+## 5. 最小验收
 
 先执行静态检查：
 
@@ -73,7 +114,7 @@ npm run check
 
 同时回归 `/api/health`、`/api/daily` 和 `/api/market`，确认现有功能未受影响。
 
-## 5. 常见故障
+## 6. 常见故障
 
 | 现象 | 原因与处理 |
 |---|---|
@@ -88,7 +129,7 @@ npm run check
 | DeepSeek 生成失败 | 草稿会保存带警示的降级版本，运行记录标为失败；输入不会丢失，可点击“重试完整生成”创建新版本 |
 | 未授权用户能看到菜单但打不开 | API 仍会拒绝；检查企业微信 UserID 白名单是否准确 |
 
-## 6. 数据与恢复
+## 7. 数据与恢复
 
 H 数据保存在 `yimin_h_*` 八张表中。来源删除使用软删除；草稿编辑创建新版本，不覆盖旧版本。候选刷新会归档过期的系统候选，但不会覆盖已选择、暂缓或拒绝的人工决定。
 
