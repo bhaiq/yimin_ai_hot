@@ -2989,6 +2989,53 @@ async function loadPeerMonitorAccess() {
   }
 }
 
+function getPeerArticleClientKeys(article) {
+  const keys = [];
+  const id = Number(article?.id);
+  if (Number.isSafeInteger(id) && id > 0) keys.push(`id:${id}`);
+
+  const rawUrl = String(article?.url || "").trim();
+  if (rawUrl) {
+    try {
+      const url = new URL(rawUrl, window.location.href);
+      url.hash = "";
+      url.hostname = url.hostname.toLowerCase();
+      url.pathname = url.pathname.replace(/\/{2,}/g, "/").replace(/\/+$/, "") || "/";
+      for (const key of [...url.searchParams.keys()]) {
+        if (
+          /^utm_/i.test(key)
+          || ["from", "scene", "share", "clicktime", "enterid", "sessionid"].includes(key.toLowerCase())
+        ) {
+          url.searchParams.delete(key);
+        }
+      }
+      url.searchParams.sort();
+      keys.push(`url:${url.toString().replace(/\/$/, "")}`);
+    } catch {
+      // Invalid URLs still fall back to title and publication time below.
+    }
+  }
+
+  const title = String(article?.title || "").replace(/\s+/g, " ").trim().toLowerCase();
+  const publishedAt = String(article?.publishedAt || "");
+  const publishedDate = publishedAt ? new Date(publishedAt) : null;
+  const publishedMinute = publishedDate && !Number.isNaN(publishedDate.getTime())
+    ? publishedDate.toISOString().slice(0, 16)
+    : "";
+  if (title && publishedMinute) keys.push(`title-date:${title}\n${publishedMinute}`);
+  return keys;
+}
+
+function dedupePeerArticles(articles) {
+  const seen = new Set();
+  return (Array.isArray(articles) ? articles : []).filter((article) => {
+    const keys = getPeerArticleClientKeys(article);
+    if (keys.some((key) => seen.has(key))) return false;
+    for (const key of keys) seen.add(key);
+    return true;
+  });
+}
+
 async function loadPeerCompetitorData() {
   if (!state.peerMonitorAccess || window.location.protocol === "file:") return;
   const competitorCode = state.peerSelectedCode;
@@ -3026,7 +3073,7 @@ async function loadPeerCompetitorData() {
 
     state.peerProjects = projectsData.projects || [];
     state.peerProjectCountries = projectsData.countries || [];
-    state.peerArticles = articlesData.articles || [];
+    state.peerArticles = dedupePeerArticles(articlesData.articles);
     state.peerArticlesHasMore = Boolean(articlesData.hasMore);
     state.peerArticlesNextOffset = Number(
       articlesData.nextOffset ?? state.peerArticles.length,
@@ -3071,10 +3118,10 @@ async function loadMorePeerArticles() {
     }
     if (state.peerSelectedCode !== competitorCode) return;
 
-    const existingIds = new Set(state.peerArticles.map((article) => Number(article.id)));
-    const newArticles = (data.articles || [])
-      .filter((article) => !existingIds.has(Number(article.id)));
-    state.peerArticles = [...state.peerArticles, ...newArticles];
+    state.peerArticles = dedupePeerArticles([
+      ...state.peerArticles,
+      ...(data.articles || []),
+    ]);
     state.peerArticlesHasMore = Boolean(data.hasMore);
     state.peerArticlesNextOffset = Number(
       data.nextOffset ?? offset + (data.articles || []).length,

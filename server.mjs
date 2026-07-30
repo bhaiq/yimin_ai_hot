@@ -1867,6 +1867,35 @@ async function getPeerMonitorAccess(req) {
   };
 }
 
+function peerArticleSqlIdentity(alias = "a") {
+  const tableAlias = /^[a-z][a-z0-9_]*$/i.test(alias) ? alias : "a";
+  return `
+    CASE
+      WHEN CHAR_LENGTH(TRIM(COALESCE(${tableAlias}.private_url, ''))) > 0 THEN CONCAT(
+        'url:',
+        LOWER(TRIM(TRAILING '/' FROM SUBSTRING_INDEX(
+          TRIM(${tableAlias}.private_url),
+          '#',
+          1
+        )))
+      )
+      WHEN CHAR_LENGTH(TRIM(COALESCE(${tableAlias}.external_id, ''))) > 0 THEN CONCAT(
+        'external:',
+        LOWER(TRIM(${tableAlias}.external_id))
+      )
+      ELSE CONCAT(
+        'title-date:',
+        LOWER(TRIM(${tableAlias}.title)),
+        '\n',
+        DATE_FORMAT(
+          COALESCE(${tableAlias}.published_at, ${tableAlias}.first_fetched_at),
+          '%Y-%m-%d %H:%i'
+        )
+      )
+    END
+  `;
+}
+
 async function listPeerMonitorOverview() {
   return (await mysqlJson(`
     SELECT COALESCE(JSON_ARRAYAGG(
@@ -1891,7 +1920,7 @@ async function listPeerMonitorOverview() {
         c.sort_order,
         (SELECT COUNT(*) FROM yimin_peer_projects p WHERE p.competitor_id = c.id) AS project_count,
         (
-          SELECT COUNT(*)
+          SELECT COUNT(DISTINCT ${peerArticleSqlIdentity("a")})
           FROM yimin_peer_articles a
           JOIN yimin_peer_sources s ON s.id = a.source_id
           WHERE s.competitor_id = c.id
@@ -1970,6 +1999,25 @@ async function listPeerArticles(competitorCode, { limit = 20, offset = 0 } = {})
   const pageSize = Math.min(50, Math.max(1, Number(limit) || 20));
   const pageOffset = Math.max(0, Number(offset) || 0);
   const rows = (await mysqlJson(`
+    WITH ranked_peer_articles AS (
+      SELECT
+        a.*,
+        c.private_name AS competitor_name,
+        ROW_NUMBER() OVER (
+          PARTITION BY a.source_id, ${peerArticleSqlIdentity("a")}
+          ORDER BY
+            IF(CHAR_LENGTH(TRIM(COALESCE(a.content_text, ''))) > 0, 1, 0) DESC,
+            COALESCE(a.published_at, a.first_fetched_at) DESC,
+            a.id DESC
+        ) AS identity_rank
+      FROM yimin_peer_articles a
+      JOIN yimin_peer_sources s ON s.id = a.source_id
+      JOIN yimin_peer_competitors c ON c.id = s.competitor_id
+      WHERE c.code = ${sqlString(competitorCode)}
+        AND c.enabled = 1
+        AND s.enabled = 1
+        AND s.source_type = 'wechat_rss'
+    )
     SELECT COALESCE(JSON_ARRAYAGG(
       JSON_OBJECT(
         'id', id,
@@ -1995,19 +2043,14 @@ async function listPeerArticles(competitorCode, { limit = 20, offset = 0 } = {})
         a.content_text,
         a.private_url,
         a.private_image_url,
-        c.private_name AS competitor_name,
+        a.competitor_name,
         IF(
           a.published_at IS NULL,
           NULL,
           DATE_FORMAT(a.published_at, '%Y-%m-%dT%H:%i:%s+08:00')
         ) AS published_at
-      FROM yimin_peer_articles a
-      JOIN yimin_peer_sources s ON s.id = a.source_id
-      JOIN yimin_peer_competitors c ON c.id = s.competitor_id
-      WHERE c.code = ${sqlString(competitorCode)}
-        AND c.enabled = 1
-        AND s.enabled = 1
-        AND s.source_type = 'wechat_rss'
+      FROM ranked_peer_articles a
+      WHERE a.identity_rank = 1
       ORDER BY COALESCE(a.published_at, a.first_fetched_at) DESC, a.id DESC
       LIMIT ${sqlNumber(pageSize + 1)}
       OFFSET ${sqlNumber(pageOffset)}
@@ -2081,7 +2124,16 @@ async function refreshPeerRssSource(source) {
   const existingRows = (await mysqlJson(`
     SELECT COALESCE(JSON_ARRAYAGG(
       JSON_OBJECT(
+        'id', id,
         'dedupeHash', dedupe_hash,
+        'externalId', external_id,
+        'title', title,
+        'privateUrl', private_url,
+        'publishedAt', IF(
+          published_at IS NULL,
+          NULL,
+          DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s+08:00')
+        ),
         'hasFullContent', IF(
           CHAR_LENGTH(TRIM(COALESCE(content_text, ''))) > 0,
           CAST(TRUE AS JSON),
@@ -2095,9 +2147,26 @@ async function refreshPeerRssSource(source) {
   const existingByHash = new Map(
     existingRows.map((row) => [String(row.dedupeHash || ""), row]),
   );
-  const newItems = items.filter((item) => !existingByHash.has(item.dedupeHash));
-  const contentBackfillItems = items.filter((item) => {
-    const existing = existingByHash.get(item.dedupeHash);
+  const existingByIdentity = new Map();
+  for (const row of existingRows) {
+    for (const key of getPeerArticleIdentityKeys(row)) {
+      if (!existingByIdentity.has(key)) existingByIdentity.set(key, row);
+    }
+  }
+  const matchedItems = items.map((item) => {
+    const existing = existingByHash.get(item.dedupeHash)
+      || getPeerArticleIdentityKeys(item)
+        .map((key) => existingByIdentity.get(key))
+        .find(Boolean);
+    return {
+      ...item,
+      existing,
+      dedupeHash: existing?.dedupeHash || item.dedupeHash,
+    };
+  });
+  const newItems = matchedItems.filter((item) => !item.existing);
+  const contentBackfillItems = matchedItems.filter((item) => {
+    const existing = item.existing;
     return existing && !existing.hasFullContent && Boolean(item.contentText.trim());
   });
   const itemsToWrite = [...newItems, ...contentBackfillItems];
@@ -5288,6 +5357,93 @@ function normalizePeerArticleUrl(value) {
   }
 }
 
+function normalizePeerArticleIdentityUrl(value) {
+  const normalized = normalizePeerArticleUrl(value);
+  if (!normalized) return "";
+  try {
+    const url = new URL(normalized);
+    url.hash = "";
+    url.hostname = url.hostname.toLowerCase();
+    url.pathname = url.pathname.replace(/\/{2,}/g, "/").replace(/\/+$/, "") || "/";
+    for (const key of [...url.searchParams.keys()]) {
+      if (
+        /^utm_/i.test(key)
+        || ["from", "scene", "share", "clicktime", "enterid", "sessionid"].includes(key.toLowerCase())
+      ) {
+        url.searchParams.delete(key);
+      }
+    }
+    url.searchParams.sort();
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function getPeerArticleIdentityKeys(article) {
+  const keys = [];
+  const privateUrl = normalizePeerArticleIdentityUrl(
+    article?.privateUrl || article?.private_url || article?.url,
+  );
+  const externalId = normalizePeerText(article?.externalId || article?.external_id).toLowerCase();
+  const title = normalizePeerText(article?.title).toLowerCase();
+  const rawPublishedAt = article?.publishedAt || article?.published_at || "";
+  const publishedDate = rawPublishedAt ? new Date(rawPublishedAt) : null;
+  const publishedMinute = publishedDate && !Number.isNaN(publishedDate.getTime())
+    ? publishedDate.toISOString().slice(0, 16)
+    : "";
+
+  if (privateUrl) keys.push(`url:${privateUrl}`);
+  if (externalId) keys.push(`external:${externalId}`);
+  if (title && publishedMinute) keys.push(`title-date:${title}\n${publishedMinute}`);
+  return keys;
+}
+
+function mergePeerFeedItems(existing, incoming) {
+  const preferIncomingContent =
+    String(incoming.contentText || "").length > String(existing.contentText || "").length;
+  return {
+    ...existing,
+    externalId: existing.externalId || incoming.externalId,
+    title: existing.title || incoming.title,
+    summary: String(incoming.summary || "").length > String(existing.summary || "").length
+      ? incoming.summary
+      : existing.summary,
+    contentText: preferIncomingContent ? incoming.contentText : existing.contentText,
+    privateUrl: existing.privateUrl || incoming.privateUrl,
+    privateImageUrl: existing.privateImageUrl || incoming.privateImageUrl,
+    publishedAt: existing.publishedAt || incoming.publishedAt,
+  };
+}
+
+function dedupePeerFeedItems(items) {
+  const deduped = [];
+  const itemIndexByIdentity = new Map();
+
+  for (const item of items) {
+    const identityKeys = getPeerArticleIdentityKeys(item);
+    const existingIndex = identityKeys
+      .map((key) => itemIndexByIdentity.get(key))
+      .find((index) => index !== undefined);
+    if (existingIndex !== undefined) {
+      const merged = mergePeerFeedItems(deduped[existingIndex], item);
+      deduped[existingIndex] = merged;
+      for (const key of getPeerArticleIdentityKeys(merged)) {
+        itemIndexByIdentity.set(key, existingIndex);
+      }
+      continue;
+    }
+
+    const nextIndex = deduped.length;
+    deduped.push(item);
+    for (const key of identityKeys) {
+      itemIndexByIdentity.set(key, nextIndex);
+    }
+  }
+
+  return deduped;
+}
+
 function getXmlAttribute(block, tagName, attributeName) {
   const tag = block.match(new RegExp(`<${tagName}\\b([^>]*)>`, "i"))?.[1] || "";
   return decodeEntities(
@@ -5296,7 +5452,7 @@ function getXmlAttribute(block, tagName, attributeName) {
 }
 
 function parsePeerFeed(xml, sourceId) {
-  return getBlocks(xml)
+  const items = getBlocks(xml)
     .map((block) => {
       const externalId =
         cleanText(getTag(block, "id"))
@@ -5320,7 +5476,13 @@ function parsePeerFeed(xml, sourceId) {
         || normalizeDate(getTag(block, "updated"))
         || null;
       const privateImageUrl = getXmlAttribute(block, "enclosure", "url");
-      const stableValue = externalId || privateUrl || `${title}\n${publishedAt || ""}`;
+      const identityKeys = getPeerArticleIdentityKeys({
+        externalId,
+        privateUrl,
+        title,
+        publishedAt,
+      });
+      const stableValue = identityKeys[0] || `${title}\n${publishedAt || ""}`;
       const dedupeHash = createHash("sha256")
         .update(`${sourceId}\n${stableValue}`)
         .digest("hex");
@@ -5337,6 +5499,7 @@ function parsePeerFeed(xml, sourceId) {
       };
     })
     .filter((item) => item.title);
+  return dedupePeerFeedItems(items);
 }
 
 function truncate(value, maxLength = 150) {
