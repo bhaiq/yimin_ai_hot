@@ -191,11 +191,39 @@ const peerMonitorConfig = {
   ),
   seedPath: join(rootDir, "data", "peer-monitor-projects.json"),
 };
+function getBoundedConfigNumber(value, fallback, minimum, maximum) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(maximum, Math.max(minimum, Math.floor(parsed)));
+}
+
 const firecrawlConfig = {
   apiKeys: getFirecrawlApiKeys(),
   baseUrl: "https://api.firecrawl.dev/v1",
+  requestsPerMinute: getBoundedConfigNumber(
+    process.env.FIRECRAWL_REQUESTS_PER_MINUTE,
+    8,
+    1,
+    9,
+  ),
+  maxRateLimitRetries: getBoundedConfigNumber(
+    process.env.FIRECRAWL_MAX_RATE_LIMIT_RETRIES,
+    3,
+    0,
+    5,
+  ),
+  retryJitterMs: getBoundedConfigNumber(
+    process.env.FIRECRAWL_RETRY_JITTER_MS,
+    1500,
+    0,
+    10000,
+  ),
 };
 let firecrawlApiKeyIndex = 0;
+let firecrawlQueueTail = Promise.resolve();
+let firecrawlNextRequestAt = 0;
 const sessions = new Map();
 
 const mimeTypes = {
@@ -5018,6 +5046,86 @@ async function fetchWithTimeout(
   }
 }
 
+function waitForMilliseconds(delayMs) {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, Math.max(0, delayMs)));
+}
+
+async function waitForFirecrawlQueueSlot() {
+  const previousQueueTail = firecrawlQueueTail;
+  let releaseQueueSlot;
+  firecrawlQueueTail = new Promise((resolvePromise) => {
+    releaseQueueSlot = resolvePromise;
+  });
+
+  await previousQueueTail;
+  try {
+    while (firecrawlNextRequestAt > Date.now()) {
+      await waitForMilliseconds(firecrawlNextRequestAt - Date.now());
+    }
+
+    const requestIntervalMs = Math.ceil(60000 / firecrawlConfig.requestsPerMinute);
+    firecrawlNextRequestAt = Date.now() + requestIntervalMs;
+  } finally {
+    releaseQueueSlot();
+  }
+}
+
+function pauseFirecrawlQueue(delayMs) {
+  firecrawlNextRequestAt = Math.max(
+    firecrawlNextRequestAt,
+    Date.now() + Math.max(0, delayMs),
+  );
+}
+
+function isFirecrawlRateLimitError(status, error, data) {
+  const details = `${error}\n${JSON.stringify(data)}`;
+  return status === 429 || /rate[\s_-]+limit|too many requests/i.test(details);
+}
+
+function parseFirecrawlRetryAfterMs(response, error, data) {
+  const now = Date.now();
+  const retryAfterHeader = response.headers.get("retry-after");
+  if (retryAfterHeader) {
+    const retryAfterSeconds = Number(retryAfterHeader);
+    if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) {
+      return Math.ceil(retryAfterSeconds * 1000);
+    }
+
+    const retryAfterDate = Date.parse(retryAfterHeader);
+    if (Number.isFinite(retryAfterDate)) {
+      return Math.max(0, retryAfterDate - now);
+    }
+  }
+
+  const details = `${error}\n${JSON.stringify(data)}`;
+  const retryAfterMatch = details.match(/retry after\s+(\d+(?:\.\d+)?)\s*s/i);
+  if (retryAfterMatch) {
+    return Math.ceil(Number(retryAfterMatch[1]) * 1000);
+  }
+
+  const resetAtMatch = details.match(/resets?\s+at\s+(.+?)(?:\s+\(|\n|$)/i);
+  if (resetAtMatch) {
+    const resetAt = Date.parse(resetAtMatch[1].trim());
+    if (Number.isFinite(resetAt)) {
+      return Math.max(0, resetAt - now);
+    }
+  }
+
+  return 60000;
+}
+
+function getFirecrawlRateLimitWaitMs(response, error, data) {
+  const requestIntervalMs = Math.ceil(60000 / firecrawlConfig.requestsPerMinute);
+  const retryAfterMs = Math.max(
+    requestIntervalMs,
+    parseFirecrawlRetryAfterMs(response, error, data),
+  );
+  const jitterMs = firecrawlConfig.retryJitterMs > 0
+    ? Math.floor(Math.random() * (firecrawlConfig.retryJitterMs + 1))
+    : 0;
+  return retryAfterMs + jitterMs;
+}
+
 async function fetchWithFirecrawl(url) {
   if (firecrawlConfig.apiKeys.length === 0) {
     return {
@@ -5034,65 +5142,94 @@ async function fetchWithFirecrawl(url) {
     const keyIndex = findNextFirecrawlKeyIndex(attemptedKeyIndexes);
     const apiKey = firecrawlConfig.apiKeys[keyIndex];
     attemptedKeyIndexes.add(keyIndex);
+    let rateLimitRetryCount = 0;
+    let shouldRotateKey = false;
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30000);
+    while (true) {
+      await waitForFirecrawlQueueSlot();
 
-    try {
-      const response = await fetch(`${firecrawlConfig.baseUrl}/scrape`, {
-        method: "POST",
-        signal: controller.signal,
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({ url, formats: ["markdown"] }),
-      });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 30000);
 
-      const responseText = await response.text();
-      let data = {};
       try {
-        data = JSON.parse(responseText);
-      } catch {
-        data = {};
-      }
+        const response = await fetch(`${firecrawlConfig.baseUrl}/scrape`, {
+          method: "POST",
+          signal: controller.signal,
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({ url, formats: ["markdown"] }),
+        });
 
-      if (!response.ok || !data.success) {
-        const error = getFirecrawlError(data, response.status);
-        const rotationReason = getFirecrawlKeyRotationReason(error, data, response.status);
-        if (rotationReason) {
-          lastKeyError = { status: response.status, error };
-          advanceFirecrawlApiKey(keyIndex);
+        const responseText = await response.text();
+        let data = {};
+        try {
+          data = JSON.parse(responseText);
+        } catch {
+          data = {};
+        }
 
-          if (attemptedKeyIndexes.size < firecrawlConfig.apiKeys.length) {
+        if (!response.ok || !data.success) {
+          const error = getFirecrawlError(data, response.status);
+          if (isFirecrawlRateLimitError(response.status, error, data)) {
+            if (rateLimitRetryCount >= firecrawlConfig.maxRateLimitRetries) {
+              return {
+                ok: false,
+                status: response.status,
+                error: `${error} (rate limit retry limit reached after ${rateLimitRetryCount} retries)`,
+              };
+            }
+
+            rateLimitRetryCount += 1;
+            const waitMs = getFirecrawlRateLimitWaitMs(response, error, data);
+            pauseFirecrawlQueue(waitMs);
             console.warn(
-              `[firecrawl] API key ${keyIndex + 1}/${firecrawlConfig.apiKeys.length} ${rotationReason}; retrying with another key.`,
+              `[firecrawl] Rate limited; queued retry ${rateLimitRetryCount}/${firecrawlConfig.maxRateLimitRetries} in ${Math.ceil(waitMs / 1000)}s.`,
             );
             continue;
           }
 
-          break;
+          const rotationReason = getFirecrawlKeyRotationReason(error, data, response.status);
+          if (rotationReason) {
+            lastKeyError = { status: response.status, error };
+            advanceFirecrawlApiKey(keyIndex);
+
+            if (attemptedKeyIndexes.size < firecrawlConfig.apiKeys.length) {
+              console.warn(
+                `[firecrawl] API key ${keyIndex + 1}/${firecrawlConfig.apiKeys.length} ${rotationReason}; retrying with another key.`,
+              );
+              shouldRotateKey = true;
+              break;
+            }
+
+            break;
+          }
+
+          return { ok: false, status: response.status, error };
         }
 
-        return { ok: false, status: response.status, error };
+        const page = data.data || {};
+        const metadata = page.metadata || {};
+        const markdown = page.markdown || "";
+
+        return {
+          ok: true,
+          title: metadata.title || "",
+          summary: markdown.slice(0, 500),
+          content: markdown,
+          url: metadata.sourceURL || url,
+          publishedAt: metadata.publishedTime || null,
+        };
+      } catch (err) {
+        return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };
+      } finally {
+        clearTimeout(timer);
       }
+    }
 
-      const page = data.data || {};
-      const metadata = page.metadata || {};
-      const markdown = page.markdown || "";
-
-      return {
-        ok: true,
-        title: metadata.title || "",
-        summary: markdown.slice(0, 500),
-        content: markdown,
-        url: metadata.sourceURL || url,
-        publishedAt: metadata.publishedTime || null,
-      };
-    } catch (err) {
-      return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };
-    } finally {
-      clearTimeout(timer);
+    if (shouldRotateKey) {
+      continue;
     }
   }
 
@@ -6128,8 +6265,14 @@ async function executeFetchRun(runId, sources, { concurrency = feedFetchConcurre
   let itemCount = 0;
 
   try {
-    const results = await runWithConcurrency(sources, concurrency, async (source) => {
+    const results = new Array(sources.length);
+    const indexedSources = sources.map((source, index) => ({ source, index }));
+    const firecrawlSources = indexedSources.filter(({ source }) => source.type === "website");
+    const directSources = indexedSources.filter(({ source }) => source.type !== "website");
+
+    const processSource = async ({ source, index }) => {
       const result = await fetchSource(source);
+      results[index] = result;
       itemCount += result.items.length;
       processedSourceCount += 1;
       if (result.status.ok) {
@@ -6146,7 +6289,12 @@ async function executeFetchRun(runId, sources, { concurrency = feedFetchConcurre
       });
 
       return result;
-    });
+    };
+
+    await Promise.all([
+      runWithConcurrency(directSources, concurrency, processSource),
+      runWithConcurrency(firecrawlSources, 1, processSource),
+    ]);
 
     await finishFetchRun(runId, {
       status: "completed",

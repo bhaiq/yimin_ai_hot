@@ -33,6 +33,7 @@ http://127.0.0.1:4173
 - 日报会记录引用明细，今日总结只使用近 7 天未出现过的当天新增事实
 - 信源提报与公开反馈入库；静态打开时回退到本地草稿
 - 网站源支持：通过 Firecrawl API 抓取无 RSS 的网页；额度不足时自动轮换备用 key 并重试
+- Firecrawl 独立队列：`website` 信源不占用 RSS/JSON 抓取并发，默认每分钟最多启动 8 个请求；遇到 HTTP 429 时优先按 `Retry-After` 或错误中的重置时间等待，加入随机退避后自动重试
 - HTML 页面抓取：通过 Jina Reader API 提取网页内容
 - 信源审核：管理员审核用户提报的信源，补充类型和国家后启用
 - 用户登录：管理员账号登录，审核等敏感操作需认证
@@ -224,9 +225,13 @@ Firecrawl 支持保留原有的单 key 配置，并通过逗号分隔或编号�
 FIRECRAWL_API_KEY=fc-primary
 FIRECRAWL_API_KEYS=fc-backup-1,fc-backup-2
 # 也支持 FIRECRAWL_API_KEY_2=fc-backup-3
+FIRECRAWL_REQUESTS_PER_MINUTE=8
+FIRECRAWL_MAX_RATE_LIMIT_RETRIES=3
+FIRECRAWL_RETRY_JITTER_MS=1500
 ```
 
 当接口明确返回 `Insufficient credits` 或 `Unauthorized: Invalid token` 时，本次抓取会立即跳过当前 key，并切换到下一个 key 重试；其他类型错误不会触发 key 轮换。
+HTTP 429 不切换 key，而是暂停整个 Firecrawl 队列，优先读取响应头 `Retry-After`，其次解析错误消息里的 `retry after ...s` 或 `resets at ...`；等待时会追加最多 `FIRECRAWL_RETRY_JITTER_MS` 的随机抖动，最多重试 `FIRECRAWL_MAX_RATE_LIMIT_RETRIES` 次。RSS、JSON、Twitter 和 Jina HTML 信源继续使用原 `FEED_FETCH_CONCURRENCY`，不会被 Firecrawl 等待队列占满。
 
 ## 后续接入建议
 
