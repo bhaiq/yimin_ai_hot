@@ -686,7 +686,7 @@ const state = {
   peerMonitorAccess: false,
   peerMonitorAccessLoaded: false,
   peerCompetitors: [],
-  peerSelectedCode: "peer-a",
+  peerSelectedCode: "",
   peerActiveTab: "projects",
   peerProjects: [],
   peerProjectCountries: [],
@@ -3156,10 +3156,14 @@ async function loadPeerMonitor() {
     }
     state.peerCompetitors = data.competitors || [];
     if (!state.peerCompetitors.some((item) => item.code === state.peerSelectedCode)) {
-      state.peerSelectedCode = state.peerCompetitors[0]?.code || "peer-a";
+      state.peerSelectedCode = state.peerCompetitors[0]?.code || "";
     }
     state.peerMonitorLoading = false;
-    await loadPeerCompetitorData();
+    if (state.peerSelectedCode) {
+      await loadPeerCompetitorData();
+    } else {
+      renderPeerMonitor();
+    }
   } catch (error) {
     state.peerMonitorLoading = false;
     state.peerMonitorError = `同行监控加载失败：${error instanceof Error ? error.message : String(error)}`;
