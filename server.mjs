@@ -179,6 +179,7 @@ const peerCompetitorSeeds = [
   },
 ];
 const peerMonitorConfig = {
+  openAccess: process.env.PEER_MONITOR_OPEN_ACCESS !== "0",
   allowedUserIds: new Set(
     ["fanrui", ...String(process.env.PEER_MONITOR_USER_IDS || "").split(",")]
       .map((value) => value.trim().toLowerCase())
@@ -1857,6 +1858,10 @@ function isPeerMonitorDepartmentNameAllowed(name) {
 
 async function getPeerMonitorAccess(req) {
   const identity = getSsoIdentityFromRequest(req);
+  if (peerMonitorConfig.openAccess) {
+    return { allowed: true, identity: identity || null, reason: "open_access" };
+  }
+
   if (!identity?.userId) {
     return { allowed: false, identity: null, reason: "missing_identity" };
   }
