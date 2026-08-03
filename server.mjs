@@ -493,6 +493,19 @@ async function mysqlJson(sql, options) {
   return JSON.parse(trimmed);
 }
 
+async function mysqlJsonRows(sql, options) {
+  const stdout = await mysqlRun(sql, { ...options, json: true });
+  const trimmed = stdout.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  return trimmed
+    .split(/\r?\n/)
+    .filter((line) => line.trim() && line.trim().toUpperCase() !== "NULL")
+    .map((line) => JSON.parse(line));
+}
+
 async function initDb() {
   if (!dbReadyPromise) {
     dbReadyPromise = (async () => {
@@ -1661,6 +1674,7 @@ async function seedPeerMonitorData() {
     LIMIT 1;
   `);
 
+  // sort_order is insert-only here so later database-managed ordering survives restarts.
   await mysqlExec(`
     INSERT INTO yimin_peer_competitors (
       code,
@@ -1683,7 +1697,6 @@ async function seedPeerMonitorData() {
       display_name = VALUES(display_name),
       private_name = VALUES(private_name),
       private_domain = VALUES(private_domain),
-      sort_order = VALUES(sort_order),
       enabled = VALUES(enabled),
       updated_at = CURRENT_TIMESTAMP;
   `);
@@ -1937,22 +1950,21 @@ function peerArticleSqlIdentity(alias = "a") {
 }
 
 async function listPeerMonitorOverview() {
-  return (await mysqlJson(`
-    SELECT COALESCE(JSON_ARRAYAGG(
-      JSON_OBJECT(
-        'code', code,
-        'displayName', private_name,
-        'anonymousName', display_name,
-        'websiteDomain', private_domain,
-        'projectCount', project_count,
-        'articleCount', article_count,
-        'hasRss', IF(rss_source_count > 0, CAST(TRUE AS JSON), CAST(FALSE AS JSON)),
-        'lastFetchedAt', last_fetched_at,
-        'lastFetchError', last_fetch_error
-      )
-    ), JSON_ARRAY())
+  return mysqlJsonRows(`
+    SELECT JSON_OBJECT(
+      'code', code,
+      'displayName', private_name,
+      'anonymousName', display_name,
+      'websiteDomain', private_domain,
+      'projectCount', project_count,
+      'articleCount', article_count,
+      'hasRss', IF(rss_source_count > 0, CAST(TRUE AS JSON), CAST(FALSE AS JSON)),
+      'lastFetchedAt', last_fetched_at,
+      'lastFetchError', last_fetch_error
+    )
     FROM (
       SELECT
+        c.id,
         c.code,
         c.display_name,
         c.private_name,
@@ -1990,9 +2002,9 @@ async function listPeerMonitorOverview() {
         ) AS last_fetch_error
       FROM yimin_peer_competitors c
       WHERE c.enabled = 1
-      ORDER BY c.sort_order, c.id
-    ) peer_overview;
-  `)) || [];
+    ) peer_overview
+    ORDER BY sort_order, id;
+  `);
 }
 
 async function listPeerProjects(competitorCode) {
