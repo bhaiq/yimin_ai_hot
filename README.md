@@ -107,6 +107,15 @@ curl -X POST 'https://your-domain.example/api/peer-monitor/wechat/discover' \
   -d '{"date":"2026-08-07"}'
 ```
 
+只验证一家同行时传入 `competitor`，例如 `peer-a` 对应景鸿移民。单账号任务与全量任务分别记录；首次测试不要传 `refresh`，避免误重复扣费：
+
+```bash
+curl -X POST 'https://your-domain.example/api/peer-monitor/wechat/discover' \
+  -H 'Authorization: Bearer your-cron-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"date":"2026-08-07","competitor":"peer-a"}'
+```
+
 首次成功返回 HTTP 202 和 `run.runKey`；重复请求相同日期默认复用已有任务，不产生新的付费调用。仅在明确需要重新向供应商取数时传 `refresh=true`。状态查询：
 
 ```bash

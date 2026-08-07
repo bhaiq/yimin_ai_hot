@@ -63,6 +63,93 @@ test("also accepts the documented nested response shape", () => {
   assert.equal(normalized.remainMoney, null);
 });
 
+test("flattens the live AccountInfo and AppMsg DetailInfo response", () => {
+  const normalized = normalizeDajialaResponse({
+    AccountInfo: {
+      UserName: "gh_example",
+      NickName: "示例公众号",
+    },
+    MsgList: {
+      Msg: [{
+        BaseInfo: {
+          MsgId: 2650874135,
+          DateTime: 1786011618,
+        },
+        AppMsg: {
+          BaseInfo: {
+            AppMsgId: 2650874135,
+            CreateTime: 1786011619,
+            UpdateTime: 1786011758,
+            Type: 9,
+          },
+          DetailInfo: [{
+            Title: "第一篇",
+            Digest: "第一篇摘要",
+            ItemIndex: 1,
+            ContentUrl: "http://mp.weixin.qq.com/s?__biz=abc&mid=2650874135&idx=1&sn=first&scene=126",
+            SourceUrl: "https://example.com/source",
+            CoverImgUrl: "https://mmbiz.qpic.cn/cover-1",
+            ItemShowType: 0,
+            IsOriginal: 1,
+            send_time: 1786011656,
+            Read: 227,
+            Zan: 7,
+          }, {
+            Title: "第二篇",
+            Digest: "",
+            ItemIndex: 2,
+            ContentUrl: "http://mp.weixin.qq.com/s?__biz=abc&mid=2650874135&idx=2&sn=second&scene=126",
+            CoverImgUrl: "https://mmbiz.qpic.cn/cover-2",
+            ItemShowType: 5,
+            IsOriginal: 0,
+            send_time: 1786011656,
+            Read: 13,
+            Zan: 1,
+          }],
+        },
+      }],
+      PagingInfo: {
+        Offset: "next-page",
+        IsEnd: 0,
+      },
+    },
+    code: 0,
+    cost: 0.14,
+    remain_money: 0.4,
+  });
+
+  assert.equal(normalized.code, 0);
+  assert.equal(normalized.costMoney, 0.14);
+  assert.equal(normalized.remainMoney, 0.4);
+  assert.equal(normalized.nickname, "示例公众号");
+  assert.equal(normalized.ghid, "gh_example");
+  assert.equal(normalized.offset, "next-page");
+  assert.equal(normalized.isEnd, false);
+  assert.equal(normalized.articles.length, 2);
+  assert.deepEqual(normalized.articles[0], {
+    position: 1,
+    url: "https://mp.weixin.qq.com/s?__biz=abc&mid=2650874135&idx=1&sn=first",
+    publishTime: 1786011656,
+    publishTimeText: "",
+    coverUrl: "https://mmbiz.qpic.cn/cover-1",
+    original: 1,
+    itemShowType: 0,
+    digest: "第一篇摘要",
+    title: "第一篇",
+    appmsgid: "2650874135",
+    updateTime: 1786011758,
+    sourceUrl: "https://example.com/source",
+    read: 227,
+    zan: 7,
+  });
+  assert.equal(normalized.articles[1].position, 2);
+  assert.equal(normalized.articles[1].itemShowType, 5);
+
+  const record = buildWerssArticleRecord("MP_WXS_3087573428", normalized.articles[1]);
+  assert.equal(record.id, "3087573428-2650874135_2");
+  assert.equal(record.publishTime, 1786011656);
+});
+
 test("builds IDs compatible with existing WeRSS rows", () => {
   assert.equal(extractWerssFeedId("https://host/feed/MP_WXS_2390329593.rss"), "MP_WXS_2390329593");
   assert.equal(makeWerssArticleId("MP_WXS_2390329593", "2650895023", 3), "2390329593-2650895023_3");
