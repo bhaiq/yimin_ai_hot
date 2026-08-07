@@ -4,6 +4,12 @@ import { existsSync } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
 import { createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
+import {
+  buildWerssArticleRecord,
+  extractWerssFeedId,
+  getPeerDiscoveryWindow,
+  normalizeDajialaResponse,
+} from "./lib/peer-wechat-discovery.mjs";
 
 const rootDir = resolve(".");
 await loadEnv();
@@ -50,6 +56,14 @@ const dbConfig = {
   password: process.env.DATABASE_PASSWORD || "",
   database: process.env.DATABASE_NAME || "yimin_ai_hot",
   mysqlBin: process.env.MYSQL_BIN || "mysql",
+};
+const werssDbConfig = {
+  host: process.env.WERSS_DATABASE_HOST || dbConfig.host,
+  port: Number(process.env.WERSS_DATABASE_PORT || dbConfig.port),
+  user: process.env.WERSS_DATABASE_USER || dbConfig.user,
+  password: process.env.WERSS_DATABASE_PASSWORD || dbConfig.password,
+  database: process.env.WERSS_DATABASE_NAME || "",
+  mysqlBin: process.env.WERSS_MYSQL_BIN || dbConfig.mysqlBin,
 };
 
 const deepseekConfig = {
@@ -114,6 +128,7 @@ const peerCompetitorSeeds = [
     privateName: "桉侨移民",
     privateDomain: "aqyimin.com",
     brandTerms: ["桉侨移民", "桉侨", "ANQIAO"],
+    rssUrl: "https://ai.globevisa.space/feed/MP_WXS_3625711724.rss",
   },
   {
     code: "peer-b",
@@ -137,6 +152,8 @@ const peerCompetitorSeeds = [
     privateName: "亨瑞集团（亨瑞移民）",
     privateDomain: "visa800.com",
     brandTerms: ["亨瑞集团", "亨瑞移民", "亨瑞"],
+    rssUrl: "https://ai.globevisa.space/feed/MP_WXS_2390329593.rss",
+    providerGhid: "henrygroup1992",
   },
   {
     code: "peer-e",
@@ -144,6 +161,7 @@ const peerCompetitorSeeds = [
     privateName: "世贸通集团（世贸通移民）",
     privateDomain: "worldwayhk.com",
     brandTerms: ["世贸通集团", "世贸通移民", "世贸通"],
+    rssUrl: "https://ai.globevisa.space/feed/MP_WXS_2395537072.rss",
   },
   {
     code: "peer-f",
@@ -191,6 +209,18 @@ const peerMonitorConfig = {
       .filter(Boolean),
   ),
   seedPath: join(rootDir, "data", "peer-monitor-projects.json"),
+};
+const peerWechatDiscoveryConfig = {
+  providerUrl: process.env.DAJIALA_HISTORY_URL || "https://www.dajiala.com/fbmain/monitor/v3/history_by_ghid",
+  apiKey: process.env.DAJIALA_API_KEY || "",
+  verifyCode: process.env.DAJIALA_VERIFYCODE || "",
+  cronToken: process.env.PEER_DISCOVERY_CRON_TOKEN || "",
+  requestTimeoutMs: getBoundedConfigNumber(process.env.DAJIALA_TIMEOUT_MS, 30_000, 3_000, 120_000),
+  minIntervalMs: getBoundedConfigNumber(process.env.DAJIALA_MIN_INTERVAL_MS, 600, 500, 10_000),
+  maxPagesPerAccount: getBoundedConfigNumber(process.env.PEER_DISCOVERY_MAX_PAGES_PER_ACCOUNT, 3, 1, 20),
+  maxCostPerRun: Number.isFinite(Number(process.env.PEER_DISCOVERY_MAX_COST_PER_RUN || 5))
+    ? Math.max(0, Number(process.env.PEER_DISCOVERY_MAX_COST_PER_RUN || 5))
+    : 5,
 };
 function getBoundedConfigNumber(value, fallback, minimum, maximum) {
   const parsed = Number(value);
@@ -246,6 +276,8 @@ let activeFetchRun = null;
 let activeArticleTranslationPromise = null;
 let activeArticleRelevancePromise = null;
 let activePeerRefresh = null;
+let activePeerWechatDiscovery = null;
+let peerDiscoveryNextProviderRequestAt = 0;
 const dailyReportGenerationPromises = new Map();
 const dailyLocalizationGenerationPromises = new Map();
 const departmentDailyGenerationPromises = new Map();
@@ -429,12 +461,12 @@ function decryptSsoUserId(encParam) {
   return decryptSsoValue(encParam, "user id");
 }
 
-function mysqlRun(sql, { database = true, json = false } = {}) {
+function mysqlRunWithConfig(config, sql, { database = true, json = false } = {}) {
   return new Promise((resolvePromise, reject) => {
     const args = [
-      `-h${dbConfig.host}`,
-      `-P${dbConfig.port}`,
-      `-u${dbConfig.user}`,
+      `-h${config.host}`,
+      `-P${config.port}`,
+      `-u${config.user}`,
       "--default-character-set=utf8mb4",
       "--connect-timeout=5",
       "--batch",
@@ -446,13 +478,13 @@ function mysqlRun(sql, { database = true, json = false } = {}) {
     }
 
     if (database) {
-      args.push(dbConfig.database);
+      args.push(config.database);
     }
 
-    const child = spawn(dbConfig.mysqlBin, args, {
+    const child = spawn(config.mysqlBin, args, {
       env: {
         ...process.env,
-        MYSQL_PWD: dbConfig.password,
+        MYSQL_PWD: config.password,
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -477,6 +509,10 @@ function mysqlRun(sql, { database = true, json = false } = {}) {
     // DATETIME columns store Beijing wall time; keep MySQL-generated times aligned with sqlDate().
     child.stdin.end(`SET time_zone = '+08:00';\n${sql}`);
   });
+}
+
+function mysqlRun(sql, options) {
+  return mysqlRunWithConfig(dbConfig, sql, options);
 }
 
 async function mysqlExec(sql, options) {
@@ -504,6 +540,17 @@ async function mysqlJsonRows(sql, options) {
     .split(/\r?\n/)
     .filter((line) => line.trim() && line.trim().toUpperCase() !== "NULL")
     .map((line) => JSON.parse(line));
+}
+
+async function werssMysqlExec(sql, options) {
+  await mysqlRunWithConfig(werssDbConfig, sql, options);
+}
+
+async function werssMysqlJson(sql, options) {
+  const stdout = await mysqlRunWithConfig(werssDbConfig, sql, { ...options, json: true });
+  const trimmed = stdout.trim();
+  if (!trimmed || trimmed.toUpperCase() === "NULL") return null;
+  return JSON.parse(trimmed);
 }
 
 async function initDb() {
@@ -1028,6 +1075,87 @@ async function initDb() {
           UNIQUE KEY uk_peer_refresh_run_key (run_key),
           INDEX idx_peer_refresh_started (started_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行公众号刷新任务';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_wechat_accounts (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          source_id BIGINT NOT NULL COMMENT '同行公众号 RSS 来源 ID',
+          provider VARCHAR(40) NOT NULL DEFAULT 'dajiala' COMMENT '文章列表供应商',
+          provider_ghid VARCHAR(255) NOT NULL DEFAULT '' COMMENT '供应商公众号标识',
+          provider_nickname VARCHAR(255) NOT NULL DEFAULT '' COMMENT '供应商返回公众号名称',
+          werss_feed_id VARCHAR(255) NOT NULL COMMENT 'WeRSS feeds.id',
+          enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否参与每日发现',
+          last_discovered_at DATETIME NULL COMMENT '最近成功发现时间',
+          last_discovery_error TEXT NULL COMMENT '最近发现错误',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_peer_wechat_source (source_id),
+          INDEX idx_peer_wechat_enabled (enabled),
+          CONSTRAINT fk_peer_wechat_source FOREIGN KEY (source_id) REFERENCES yimin_peer_sources(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行公众号付费发现配置';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_discovery_runs (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          run_key CHAR(32) NOT NULL COMMENT '任务查询标识',
+          report_date DATE NOT NULL COMMENT '发现窗口归属日期',
+          window_start_at DATETIME NOT NULL COMMENT '窗口开始时间（北京时间）',
+          window_end_at DATETIME NOT NULL COMMENT '窗口结束时间（北京时间）',
+          competitor_code VARCHAR(32) NULL COMMENT '指定同行，空表示全部',
+          status ENUM('running','completed','partial','failed') NOT NULL DEFAULT 'running' COMMENT '任务状态',
+          run_mode ENUM('discover','dry_run','retry_cached') NOT NULL DEFAULT 'discover' COMMENT '任务运行模式',
+          dry_run TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否仅做配置检查',
+          active_lock_key VARCHAR(80) NULL COMMENT '运行中互斥键，结束后清空',
+          account_count INT NOT NULL DEFAULT 0 COMMENT '公众号数量',
+          processed_account_count INT NOT NULL DEFAULT 0 COMMENT '已处理公众号数量',
+          success_account_count INT NOT NULL DEFAULT 0 COMMENT '成功公众号数量',
+          failed_account_count INT NOT NULL DEFAULT 0 COMMENT '失败公众号数量',
+          page_count INT NOT NULL DEFAULT 0 COMMENT '供应商请求页数',
+          provider_article_count INT NOT NULL DEFAULT 0 COMMENT '供应商返回文章数',
+          eligible_article_count INT NOT NULL DEFAULT 0 COMMENT '命中窗口的文章数',
+          inserted_article_count INT NOT NULL DEFAULT 0 COMMENT '写入 WeRSS 新文章数',
+          updated_article_count INT NOT NULL DEFAULT 0 COMMENT '更新 WeRSS 元数据数',
+          skipped_article_count INT NOT NULL DEFAULT 0 COMMENT '跳过文章数',
+          total_cost DECIMAL(12,4) NOT NULL DEFAULT 0 COMMENT '本次供应商费用',
+          remain_money DECIMAL(12,4) NULL COMMENT '供应商返回余额',
+          error TEXT NULL COMMENT '任务错误汇总',
+          started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '开始时间',
+          finished_at DATETIME NULL COMMENT '结束时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_peer_discovery_run_key (run_key),
+          UNIQUE KEY uk_peer_discovery_active_lock (active_lock_key),
+          INDEX idx_peer_discovery_report (report_date, competitor_code, dry_run, id),
+          INDEX idx_peer_discovery_started (started_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行公众号文章发现任务';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_discovery_batches (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
+          run_id BIGINT NOT NULL COMMENT '发现任务 ID',
+          account_id BIGINT NOT NULL COMMENT '公众号配置 ID',
+          page_no INT NOT NULL COMMENT '供应商页码',
+          request_offset TEXT NULL COMMENT '本页请求游标',
+          response_code INT NULL COMMENT '供应商响应码',
+          provider_ghid VARCHAR(255) NOT NULL DEFAULT '' COMMENT '本页公众号标识',
+          provider_nickname VARCHAR(255) NOT NULL DEFAULT '' COMMENT '本页公众号名称',
+          next_offset TEXT NULL COMMENT '下一页游标',
+          is_end TINYINT(1) NOT NULL DEFAULT 0 COMMENT '供应商是否已到末页',
+          cost_money DECIMAL(12,4) NOT NULL DEFAULT 0 COMMENT '本页费用',
+          remain_money DECIMAL(12,4) NULL COMMENT '本页后余额',
+          response_hash CHAR(64) NOT NULL DEFAULT '' COMMENT '清洗后响应哈希',
+          normalized_json JSON NULL COMMENT '不含密钥的标准化响应缓存',
+          status ENUM('fetched','imported','failed') NOT NULL DEFAULT 'fetched' COMMENT '批次状态',
+          article_count INT NOT NULL DEFAULT 0 COMMENT '本页文章数',
+          eligible_article_count INT NOT NULL DEFAULT 0 COMMENT '本页命中窗口数',
+          inserted_article_count INT NOT NULL DEFAULT 0 COMMENT '本页新增数',
+          updated_article_count INT NOT NULL DEFAULT 0 COMMENT '本页更新数',
+          skipped_article_count INT NOT NULL DEFAULT 0 COMMENT '本页跳过数',
+          error TEXT NULL COMMENT '导入错误',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_peer_discovery_batch (run_id, account_id, page_no),
+          INDEX idx_peer_discovery_batch_status (run_id, status),
+          CONSTRAINT fk_peer_discovery_batch_run FOREIGN KEY (run_id) REFERENCES yimin_peer_discovery_runs(id) ON DELETE CASCADE,
+          CONSTRAINT fk_peer_discovery_batch_account FOREIGN KEY (account_id) REFERENCES yimin_peer_wechat_accounts(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行公众号供应商响应缓存与导入结果';
 
         CREATE TABLE IF NOT EXISTS yimin_peer_imports (
           id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
@@ -2442,6 +2570,654 @@ async function startPeerRefresh(competitorCode = "") {
     active: true,
     run: await getPeerRefreshRun(runKey),
   };
+}
+
+function assertPeerDiscoveryConfiguration({ dryRun = false, retryCached = false } = {}) {
+  if (!werssDbConfig.database) {
+    throw new Error("未配置 WERSS_DATABASE_NAME，无法连接 WeRSS 数据库");
+  }
+  if (!dryRun && !retryCached && (!peerWechatDiscoveryConfig.apiKey || !peerWechatDiscoveryConfig.verifyCode)) {
+    throw new Error("未配置 DAJIALA_API_KEY 或 DAJIALA_VERIFYCODE");
+  }
+}
+
+function safeSecretEquals(left, right) {
+  if (!left || !right) return false;
+  const leftHash = createHash("sha256").update(String(left)).digest();
+  const rightHash = createHash("sha256").update(String(right)).digest();
+  return timingSafeEqual(leftHash, rightHash);
+}
+
+function isPeerDiscoveryAuthorized(req) {
+  if (isLoopbackRequest(req) || requireAuth(req)) return true;
+  const authorization = String(req.headers.authorization || "");
+  const bearerToken = authorization.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() || "";
+  const headerToken = String(req.headers["x-cron-token"] || "").trim();
+  return safeSecretEquals(peerWechatDiscoveryConfig.cronToken, bearerToken || headerToken);
+}
+
+async function syncPeerWechatDiscoveryAccounts(competitorCode = "") {
+  const codeFilter = competitorCode ? `AND c.code = ${sqlString(competitorCode)}` : "";
+  const sources = await mysqlJsonRows(`
+    SELECT JSON_OBJECT(
+      'sourceId', s.id,
+      'privateUrl', s.private_url,
+      'competitorCode', c.code,
+      'competitorName', c.private_name,
+      'sortOrder', c.sort_order
+    )
+    FROM yimin_peer_sources s
+    JOIN yimin_peer_competitors c ON c.id = s.competitor_id
+    WHERE s.source_type = 'wechat_rss'
+      AND s.enabled = 1
+      AND c.enabled = 1
+      ${codeFilter}
+    ORDER BY c.sort_order, c.id;
+  `);
+
+  for (const source of sources) {
+    const feedId = extractWerssFeedId(source.privateUrl);
+    if (!feedId) continue;
+    const seed = peerCompetitorSeeds.find((item) => item.code === source.competitorCode);
+    await mysqlExec(`
+      INSERT INTO yimin_peer_wechat_accounts (
+        source_id,
+        provider,
+        provider_ghid,
+        werss_feed_id,
+        enabled
+      )
+      VALUES (
+        ${sqlNumber(source.sourceId)},
+        'dajiala',
+        ${sqlString(seed?.providerGhid || "")},
+        ${sqlString(feedId)},
+        1
+      )
+      ON DUPLICATE KEY UPDATE
+        provider_ghid = IF(provider_ghid = '', VALUES(provider_ghid), provider_ghid),
+        werss_feed_id = VALUES(werss_feed_id),
+        updated_at = CURRENT_TIMESTAMP;
+    `);
+  }
+
+  return mysqlJsonRows(`
+    SELECT JSON_OBJECT(
+      'id', a.id,
+      'sourceId', a.source_id,
+      'providerGhid', a.provider_ghid,
+      'providerNickname', a.provider_nickname,
+      'werssFeedId', a.werss_feed_id,
+      'competitorCode', c.code,
+      'competitorName', c.private_name,
+      'sortOrder', c.sort_order
+    )
+    FROM yimin_peer_wechat_accounts a
+    JOIN yimin_peer_sources s ON s.id = a.source_id
+    JOIN yimin_peer_competitors c ON c.id = s.competitor_id
+    WHERE a.enabled = 1
+      AND s.enabled = 1
+      AND c.enabled = 1
+      ${codeFilter}
+    ORDER BY c.sort_order, c.id;
+  `);
+}
+
+async function getWerssFeedBootstrap(feedId) {
+  return werssMysqlJson(`
+    SELECT JSON_OBJECT(
+      'id', f.id,
+      'name', f.mp_name,
+      'status', f.status,
+      'latestArticleUrl', (
+        SELECT a.url
+        FROM articles a
+        WHERE a.mp_id = f.id
+          AND a.url <> ''
+        ORDER BY a.publish_time DESC, a.id DESC
+        LIMIT 1
+      )
+    )
+    FROM feeds f
+    WHERE f.id = ${sqlString(feedId)}
+    LIMIT 1;
+  `);
+}
+
+async function waitForPeerDiscoveryProviderSlot() {
+  const now = Date.now();
+  const waitMs = Math.max(0, peerDiscoveryNextProviderRequestAt - now);
+  if (waitMs > 0) await waitForMilliseconds(waitMs);
+  peerDiscoveryNextProviderRequestAt = Date.now() + peerWechatDiscoveryConfig.minIntervalMs;
+}
+
+async function fetchDajialaHistoryPage({ ghid = "", articleUrl = "", offset = "" }) {
+  await waitForPeerDiscoveryProviderSlot();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), peerWechatDiscoveryConfig.requestTimeoutMs);
+  try {
+    const response = await fetch(peerWechatDiscoveryConfig.providerUrl, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        ghid,
+        url: ghid ? "" : articleUrl,
+        nickname: "",
+        offset,
+        key: peerWechatDiscoveryConfig.apiKey,
+        verifycode: peerWechatDiscoveryConfig.verifyCode,
+      }),
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`大家啦接口返回 HTTP ${response.status}`);
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      throw new Error("大家啦接口返回了非 JSON 内容");
+    }
+    return normalizeDajialaResponse(payload);
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("大家啦接口请求超时；为避免重复扣费，本次不自动重试");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function savePeerDiscoveryBatch({ runId, accountId, pageNo, requestOffset, normalized, status = "fetched", error = "" }) {
+  const safePayload = {
+    code: normalized.code,
+    message: normalized.message,
+    errorMessage: normalized.errorMessage,
+    costMoney: normalized.costMoney,
+    remainMoney: normalized.remainMoney,
+    offset: normalized.offset,
+    isEnd: normalized.isEnd,
+    nickname: normalized.nickname,
+    ghid: normalized.ghid,
+    articles: normalized.articles,
+  };
+  const responseHash = createHash("sha256").update(JSON.stringify(safePayload)).digest("hex");
+  await mysqlExec(`
+    INSERT INTO yimin_peer_discovery_batches (
+      run_id, account_id, page_no, request_offset, response_code,
+      provider_ghid, provider_nickname, next_offset, is_end,
+      cost_money, remain_money, response_hash, normalized_json,
+      status, article_count, error
+    )
+    VALUES (
+      ${sqlNumber(runId)}, ${sqlNumber(accountId)}, ${sqlNumber(pageNo)}, ${sqlString(requestOffset)},
+      ${sqlNumber(normalized.code, -1)}, ${sqlString(normalized.ghid)}, ${sqlString(normalized.nickname)},
+      ${sqlString(normalized.offset)}, ${normalized.isEnd ? 1 : 0}, ${sqlNumber(normalized.costMoney)},
+      ${normalized.remainMoney !== null && Number.isFinite(Number(normalized.remainMoney)) ? sqlNumber(normalized.remainMoney) : "NULL"},
+      ${sqlString(responseHash)}, ${sqlJson(safePayload)}, ${sqlString(status)},
+      ${sqlNumber(normalized.articles.length)}, ${error ? sqlString(error) : "NULL"}
+    )
+    ON DUPLICATE KEY UPDATE
+      response_code = VALUES(response_code),
+      provider_ghid = VALUES(provider_ghid),
+      provider_nickname = VALUES(provider_nickname),
+      next_offset = VALUES(next_offset),
+      is_end = VALUES(is_end),
+      cost_money = VALUES(cost_money),
+      remain_money = VALUES(remain_money),
+      response_hash = VALUES(response_hash),
+      normalized_json = VALUES(normalized_json),
+      status = VALUES(status),
+      article_count = VALUES(article_count),
+      error = VALUES(error),
+      updated_at = CURRENT_TIMESTAMP;
+  `);
+}
+
+async function loadCachedPeerDiscoveryPages(reportDate, accountId) {
+  return mysqlJsonRows(`
+    SELECT JSON_OBJECT(
+      'pageNo', b.page_no,
+      'normalized', b.normalized_json
+    )
+    FROM yimin_peer_discovery_batches b
+    JOIN yimin_peer_discovery_runs r ON r.id = b.run_id
+    WHERE r.report_date = ${sqlString(reportDate)}
+      AND b.account_id = ${sqlNumber(accountId)}
+      AND b.normalized_json IS NOT NULL
+      AND b.status IN ('fetched','imported','failed')
+    ORDER BY r.id DESC, b.page_no ASC;
+  `);
+}
+
+async function importPeerArticlesToWerss(account, articles) {
+  const recordsById = new Map();
+  for (const article of articles) {
+    const record = buildWerssArticleRecord(account.werssFeedId, article);
+    if (record) recordsById.set(record.id, record);
+  }
+  const records = [...recordsById.values()];
+  if (!records.length) return { inserted: 0, updated: 0, skipped: articles.length };
+
+  const existingIds = (await werssMysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(id), JSON_ARRAY())
+    FROM articles
+    WHERE id IN (${records.map((record) => sqlString(record.id)).join(",")});
+  `)) || [];
+  const existingSet = new Set(existingIds.map(String));
+
+  await werssMysqlExec(`
+    START TRANSACTION;
+    INSERT INTO articles (
+      id, mp_id, title, pic_url, url, description, extinfo, status,
+      publish_time, create_time, publish_type, publish_src, publish_status,
+      art_type, show_type, publish_info, original_check_type, in_profile,
+      pre_publish_status, service_type, item_show_type, copyright_stat,
+      has_red_packet_cover, created_at, updated_at, updated_at_millis,
+      is_export, \`read\`, favorite, fix_fail_count, has_content, content, content_html
+    )
+    VALUES
+      ${records.map((record) => `(
+        ${sqlString(record.id)}, ${sqlString(record.mpId)}, ${sqlString(record.title)},
+        ${sqlString(record.picUrl)}, ${sqlString(record.url)}, ${sqlString(record.description)},
+        ${sqlString(JSON.stringify({ discoverySource: "dajiala" }))}, 1,
+        ${sqlNumber(record.publishTime)}, ${sqlNumber(record.createTime)}, 0, 0, 0,
+        0, 0, ${sqlString(JSON.stringify(record.publishInfo))}, 0, 0,
+        0, 0, ${sqlNumber(record.itemShowType)}, 0, 0,
+        CURRENT_TIMESTAMP, ${sqlNumber(record.updatedAt)}, ${sqlNumber(record.updatedAtMillis)},
+        0, 0, 0, 0, 0, '', ''
+      )`).join(",\n")}
+    ON DUPLICATE KEY UPDATE
+      title = VALUES(title),
+      pic_url = VALUES(pic_url),
+      url = VALUES(url),
+      description = VALUES(description),
+      extinfo = IF(extinfo = '', VALUES(extinfo), extinfo),
+      status = 1,
+      publish_time = VALUES(publish_time),
+      create_time = VALUES(create_time),
+      publish_info = VALUES(publish_info),
+      item_show_type = VALUES(item_show_type),
+      updated_at = GREATEST(updated_at, VALUES(updated_at)),
+      updated_at_millis = GREATEST(updated_at_millis, VALUES(updated_at_millis));
+    COMMIT;
+  `);
+  const inserted = records.filter((record) => !existingSet.has(record.id)).length;
+  return {
+    inserted,
+    updated: records.length - inserted,
+    skipped: Math.max(0, articles.length - records.length),
+  };
+}
+
+async function processPeerDiscoveryAccount({ run, account, window, dryRun, retryCached, totals }) {
+  const feed = await getWerssFeedBootstrap(account.werssFeedId);
+  if (!feed || Number(feed.status) !== 1) {
+    throw new Error(`WeRSS feed ${account.werssFeedId} 不存在或未启用`);
+  }
+  if (!account.providerGhid && !feed.latestArticleUrl) {
+    throw new Error("既未配置 provider_ghid，也没有可用于识别公众号的历史文章 URL");
+  }
+  if (dryRun) return { pages: 0, providerArticles: 0, eligible: 0, inserted: 0, updated: 0, skipped: 0, cost: 0 };
+
+  let pages = [];
+  if (retryCached) {
+    const cached = await loadCachedPeerDiscoveryPages(run.reportDate, account.id);
+    const seenPageNumbers = new Set();
+    pages = cached.filter((item) => {
+      if (!item.normalized || Number(item.normalized.code) !== 0) return false;
+      if (seenPageNumbers.has(Number(item.pageNo))) return false;
+      seenPageNumbers.add(Number(item.pageNo));
+      return true;
+    }).map((item) => ({ pageNo: Number(item.pageNo), normalized: item.normalized }));
+    if (!pages.length) throw new Error("没有可重试导入的供应商缓存；未发起新的付费请求");
+    for (const page of pages) {
+      await savePeerDiscoveryBatch({
+        runId: run.id,
+        accountId: account.id,
+        pageNo: page.pageNo,
+        requestOffset: "cached-retry",
+        normalized: { ...page.normalized, costMoney: 0 },
+      });
+    }
+  } else {
+    let ghid = String(account.providerGhid || "");
+    let offset = "";
+    for (let pageNo = 1; pageNo <= peerWechatDiscoveryConfig.maxPagesPerAccount; pageNo += 1) {
+      if (peerWechatDiscoveryConfig.maxCostPerRun > 0 && totals.cost >= peerWechatDiscoveryConfig.maxCostPerRun) {
+        throw new Error(`已达到单次费用上限 ${peerWechatDiscoveryConfig.maxCostPerRun} 元`);
+      }
+      const normalized = await fetchDajialaHistoryPage({
+        ghid,
+        articleUrl: feed.latestArticleUrl || "",
+        offset,
+      });
+      totals.cost += normalized.costMoney;
+      if (normalized.remainMoney !== null && Number.isFinite(Number(normalized.remainMoney))) {
+        totals.remainMoney = normalized.remainMoney;
+      }
+      await savePeerDiscoveryBatch({
+        runId: run.id,
+        accountId: account.id,
+        pageNo,
+        requestOffset: offset,
+        normalized,
+        status: normalized.code === 0 ? "fetched" : "failed",
+        error: normalized.code === 0 ? "" : (normalized.errorMessage || normalized.message || `供应商错误码 ${normalized.code}`),
+      });
+      if (normalized.code !== 0) {
+        throw new Error(normalized.errorMessage || normalized.message || `大家啦接口错误码 ${normalized.code}`);
+      }
+      pages.push({ pageNo, normalized });
+      ghid = normalized.ghid || ghid;
+      if (normalized.ghid || normalized.nickname) {
+        await mysqlExec(`
+          UPDATE yimin_peer_wechat_accounts
+          SET provider_ghid = IF(${sqlString(normalized.ghid)} = '', provider_ghid, ${sqlString(normalized.ghid)}),
+              provider_nickname = IF(${sqlString(normalized.nickname)} = '', provider_nickname, ${sqlString(normalized.nickname)}),
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = ${sqlNumber(account.id)};
+        `);
+      }
+      const positiveTimes = normalized.articles.map((article) => article.publishTime).filter((value) => value > 0);
+      const oldestPublishTime = positiveTimes.length ? Math.min(...positiveTimes) : 0;
+      const windowStartSeconds = Math.floor(window.windowStart.getTime() / 1000);
+      if (normalized.isEnd || !normalized.offset || (oldestPublishTime > 0 && oldestPublishTime < windowStartSeconds)) break;
+      offset = normalized.offset;
+    }
+  }
+
+  const windowStartSeconds = Math.floor(window.windowStart.getTime() / 1000);
+  const windowEndSeconds = Math.floor(window.windowEnd.getTime() / 1000);
+  const allArticles = pages.flatMap((page) => page.normalized.articles || []);
+  const eligibleByIdentity = new Map();
+  for (const article of allArticles) {
+    if (article.publishTime < windowStartSeconds || article.publishTime >= windowEndSeconds) continue;
+    const key = `${article.appmsgid}:${article.position}`;
+    if (article.appmsgid && article.position > 0) eligibleByIdentity.set(key, article);
+  }
+  const eligibleArticles = [...eligibleByIdentity.values()];
+  await mysqlExec(`
+    UPDATE yimin_peer_discovery_batches
+    SET eligible_article_count = ${sqlNumber(eligibleArticles.length)},
+        updated_at = CURRENT_TIMESTAMP
+    WHERE run_id = ${sqlNumber(run.id)}
+      AND account_id = ${sqlNumber(account.id)};
+  `);
+  const imported = await importPeerArticlesToWerss(account, eligibleArticles);
+  await mysqlExec(`
+    UPDATE yimin_peer_discovery_batches
+    SET status = 'imported',
+        eligible_article_count = ${sqlNumber(eligibleArticles.length)},
+        inserted_article_count = ${sqlNumber(imported.inserted)},
+        updated_article_count = ${sqlNumber(imported.updated)},
+        skipped_article_count = ${sqlNumber(imported.skipped)},
+        error = NULL,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE run_id = ${sqlNumber(run.id)}
+      AND account_id = ${sqlNumber(account.id)};
+    UPDATE yimin_peer_wechat_accounts
+    SET last_discovered_at = CURRENT_TIMESTAMP,
+        last_discovery_error = NULL,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ${sqlNumber(account.id)};
+  `);
+  return {
+    pages: pages.length,
+    providerArticles: allArticles.length,
+    eligible: eligibleArticles.length,
+    inserted: imported.inserted,
+    updated: imported.updated,
+    skipped: Math.max(0, allArticles.length - eligibleArticles.length) + imported.skipped,
+  };
+}
+
+async function updatePeerDiscoveryRun(runId, totals, { status = "running", errors = [], finished = false } = {}) {
+  await mysqlExec(`
+    UPDATE yimin_peer_discovery_runs
+    SET status = ${sqlString(status)},
+        processed_account_count = ${sqlNumber(totals.processed)},
+        success_account_count = ${sqlNumber(totals.success)},
+        failed_account_count = ${sqlNumber(totals.failed)},
+        page_count = ${sqlNumber(totals.pages)},
+        provider_article_count = ${sqlNumber(totals.providerArticles)},
+        eligible_article_count = ${sqlNumber(totals.eligible)},
+        inserted_article_count = ${sqlNumber(totals.inserted)},
+        updated_article_count = ${sqlNumber(totals.updated)},
+        skipped_article_count = ${sqlNumber(totals.skipped)},
+        total_cost = ${sqlNumber(totals.cost)},
+        remain_money = ${totals.remainMoney === null ? "NULL" : sqlNumber(totals.remainMoney)},
+        error = ${errors.length ? sqlString(errors.join("；")) : "NULL"},
+        active_lock_key = ${finished ? "NULL" : "active_lock_key"},
+        finished_at = ${finished ? "CURRENT_TIMESTAMP" : "finished_at"},
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ${sqlNumber(runId)};
+  `);
+}
+
+async function readPeerDiscoveryBatchTotals(runId) {
+  return mysqlJson(`
+    SELECT JSON_OBJECT(
+      'pages', COUNT(*),
+      'providerArticles', COALESCE(SUM(article_count), 0),
+      'eligible', COALESCE(SUM(account_eligible), 0),
+      'cost', COALESCE(SUM(cost_money), 0),
+      'remainMoney', (
+        SELECT remain_money
+        FROM yimin_peer_discovery_batches
+        WHERE run_id = ${sqlNumber(runId)}
+          AND remain_money IS NOT NULL
+        ORDER BY id DESC
+        LIMIT 1
+      )
+    )
+    FROM (
+      SELECT
+        b.id,
+        b.article_count,
+        b.cost_money,
+        IF(
+          b.page_no = MIN(b.page_no) OVER (PARTITION BY b.account_id),
+          MAX(b.eligible_article_count) OVER (PARTITION BY b.account_id),
+          0
+        ) AS account_eligible
+      FROM yimin_peer_discovery_batches b
+      WHERE b.run_id = ${sqlNumber(runId)}
+    ) batch_totals;
+  `);
+}
+
+async function getPeerWechatDiscoveryRun(runKey) {
+  const run = await mysqlJson(`
+    SELECT JSON_OBJECT(
+      'id', id,
+      'runKey', run_key,
+      'reportDate', DATE_FORMAT(report_date, '%Y-%m-%d'),
+      'windowStartAt', DATE_FORMAT(window_start_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'windowEndAt', DATE_FORMAT(window_end_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'competitorCode', competitor_code,
+      'status', status,
+      'runMode', run_mode,
+      'dryRun', IF(dry_run = 1, CAST(TRUE AS JSON), CAST(FALSE AS JSON)),
+      'accountCount', account_count,
+      'processedAccountCount', processed_account_count,
+      'successAccountCount', success_account_count,
+      'failedAccountCount', failed_account_count,
+      'pageCount', page_count,
+      'providerArticleCount', provider_article_count,
+      'eligibleArticleCount', eligible_article_count,
+      'insertedArticleCount', inserted_article_count,
+      'updatedArticleCount', updated_article_count,
+      'skippedArticleCount', skipped_article_count,
+      'totalCost', total_cost,
+      'remainMoney', remain_money,
+      'error', error,
+      'startedAt', DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'finishedAt', IF(finished_at IS NULL, NULL, DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%s+08:00'))
+    )
+    FROM yimin_peer_discovery_runs
+    WHERE run_key = ${sqlString(runKey)}
+    LIMIT 1;
+  `);
+  if (!run) return null;
+  run.accounts = await mysqlJsonRows(`
+    SELECT JSON_OBJECT(
+      'competitorCode', c.code,
+      'competitorName', c.private_name,
+      'feedId', a.werss_feed_id,
+      'status', IF(SUM(b.status = 'failed') > 0, 'failed', IF(SUM(b.status = 'imported') > 0, 'imported', 'pending')),
+      'pageCount', COUNT(b.id),
+      'articleCount', COALESCE(SUM(b.article_count), 0),
+      'eligibleArticleCount', COALESCE(MAX(b.eligible_article_count), 0),
+      'error', MAX(b.error)
+    )
+    FROM yimin_peer_wechat_accounts a
+    JOIN yimin_peer_sources s ON s.id = a.source_id
+    JOIN yimin_peer_competitors c ON c.id = s.competitor_id
+    LEFT JOIN yimin_peer_discovery_batches b ON b.account_id = a.id AND b.run_id = ${sqlNumber(run.id)}
+    WHERE a.id IN (
+      SELECT account_id FROM yimin_peer_discovery_batches WHERE run_id = ${sqlNumber(run.id)}
+    )
+    GROUP BY a.id, c.code, c.private_name, a.werss_feed_id, c.sort_order
+    ORDER BY c.sort_order, a.id;
+  `);
+  delete run.id;
+  return run;
+}
+
+async function getLatestPeerWechatDiscoveryRun() {
+  const row = await mysqlJson(`
+    SELECT JSON_OBJECT('runKey', run_key)
+    FROM yimin_peer_discovery_runs
+    ORDER BY id DESC
+    LIMIT 1;
+  `);
+  return row?.runKey ? getPeerWechatDiscoveryRun(row.runKey) : null;
+}
+
+async function runPeerWechatDiscovery(run, accounts, options) {
+  const totals = {
+    processed: 0, success: 0, failed: 0, pages: 0,
+    providerArticles: 0, eligible: 0, inserted: 0, updated: 0, skipped: 0,
+    cost: 0, remainMoney: null,
+  };
+  const errors = [];
+  try {
+    for (const account of accounts) {
+      try {
+        const result = await processPeerDiscoveryAccount({
+          run,
+          account,
+          window: options.window,
+          dryRun: options.dryRun,
+          retryCached: options.retryCached,
+          totals,
+        });
+        totals.inserted += result.inserted;
+        totals.updated += result.updated;
+        totals.skipped += result.skipped;
+        totals.success += 1;
+      } catch (error) {
+        const cleanError = normalizePeerText(error instanceof Error ? error.message : String(error));
+        totals.failed += 1;
+        errors.push(`${account.competitorName}：${cleanError}`);
+        await mysqlExec(`
+          UPDATE yimin_peer_wechat_accounts
+          SET last_discovery_error = ${sqlString(cleanError)},
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = ${sqlNumber(account.id)};
+        `);
+      }
+      totals.processed += 1;
+      const batchTotals = await readPeerDiscoveryBatchTotals(run.id);
+      totals.pages = Number(batchTotals?.pages || 0);
+      totals.providerArticles = Number(batchTotals?.providerArticles || 0);
+      totals.eligible = Number(batchTotals?.eligible || 0);
+      totals.cost = Number(batchTotals?.cost || totals.cost || 0);
+      totals.remainMoney = batchTotals?.remainMoney === null || batchTotals?.remainMoney === undefined
+        ? totals.remainMoney
+        : Number(batchTotals.remainMoney);
+      await updatePeerDiscoveryRun(run.id, totals, { errors });
+    }
+    const status = totals.failed === 0 ? "completed" : totals.success > 0 ? "partial" : "failed";
+    await updatePeerDiscoveryRun(run.id, totals, { status, errors, finished: true });
+  } catch (error) {
+    errors.push(normalizePeerText(error instanceof Error ? error.message : String(error)));
+    await updatePeerDiscoveryRun(run.id, totals, { status: "failed", errors, finished: true });
+  }
+}
+
+async function startPeerWechatDiscovery({ reportDate, competitorCode = "", dryRun = false, refresh = false, retryCached = false }) {
+  assertPeerDiscoveryConfiguration({ dryRun, retryCached });
+  if (activePeerWechatDiscovery) {
+    return { started: false, reused: true, run: await getPeerWechatDiscoveryRun(activePeerWechatDiscovery.runKey) };
+  }
+  await mysqlExec(`
+    UPDATE yimin_peer_discovery_runs
+    SET status = 'failed',
+        active_lock_key = NULL,
+        error = CONCAT_WS('；', NULLIF(error, ''), '任务运行超过 2 小时，已释放互斥锁'),
+        finished_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE status = 'running'
+      AND started_at < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 2 HOUR);
+  `);
+  const running = await mysqlJson(`
+    SELECT JSON_OBJECT('runKey', run_key)
+    FROM yimin_peer_discovery_runs
+    WHERE status = 'running'
+    ORDER BY id DESC
+    LIMIT 1;
+  `);
+  if (running?.runKey) {
+    return { started: false, reused: true, run: await getPeerWechatDiscoveryRun(running.runKey) };
+  }
+  if (!refresh && !retryCached) {
+    const existing = await mysqlJson(`
+      SELECT JSON_OBJECT('runKey', run_key)
+      FROM yimin_peer_discovery_runs
+      WHERE report_date = ${sqlString(reportDate)}
+        AND competitor_code <=> ${competitorCode ? sqlString(competitorCode) : "NULL"}
+        AND dry_run = ${dryRun ? 1 : 0}
+      ORDER BY id DESC
+      LIMIT 1;
+    `);
+    if (existing?.runKey) {
+      return { started: false, reused: true, run: await getPeerWechatDiscoveryRun(existing.runKey) };
+    }
+  }
+
+  const window = getPeerDiscoveryWindow(reportDate);
+  const accounts = await syncPeerWechatDiscoveryAccounts(competitorCode);
+  if (!accounts.length) throw new Error(competitorCode ? "该同行没有可用的公众号配置" : "没有可用的同行公众号配置");
+  const runKey = randomBytes(16).toString("hex");
+  const activeLockKey = "peer-wechat-discovery";
+  await mysqlExec(`
+    INSERT INTO yimin_peer_discovery_runs (
+      run_key, report_date, window_start_at, window_end_at, competitor_code,
+      status, run_mode, dry_run, active_lock_key, account_count
+    )
+    VALUES (
+      ${sqlString(runKey)}, ${sqlString(reportDate)}, ${sqlDate(window.windowStart)}, ${sqlDate(window.windowEnd)},
+      ${competitorCode ? sqlString(competitorCode) : "NULL"}, 'running',
+      ${sqlString(dryRun ? "dry_run" : retryCached ? "retry_cached" : "discover")}, ${dryRun ? 1 : 0},
+      ${sqlString(activeLockKey)}, ${sqlNumber(accounts.length)}
+    );
+  `);
+  const runRow = await mysqlJson(`
+    SELECT JSON_OBJECT('id', id, 'runKey', run_key, 'reportDate', DATE_FORMAT(report_date, '%Y-%m-%d'))
+    FROM yimin_peer_discovery_runs WHERE run_key = ${sqlString(runKey)} LIMIT 1;
+  `);
+  activePeerWechatDiscovery = { runKey };
+  void runPeerWechatDiscovery(runRow, accounts, { window, dryRun, retryCached })
+    .catch((error) => console.error("Peer WeChat discovery failed:", error))
+    .finally(() => {
+      if (activePeerWechatDiscovery?.runKey === runKey) activePeerWechatDiscovery = null;
+    });
+  return { started: true, reused: false, run: await getPeerWechatDiscoveryRun(runKey) };
 }
 
 async function upsertSource(source, { enabled = true } = {}) {
@@ -12823,6 +13599,68 @@ const server = createServer(async (req, res) => {
         ok: true,
         ...payload,
       });
+      return;
+    }
+
+    if (url.pathname === "/api/peer-monitor/wechat/discover" && req.method === "POST") {
+      if (!isPeerDiscoveryAuthorized(req)) {
+        sendJson(res, 401, { ok: false, error: "请使用管理员登录、loopback 请求或有效的定时任务令牌" });
+        return;
+      }
+      await initDb();
+      const body = await readJsonBody(req);
+      const reportDate = String(body.date || url.searchParams.get("date") || getShanghaiDate());
+      const competitorCode = String(body.competitor || url.searchParams.get("competitor") || "");
+      if (competitorCode && !/^peer-[a-i]$/.test(competitorCode)) {
+        sendJson(res, 400, { ok: false, error: "competitor 参数无效" });
+        return;
+      }
+      const refresh = body.refresh === true || url.searchParams.get("refresh") === "1";
+      const retryCached = body.retryCached === true || url.searchParams.get("retryCached") === "1";
+      const dryRun = body.dryRun === true || url.searchParams.get("dryRun") === "1";
+      if ((refresh && retryCached) || (dryRun && retryCached)) {
+        sendJson(res, 400, { ok: false, error: "refresh、dryRun 与 retryCached 不能同时使用" });
+        return;
+      }
+      try {
+        getPeerDiscoveryWindow(reportDate);
+        const result = await startPeerWechatDiscovery({
+          reportDate,
+          competitorCode,
+          dryRun,
+          refresh,
+          retryCached,
+        });
+        sendJson(res, result.started ? 202 : 200, { ok: true, ...result });
+      } catch (error) {
+        sendJson(res, 409, { ok: false, error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+
+    if (url.pathname === "/api/peer-monitor/wechat/discovery-runs/latest" && req.method === "GET") {
+      if (!isPeerDiscoveryAuthorized(req)) {
+        sendJson(res, 401, { ok: false, error: "无权查看公众号发现任务" });
+        return;
+      }
+      await initDb();
+      sendJson(res, 200, { ok: true, run: await getLatestPeerWechatDiscoveryRun() });
+      return;
+    }
+
+    const peerDiscoveryRunMatch = url.pathname.match(/^\/api\/peer-monitor\/wechat\/discovery-runs\/([a-f0-9]{32})$/);
+    if (peerDiscoveryRunMatch && req.method === "GET") {
+      if (!isPeerDiscoveryAuthorized(req)) {
+        sendJson(res, 401, { ok: false, error: "无权查看公众号发现任务" });
+        return;
+      }
+      await initDb();
+      const run = await getPeerWechatDiscoveryRun(peerDiscoveryRunMatch[1]);
+      if (!run) {
+        sendJson(res, 404, { ok: false, error: "公众号发现任务不存在" });
+        return;
+      }
+      sendJson(res, 200, { ok: true, run });
       return;
     }
 

@@ -57,7 +57,7 @@ http://127.0.0.1:4173
 - 当前监控同行A–同行I，共 9 家、420 个官网项目；官网数据只从 `data/peer-monitor-projects.json` 导入，不会自动重新抓取网站
 - 左侧同行列表按 `yimin_peer_competitors.sort_order` 从小到大展示（同值时按 `id`），首次进入时右侧默认加载排序第一项；初始化只为新同行写入默认顺序，后续可直接调整数据库排序且服务重启不会覆盖
 - 页面和数据接口只返回匿名代号、项目结构化信息和经过清洗的公众号内容；公众号卡片可在站内打开匿名化全文，但不返回真实同行名称、域名、公众号名称、原文链接或图片
-- 当前同行B、C、F、G、H、I已配置公众号 RSS；“刷新并补抓”只对已登录管理员显示，刷新在后台执行并可查询进度
+- 同行A–同行I均已配置公众号 RSS；“刷新并补抓”只对已登录管理员显示，刷新在后台执行并可查询进度
 - RSS 暂未提供正文时，页面明确标记“等待自动补全文”并只展示摘要；后续刷新会重新检查并补入新出现的正文，已入库的正文不会被空内容覆盖
 - 每次刷新只写入新文章；同时按 URL、RSS 外部 ID、标题与发布时间识别同一篇文章，已有完整文章直接跳过，仅对历史缺失正文且 RSS 新提供正文的记录执行补写
 - 公众号列表在服务端与前端双重去重，避免 RSS 标识变化、旧缓存或重复响应把同一篇文章显示多次
@@ -91,6 +91,28 @@ npm run peer:seed -- /path/to/all_companies_projects.json data/peer-monitor-proj
 ```
 
 服务启动时会按文件内容哈希幂等导入；同一份数据不会重复新增项目。
+
+### 公众号文章列表发现接口
+
+`yimin_ai_hot` 可以调用大家啦历史文章接口，把固定窗口（前一日 06:30 至报告日 06:30）的文章元数据幂等写入 WeRSS `articles`。任务异步执行，供应商响应先以不含密钥的标准化 JSON 缓存在 `aiwork`；若后续写 WeRSS 失败，可用 `retryCached=1` 只重放缓存，避免再次请求付费接口。
+
+公网调用必须携带 `PEER_DISCOVERY_CRON_TOKEN`，服务端 loopback 请求和已登录管理员也允许触发：
+
+```bash
+curl -X POST 'https://your-domain.example/api/peer-monitor/wechat/discover' \
+  -H 'Authorization: Bearer your-cron-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"date":"2026-08-07"}'
+```
+
+首次成功返回 HTTP 202 和 `run.runKey`；重复请求相同日期默认复用已有任务，不产生新的付费调用。仅在明确需要重新向供应商取数时传 `refresh=true`。状态查询：
+
+```bash
+curl 'https://your-domain.example/api/peer-monitor/wechat/discovery-runs/RUN_KEY' \
+  -H 'Authorization: Bearer your-cron-token'
+```
+
+上线前需要在 `.env` 配置 `WERSS_DATABASE_*`、`DAJIALA_API_KEY`、`DAJIALA_VERIFYCODE` 和 `PEER_DISCOVERY_CRON_TOKEN`。发现任务只写文章元数据并设置 `has_content=0`，不会覆盖 WeRSS 已有正文；正文仍由单独的 WeRSS 补全任务处理。
 
 ## 市场素材
 
