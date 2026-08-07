@@ -9,6 +9,7 @@ import {
   extractWerssFeedId,
   getPeerDiscoveryWindow,
   normalizeDajialaResponse,
+  resolveDajialaLookup,
 } from "./lib/peer-wechat-discovery.mjs";
 
 const rootDir = resolve(".");
@@ -129,6 +130,8 @@ const peerCompetitorSeeds = [
     privateDomain: "aqyimin.com",
     brandTerms: ["桉侨移民", "桉侨", "ANQIAO"],
     rssUrl: "https://ai.globevisa.space/feed/MP_WXS_3625711724.rss",
+    providerNickname: "深圳桉侨移民",
+    providerLookupMode: "nickname",
   },
   {
     code: "peer-b",
@@ -137,6 +140,7 @@ const peerCompetitorSeeds = [
     privateDomain: "ekimmigration.com",
     brandTerms: ["景鸿集团", "景鸿移民", "景鸿"],
     rssUrl: "https://ai.globevisa.space/feed/MP_WXS_3087573428.rss",
+    providerNickname: "景鸿移民服务号",
   },
   {
     code: "peer-c",
@@ -145,6 +149,7 @@ const peerCompetitorSeeds = [
     privateDomain: "iqiaowai.com",
     brandTerms: ["侨外出国", "侨外移民", "侨外"],
     rssUrl: "https://ai.globevisa.space/feed/MP_WXS_3639875067.rss",
+    providerNickname: "侨外移民",
   },
   {
     code: "peer-d",
@@ -154,6 +159,7 @@ const peerCompetitorSeeds = [
     brandTerms: ["亨瑞集团", "亨瑞移民", "亨瑞"],
     rssUrl: "https://ai.globevisa.space/feed/MP_WXS_2390329593.rss",
     providerGhid: "henrygroup1992",
+    providerNickname: "亨瑞出国",
   },
   {
     code: "peer-e",
@@ -162,6 +168,7 @@ const peerCompetitorSeeds = [
     privateDomain: "worldwayhk.com",
     brandTerms: ["世贸通集团", "世贸通移民", "世贸通"],
     rssUrl: "https://ai.globevisa.space/feed/MP_WXS_2395537072.rss",
+    providerNickname: "世贸通移民",
   },
   {
     code: "peer-f",
@@ -170,6 +177,7 @@ const peerCompetitorSeeds = [
     privateDomain: "austargroup.com",
     brandTerms: ["澳星集团", "澳星出国", "澳星"],
     rssUrl: "https://ai.globevisa.space/feed/MP_WXS_3687013568.rss",
+    providerNickname: "澳星出国",
   },
   {
     code: "peer-g",
@@ -178,6 +186,7 @@ const peerCompetitorSeeds = [
     privateDomain: "welltrendvisa.com",
     brandTerms: ["和中移民", "和中", "WellTrend"],
     rssUrl: "https://ai.globevisa.space/feed/MP_WXS_3903727517.rss",
+    providerNickname: "和中移民出国",
   },
   {
     code: "peer-h",
@@ -186,6 +195,7 @@ const peerCompetitorSeeds = [
     privateDomain: "wailianvisa.com",
     brandTerms: ["外联出国", "外联移民", "外联"],
     rssUrl: "https://ai.globevisa.space/feed/MP_WXS_2396409440.rss",
+    providerNickname: "外联出国",
   },
   {
     code: "peer-i",
@@ -194,6 +204,7 @@ const peerCompetitorSeeds = [
     privateDomain: "zlglobal.net",
     brandTerms: ["兆龙移民", "兆龙出国", "兆龙"],
     rssUrl: "https://ai.globevisa.space/feed/MP_WXS_3081660335.rss",
+    providerNickname: "兆龙移民",
   },
 ];
 const peerMonitorConfig = {
@@ -1080,8 +1091,9 @@ async function initDb() {
           id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
           source_id BIGINT NOT NULL COMMENT '同行公众号 RSS 来源 ID',
           provider VARCHAR(40) NOT NULL DEFAULT 'dajiala' COMMENT '文章列表供应商',
+          lookup_mode ENUM('auto','ghid','url','nickname') NOT NULL DEFAULT 'auto' COMMENT '供应商账号查询方式',
           provider_ghid VARCHAR(255) NOT NULL DEFAULT '' COMMENT '供应商公众号标识',
-          provider_nickname VARCHAR(255) NOT NULL DEFAULT '' COMMENT '供应商返回公众号名称',
+          provider_nickname VARCHAR(255) NOT NULL DEFAULT '' COMMENT '公众号名称，可作为供应商昵称查询条件',
           werss_feed_id VARCHAR(255) NOT NULL COMMENT 'WeRSS feeds.id',
           enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否参与每日发现',
           last_discovered_at DATETIME NULL COMMENT '最近成功发现时间',
@@ -1722,6 +1734,7 @@ async function initDb() {
         `);
       }
 
+      await ensurePeerWechatDiscoverySchema();
       await ensureReportDateUniqueness();
       await seedConfiguredSources();
       await seedPeerMonitorData();
@@ -1729,6 +1742,40 @@ async function initDb() {
   }
 
   return dbReadyPromise;
+}
+
+async function ensurePeerWechatDiscoverySchema() {
+  const accountColumns = await mysqlRun(`
+    SELECT COLUMN_NAME
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+      AND TABLE_NAME = 'yimin_peer_wechat_accounts'
+      AND COLUMN_NAME = 'lookup_mode';
+  `);
+  if (!accountColumns.includes("lookup_mode")) {
+    await mysqlExec(`
+      ALTER TABLE yimin_peer_wechat_accounts
+      ADD COLUMN lookup_mode ENUM('auto','ghid','url','nickname') NOT NULL DEFAULT 'auto'
+        COMMENT '供应商账号查询方式'
+      AFTER provider;
+    `);
+  }
+
+  const runColumns = await mysqlRun(`
+    SELECT COLUMN_NAME
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+      AND TABLE_NAME = 'yimin_peer_discovery_runs'
+      AND COLUMN_NAME = 'run_mode';
+  `);
+  if (!runColumns.includes("run_mode")) {
+    await mysqlExec(`
+      ALTER TABLE yimin_peer_discovery_runs
+      ADD COLUMN run_mode ENUM('discover','dry_run','retry_cached') NOT NULL DEFAULT 'discover'
+        COMMENT '任务运行模式'
+      AFTER status;
+    `);
+  }
 }
 
 async function ensureReportDateUniqueness() {
@@ -2623,19 +2670,29 @@ async function syncPeerWechatDiscoveryAccounts(competitorCode = "") {
       INSERT INTO yimin_peer_wechat_accounts (
         source_id,
         provider,
+        lookup_mode,
         provider_ghid,
+        provider_nickname,
         werss_feed_id,
         enabled
       )
       VALUES (
         ${sqlNumber(source.sourceId)},
         'dajiala',
+        ${sqlString(seed?.providerLookupMode || "auto")},
         ${sqlString(seed?.providerGhid || "")},
+        ${sqlString(seed?.providerNickname || "")},
         ${sqlString(feedId)},
         1
       )
       ON DUPLICATE KEY UPDATE
+        lookup_mode = IF(
+          lookup_mode = 'auto' AND VALUES(lookup_mode) <> 'auto',
+          VALUES(lookup_mode),
+          lookup_mode
+        ),
         provider_ghid = IF(provider_ghid = '', VALUES(provider_ghid), provider_ghid),
+        provider_nickname = IF(provider_nickname = '', VALUES(provider_nickname), provider_nickname),
         werss_feed_id = VALUES(werss_feed_id),
         updated_at = CURRENT_TIMESTAMP;
     `);
@@ -2645,6 +2702,7 @@ async function syncPeerWechatDiscoveryAccounts(competitorCode = "") {
     SELECT JSON_OBJECT(
       'id', a.id,
       'sourceId', a.source_id,
+      'lookupMode', a.lookup_mode,
       'providerGhid', a.provider_ghid,
       'providerNickname', a.provider_nickname,
       'werssFeedId', a.werss_feed_id,
@@ -2691,7 +2749,7 @@ async function waitForPeerDiscoveryProviderSlot() {
   peerDiscoveryNextProviderRequestAt = Date.now() + peerWechatDiscoveryConfig.minIntervalMs;
 }
 
-async function fetchDajialaHistoryPage({ ghid = "", articleUrl = "", offset = "" }) {
+async function fetchDajialaHistoryPage({ lookup, offset = "" }) {
   await waitForPeerDiscoveryProviderSlot();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), peerWechatDiscoveryConfig.requestTimeoutMs);
@@ -2703,9 +2761,9 @@ async function fetchDajialaHistoryPage({ ghid = "", articleUrl = "", offset = ""
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        ghid,
-        url: ghid ? "" : articleUrl,
-        nickname: "",
+        ghid: lookup.mode === "ghid" ? lookup.ghid : "",
+        url: lookup.mode === "url" ? lookup.articleUrl : "",
+        nickname: lookup.mode === "nickname" ? lookup.nickname : "",
         offset,
         key: peerWechatDiscoveryConfig.apiKey,
         verifycode: peerWechatDiscoveryConfig.verifyCode,
@@ -2731,8 +2789,9 @@ async function fetchDajialaHistoryPage({ ghid = "", articleUrl = "", offset = ""
   }
 }
 
-async function savePeerDiscoveryBatch({ runId, accountId, pageNo, requestOffset, normalized, status = "fetched", error = "" }) {
+async function savePeerDiscoveryBatch({ runId, accountId, pageNo, requestOffset, normalized, lookupMode = "", status = "fetched", error = "" }) {
   const safePayload = {
+    requestLookupMode: lookupMode,
     code: normalized.code,
     message: normalized.message,
     errorMessage: normalized.errorMessage,
@@ -2858,8 +2917,14 @@ async function processPeerDiscoveryAccount({ run, account, window, dryRun, retry
   if (!feed || Number(feed.status) !== 1) {
     throw new Error(`WeRSS feed ${account.werssFeedId} 不存在或未启用`);
   }
-  if (!account.providerGhid && !feed.latestArticleUrl) {
-    throw new Error("既未配置 provider_ghid，也没有可用于识别公众号的历史文章 URL");
+  let lookup = null;
+  if (!retryCached) {
+    lookup = resolveDajialaLookup({
+      lookupMode: account.lookupMode || "auto",
+      ghid: account.providerGhid,
+      nickname: account.providerNickname,
+      articleUrl: feed.latestArticleUrl,
+    });
   }
   if (dryRun) return { pages: 0, providerArticles: 0, eligible: 0, inserted: 0, updated: 0, skipped: 0, cost: 0 };
 
@@ -2881,20 +2946,16 @@ async function processPeerDiscoveryAccount({ run, account, window, dryRun, retry
         pageNo: page.pageNo,
         requestOffset: "cached-retry",
         normalized: { ...page.normalized, costMoney: 0 },
+        lookupMode: "cached_retry",
       });
     }
   } else {
-    let ghid = String(account.providerGhid || "");
     let offset = "";
     for (let pageNo = 1; pageNo <= peerWechatDiscoveryConfig.maxPagesPerAccount; pageNo += 1) {
       if (peerWechatDiscoveryConfig.maxCostPerRun > 0 && totals.cost >= peerWechatDiscoveryConfig.maxCostPerRun) {
         throw new Error(`已达到单次费用上限 ${peerWechatDiscoveryConfig.maxCostPerRun} 元`);
       }
-      const normalized = await fetchDajialaHistoryPage({
-        ghid,
-        articleUrl: feed.latestArticleUrl || "",
-        offset,
-      });
+      const normalized = await fetchDajialaHistoryPage({ lookup, offset });
       totals.cost += normalized.costMoney;
       if (normalized.remainMoney !== null && Number.isFinite(Number(normalized.remainMoney))) {
         totals.remainMoney = normalized.remainMoney;
@@ -2905,6 +2966,7 @@ async function processPeerDiscoveryAccount({ run, account, window, dryRun, retry
         pageNo,
         requestOffset: offset,
         normalized,
+        lookupMode: lookup.mode,
         status: normalized.code === 0 ? "fetched" : "failed",
         error: normalized.code === 0 ? "" : (normalized.errorMessage || normalized.message || `供应商错误码 ${normalized.code}`),
       });
@@ -2912,7 +2974,6 @@ async function processPeerDiscoveryAccount({ run, account, window, dryRun, retry
         throw new Error(normalized.errorMessage || normalized.message || `大家啦接口错误码 ${normalized.code}`);
       }
       pages.push({ pageNo, normalized });
-      ghid = normalized.ghid || ghid;
       if (normalized.ghid || normalized.nickname) {
         await mysqlExec(`
           UPDATE yimin_peer_wechat_accounts
@@ -2921,6 +2982,9 @@ async function processPeerDiscoveryAccount({ run, account, window, dryRun, retry
               updated_at = CURRENT_TIMESTAMP
           WHERE id = ${sqlNumber(account.id)};
         `);
+      }
+      if ((account.lookupMode || "auto") === "auto" && normalized.ghid) {
+        lookup = resolveDajialaLookup({ lookupMode: "ghid", ghid: normalized.ghid });
       }
       const positiveTimes = normalized.articles.map((article) => article.publishTime).filter((value) => value > 0);
       const oldestPublishTime = positiveTimes.length ? Math.min(...positiveTimes) : 0;
@@ -3068,6 +3132,7 @@ async function getPeerWechatDiscoveryRun(runKey) {
       'competitorCode', c.code,
       'competitorName', c.private_name,
       'feedId', a.werss_feed_id,
+      'lookupMode', a.lookup_mode,
       'status', IF(SUM(b.status = 'failed') > 0, 'failed', IF(SUM(b.status = 'imported') > 0, 'imported', 'pending')),
       'pageCount', COUNT(b.id),
       'articleCount', COALESCE(SUM(b.article_count), 0),
@@ -3081,7 +3146,7 @@ async function getPeerWechatDiscoveryRun(runKey) {
     WHERE a.id IN (
       SELECT account_id FROM yimin_peer_discovery_batches WHERE run_id = ${sqlNumber(run.id)}
     )
-    GROUP BY a.id, c.code, c.private_name, a.werss_feed_id, c.sort_order
+    GROUP BY a.id, c.code, c.private_name, a.werss_feed_id, a.lookup_mode, c.sort_order
     ORDER BY c.sort_order, a.id;
   `);
   delete run.id;

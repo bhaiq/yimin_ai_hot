@@ -96,6 +96,8 @@ npm run peer:seed -- /path/to/all_companies_projects.json data/peer-monitor-proj
 
 `yimin_ai_hot` 可以调用大家啦历史文章接口，把固定窗口（前一日 06:30 至报告日 06:30）的文章元数据幂等写入 WeRSS `articles`。任务异步执行，供应商响应先以不含密钥的标准化 JSON 缓存在 `aiwork`；若后续写 WeRSS 失败，可用 `retryCached=1` 只重放缓存，避免再次请求付费接口。
 
+每个账号通过 `yimin_peer_wechat_accounts.lookup_mode` 明确选择 `auto`、`ghid`、`url` 或 `nickname`。`auto` 依次选择 GHID、WeRSS 最新文章 URL、公众号名称；显式模式缺少对应值时直接失败，不会在一次付费失败后自动换查询方式再次扣费。深圳桉侨移民默认使用 `nickname`，查询名称为“深圳桉侨移民”。
+
 公网调用必须携带 `PEER_DISCOVERY_CRON_TOKEN`，服务端 loopback 请求和已登录管理员也允许触发：
 
 ```bash
