@@ -2876,7 +2876,7 @@ async function importPeerArticlesToWerss(account, articles) {
       art_type, show_type, publish_info, original_check_type, in_profile,
       pre_publish_status, service_type, item_show_type, copyright_stat,
       has_red_packet_cover, created_at, updated_at, updated_at_millis,
-      is_export, \`read\`, favorite, fix_fail_count, has_content, content, content_html
+      is_export, is_read, is_favorite, fix_fail_count, has_content, content, content_html
     )
     VALUES
       ${records.map((record) => `(
