@@ -114,7 +114,7 @@ curl 'https://your-domain.example/api/peer-monitor/wechat/discovery-runs/RUN_KEY
   -H 'Authorization: Bearer your-cron-token'
 ```
 
-上线前需要在 `.env` 配置 `WERSS_DATABASE_*`、`DAJIALA_API_KEY`、`DAJIALA_VERIFYCODE` 和 `PEER_DISCOVERY_CRON_TOKEN`。发现任务只写文章元数据并设置 `has_content=0`，不会覆盖 WeRSS 已有正文；正文仍由单独的 WeRSS 补全任务处理。
+上线前需要在 `.env` 配置 `WERSS_DATABASE_*`、`DAJIALA_API_KEY` 和 `PEER_DISCOVERY_CRON_TOKEN`；`DAJIALA_VERIFYCODE` 为可选项，仅在大家啦提供时填写。发现任务只写文章元数据并设置 `has_content=0`，不会覆盖 WeRSS 已有正文；正文仍由单独的 WeRSS 补全任务处理。
 
 ## 市场素材
 

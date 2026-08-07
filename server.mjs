@@ -2623,8 +2623,8 @@ function assertPeerDiscoveryConfiguration({ dryRun = false, retryCached = false 
   if (!werssDbConfig.database) {
     throw new Error("未配置 WERSS_DATABASE_NAME，无法连接 WeRSS 数据库");
   }
-  if (!dryRun && !retryCached && (!peerWechatDiscoveryConfig.apiKey || !peerWechatDiscoveryConfig.verifyCode)) {
-    throw new Error("未配置 DAJIALA_API_KEY 或 DAJIALA_VERIFYCODE");
+  if (!dryRun && !retryCached && !peerWechatDiscoveryConfig.apiKey) {
+    throw new Error("未配置 DAJIALA_API_KEY");
   }
 }
 
