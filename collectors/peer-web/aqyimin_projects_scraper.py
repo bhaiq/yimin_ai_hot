@@ -31,6 +31,8 @@ from playwright.sync_api import (
     sync_playwright,
 )
 
+from proxy_support import playwright_proxy_options
+
 
 BASE_URL = "https://www.aqyimin.com"
 SITEMAP_URL = f"{BASE_URL}/sitemap.xml"
@@ -567,11 +569,15 @@ def launch_browser(playwright: Any, chrome_path: str | None, headless: bool) -> 
         "args": [
             "--disable-background-networking",
             "--disable-component-update",
+            "--disable-quic",
             "--disable-sync",
         ],
     }
     if chrome_path:
         kwargs["executable_path"] = chrome_path
+    proxy = playwright_proxy_options()
+    if proxy:
+        kwargs["proxy"] = proxy
     return playwright.chromium.launch(**kwargs)
 
 

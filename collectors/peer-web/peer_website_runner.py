@@ -19,13 +19,17 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 
 SCHEMA_VERSION = "peer-website-snapshot/v1"
 CHINA_TIMEZONE = timezone(timedelta(hours=8))
 COLLECTOR_ROOT = Path(__file__).resolve().parent
 REPOSITORY_ROOT = COLLECTOR_ROOT.parents[1]
+PROXY_PREFLIGHT_TARGETS = (
+    "https://www.gstatic.com/generate_204",
+    "https://www.ekimmigration.com/robots.txt",
+)
 PROXY_ENVIRONMENT_KEYS = (
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -35,6 +39,7 @@ PROXY_ENVIRONMENT_KEYS = (
     "https_proxy",
     "all_proxy",
     "no_proxy",
+    "PEER_WEBSITE_EFFECTIVE_PROXY_URL",
 )
 
 
@@ -249,6 +254,31 @@ def stop_process_group(process: subprocess.Popen[Any]) -> None:
             pass
 
 
+def resolve_collector_proxy_url(definition: CollectorDefinition) -> str:
+    peer_suffix = definition.peer_code.upper().replace("-", "_")
+    peer_variable = f"PEER_WEBSITE_{peer_suffix}_PROXY_URL"
+    proxy_url = str(
+        os.environ.get(peer_variable)
+        or os.environ.get("PEER_WEBSITE_PROXY_URL")
+        or ""
+    ).strip()
+    if not proxy_url:
+        return ""
+
+    try:
+        parsed = urlsplit(proxy_url)
+        proxy_port = parsed.port
+    except ValueError as error:
+        raise ValueError("官网代理地址格式无效") from error
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or proxy_port is None
+    ):
+        raise ValueError("官网代理必须是带端口的本机 HTTP(S) 地址")
+    return proxy_url
+
+
 def build_collector_environment(
     definition: CollectorDefinition,
 ) -> tuple[dict[str, str], bool]:
@@ -256,19 +286,9 @@ def build_collector_environment(
     for key in PROXY_ENVIRONMENT_KEYS:
         environment.pop(key, None)
 
-    peer_suffix = definition.peer_code.upper().replace("-", "_")
-    variable_name = f"PEER_WEBSITE_{peer_suffix}_PROXY_URL"
-    proxy_url = str(os.environ.get(variable_name) or "").strip()
+    proxy_url = resolve_collector_proxy_url(definition)
     if not proxy_url:
         return environment, False
-
-    parsed = urlsplit(proxy_url)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
-        or parsed.port is None
-    ):
-        raise ValueError(f"{variable_name} 必须是带端口的本机 HTTP(S) 代理地址")
 
     environment.update({
         "HTTP_PROXY": proxy_url,
@@ -277,8 +297,50 @@ def build_collector_environment(
         "https_proxy": proxy_url,
         "NO_PROXY": "127.0.0.1,localhost,::1",
         "no_proxy": "127.0.0.1,localhost,::1",
+        "PEER_WEBSITE_EFFECTIVE_PROXY_URL": proxy_url,
     })
     return environment, True
+
+
+def environment_flag(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def configured_proxy_urls(
+    definitions: list[CollectorDefinition],
+    require_proxy: bool,
+) -> list[str]:
+    proxy_urls = []
+    missing = []
+    for definition in definitions:
+        proxy_url = resolve_collector_proxy_url(definition)
+        if proxy_url:
+            if proxy_url not in proxy_urls:
+                proxy_urls.append(proxy_url)
+        else:
+            missing.append(definition.peer_code)
+    if require_proxy and missing:
+        raise ValueError(
+            "官网任务要求强制代理，但以下采集器未配置代理："
+            + ", ".join(missing)
+        )
+    return proxy_urls
+
+
+def preflight_proxy(proxy_url: str, timeout_seconds: int = 20) -> None:
+    opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+    for target in PROXY_PREFLIGHT_TARGETS:
+        request = Request(target, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with opener.open(request, timeout=timeout_seconds) as response:
+                if 200 <= response.status < 500:
+                    response.read(64)
+                    return
+        except (HTTPError, URLError, TimeoutError, OSError):
+            continue
+    raise RuntimeError("官网代理出口连通性预检失败；任务已停止，未回退直连")
 
 
 def execute_collector(
@@ -579,6 +641,28 @@ def main() -> int:
         definition for definition in COLLECTORS
         if not args.only or definition.peer_code in set(args.only)
     ]
+    require_proxy = environment_flag("PEER_WEBSITE_REQUIRE_PROXY")
+    try:
+        proxy_urls = configured_proxy_urls(selected, require_proxy)
+        for proxy_url in proxy_urls:
+            preflight_proxy(proxy_url)
+    except (ValueError, RuntimeError) as error:
+        emit(
+            "proxy_preflight_failed",
+            run_id=run_id,
+            require_proxy=require_proxy,
+            error=safe_text(error),
+        )
+        return 1
+    emit(
+        "proxy_preflight_finished",
+        run_id=run_id,
+        require_proxy=require_proxy,
+        proxied_collector_count=sum(
+            1 for definition in selected
+            if resolve_collector_proxy_url(definition)
+        ),
+    )
     emit(
         "run_started",
         run_id=run_id,

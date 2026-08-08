@@ -5,13 +5,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 COLLECTOR_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(COLLECTOR_ROOT))
 
 import peer_website_runner as runner  # noqa: E402
+import proxy_support  # noqa: E402
 
 
 class FakeProcess:
@@ -167,17 +168,14 @@ class PeerWebsiteRunnerTests(unittest.TestCase):
         self.assertNotIn("very-secret-value", text)
         self.assertIn("[REDACTED]", text)
 
-    def test_peer_proxy_is_scoped_to_only_the_configured_collector(self) -> None:
+    def test_global_proxy_is_applied_to_every_collector(self) -> None:
         peer_b = next(
             item for item in runner.COLLECTORS if item.peer_code == "peer-b"
         )
         with patch.dict(
             runner.os.environ,
-            {
-                "HTTP_PROXY": "http://global-proxy.example:8080",
-                "PEER_WEBSITE_PEER_B_PROXY_URL": "http://127.0.0.1:17890",
-            },
-            clear=False,
+            {"PEER_WEBSITE_PROXY_URL": "http://127.0.0.1:17890"},
+            clear=True,
         ):
             peer_b_environment, peer_b_proxy = runner.build_collector_environment(
                 peer_b
@@ -190,21 +188,87 @@ class PeerWebsiteRunnerTests(unittest.TestCase):
         self.assertEqual(
             peer_b_environment["HTTPS_PROXY"], "http://127.0.0.1:17890"
         )
-        self.assertFalse(peer_a_proxy)
-        self.assertNotIn("HTTP_PROXY", peer_a_environment)
-        self.assertNotIn("http_proxy", peer_a_environment)
+        self.assertTrue(peer_a_proxy)
+        self.assertEqual(
+            peer_a_environment["HTTPS_PROXY"], "http://127.0.0.1:17890"
+        )
+        self.assertEqual(
+            peer_a_environment["PEER_WEBSITE_EFFECTIVE_PROXY_URL"],
+            "http://127.0.0.1:17890",
+        )
 
-    def test_peer_proxy_rejects_non_loopback_address(self) -> None:
+    def test_peer_proxy_overrides_global_proxy(self) -> None:
         peer_b = next(
             item for item in runner.COLLECTORS if item.peer_code == "peer-b"
         )
         with patch.dict(
             runner.os.environ,
-            {"PEER_WEBSITE_PEER_B_PROXY_URL": "http://proxy.example:8080"},
-            clear=False,
+            {
+                "PEER_WEBSITE_PROXY_URL": "http://127.0.0.1:17890",
+                "PEER_WEBSITE_PEER_B_PROXY_URL": "http://localhost:17891",
+            },
+            clear=True,
+        ):
+            environment, proxy_configured = runner.build_collector_environment(
+                peer_b
+            )
+        self.assertTrue(proxy_configured)
+        self.assertEqual(environment["HTTPS_PROXY"], "http://localhost:17891")
+
+    def test_ambient_proxy_is_removed_when_collector_proxy_is_not_configured(self) -> None:
+        with patch.dict(
+            runner.os.environ,
+            {"HTTP_PROXY": "http://ambient.example:8080"},
+            clear=True,
+        ):
+            environment, proxy_configured = runner.build_collector_environment(
+                self.definition
+            )
+        self.assertFalse(proxy_configured)
+        self.assertNotIn("HTTP_PROXY", environment)
+
+    def test_peer_proxy_rejects_non_loopback_address(self) -> None:
+        with patch.dict(
+            runner.os.environ,
+            {"PEER_WEBSITE_PROXY_URL": "http://proxy.example:8080"},
+            clear=True,
         ):
             with self.assertRaisesRegex(ValueError, "本机 HTTP"):
-                runner.build_collector_environment(peer_b)
+                runner.build_collector_environment(self.definition)
+
+    def test_required_proxy_rejects_any_unconfigured_collector(self) -> None:
+        with patch.dict(runner.os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "peer-a"):
+                runner.configured_proxy_urls([self.definition], True)
+
+    def test_proxy_preflight_uses_explicit_proxy_opener(self) -> None:
+        response = MagicMock()
+        response.status = 204
+        response.__enter__.return_value = response
+        opener = MagicMock()
+        opener.open.return_value = response
+        with patch.object(runner, "build_opener", return_value=opener) as builder:
+            runner.preflight_proxy("http://127.0.0.1:17890")
+        builder.assert_called_once()
+        opener.open.assert_called_once()
+
+    def test_playwright_receives_explicit_proxy_configuration(self) -> None:
+        with patch.dict(
+            proxy_support.os.environ,
+            {"PEER_WEBSITE_EFFECTIVE_PROXY_URL": "http://127.0.0.1:17890"},
+            clear=True,
+        ):
+            options = proxy_support.playwright_proxy_options()
+        self.assertEqual(options, {"server": "http://127.0.0.1:17890"})
+
+    def test_playwright_required_proxy_fails_closed(self) -> None:
+        with patch.dict(
+            proxy_support.os.environ,
+            {"PEER_WEBSITE_REQUIRE_PROXY": "1"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "强制代理"):
+                proxy_support.playwright_proxy_options()
 
     def test_import_rejections_are_counted_as_incomplete(self) -> None:
         result = {

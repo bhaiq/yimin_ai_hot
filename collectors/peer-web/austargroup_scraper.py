@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urljoin, urlparse
 
+from proxy_support import playwright_proxy_options
+
 from lxml import etree, html
 
 
@@ -822,10 +824,16 @@ def live_pages(
     candidates: list[str] = []
     navigation_labels: dict[str, str] = {}
     with sync_playwright() as playwright:
-        launch_options: dict[str, Any] = {"headless": not args.headed}
+        launch_options: dict[str, Any] = {
+            "headless": not args.headed,
+            "args": ["--disable-quic"],
+        }
         executable = resolve_chrome_path(args.chrome_path)
         if executable:
             launch_options["executable_path"] = executable
+        proxy = playwright_proxy_options()
+        if proxy:
+            launch_options["proxy"] = proxy
         browser = playwright.chromium.launch(**launch_options)
         context = browser.new_context(
             locale="zh-CN",
