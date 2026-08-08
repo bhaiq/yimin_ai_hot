@@ -2311,6 +2311,12 @@ img {
   font-size: 11px;
 }
 
+.peer-project-footnote a {
+  margin-left: 8px;
+  color: var(--blue);
+  font-weight: 600;
+}
+
 .peer-article-card {
   width: 100%;
   padding: 16px;

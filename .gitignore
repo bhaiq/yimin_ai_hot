@@ -3,6 +3,8 @@
 
 # 依赖
 node_modules/
+/.venv-peer-web/
+/.cache/ms-playwright/
 
 # 系统文件
 .DS_Store
@@ -19,6 +21,10 @@ Thumbs.db
 
 # 临时调试文件
 tmp-*.png
+/var/peer-web/
+/collectors/peer-web/output/
+/collectors/peer-web/**/__pycache__/
+/collectors/peer-web/**/*.pyc
 
 # 服务器本地公开上传文件（只提交目录占位文件）
 /uploads/*

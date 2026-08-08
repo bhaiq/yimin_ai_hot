@@ -48,13 +48,13 @@ http://127.0.0.1:4173
 - 部门专属信源：部门重点直接读取本部门订阅信源的当日文章，不依赖公共日报明细；个人关注不能越权订阅其他部门的专属信源
 - 日报完整分类：主题去重后不再按 12/8/8/8 条截断，全部候选都会进入日报分析与明细
 - 日报长期流水线：候选分页全量读取，新增文章分批分析，按事件聚合后生成正文；低相关和重复文章仍保留在完整资讯附录
-- 同行监控：按同行A–同行I匿名展示 420 个官网项目，并抓取已配置同行的公众号 RSS；当前临时向所有访问者开放
+- 同行监控：按同行A–同行I展示官网项目，并抓取已配置同行的公众号 RSS；官网项目支持版本化快照导入和变化事件；当前临时向所有访问者开放
 
 ## 同行监控
 
 `#peer-monitor` 是内部同行情报页面，与公共新闻、移民日报和市场素材的数据表完全隔离。
 
-- 当前监控同行A–同行I，共 9 家、420 个官网项目；官网数据只从 `data/peer-monitor-projects.json` 导入，不会自动重新抓取网站
+- 当前监控同行A–同行I，共 9 家；`data/peer-monitor-projects.json` 仍可作为首次种子，后续官网采集器通过版本化快照接口更新项目，采集器本身独立部署
 - 左侧同行列表按 `yimin_peer_competitors.sort_order` 从小到大展示（同值时按 `id`），首次进入时右侧默认加载排序第一项；初始化只为新同行写入默认顺序，后续可直接调整数据库排序且服务重启不会覆盖
 - 页面和数据接口只返回匿名代号、项目结构化信息和经过清洗的公众号内容；公众号卡片可在站内打开匿名化全文，但不返回真实同行名称、域名、公众号名称、原文链接或图片
 - 同行A–同行I均已配置公众号 RSS；“刷新并补抓”只对已登录管理员显示，刷新在后台执行并可查询进度
@@ -91,6 +91,33 @@ npm run peer:seed -- /path/to/all_companies_projects.json data/peer-monitor-proj
 ```
 
 服务启动时会按文件内容哈希幂等导入；同一份数据不会重复新增项目。
+
+### 官网项目快照导入接口
+
+官网采集器源码位于 `collectors/peer-web/`，与主项目同仓库、使用独立 Python 环境和宝塔任务运行；它不直接写 `aiwork`，而是按 `peer-website-snapshot/v1` 契约提交完整快照。可直接使用仓库中的 `test/fixtures/peer-website-snapshot-v1.json` 作为最小请求样例。服务器 loopback、已登录管理员或携带 `PEER_DISCOVERY_CRON_TOKEN` 的请求可以导入：
+
+```bash
+curl -X POST 'http://127.0.0.1:4173/api/peer-monitor/website/import?dryRun=1' \
+  -H 'Content-Type: application/json' \
+  --data-binary '@peer-website-snapshot.json'
+```
+
+确认 dry-run 结果后将 `dryRun=1` 改为 `dryRun=0`（或省略参数）正式写入。相同 `run_id` 和相同内容重放会返回第一次处理结果；相同 `run_id` 携带不同内容返回 HTTP 409。一次请求中的站点独立校验和入库，单站失败不会阻塞其余站点。
+
+首轮 `completed` 快照只建立基线；后续完整快照生成 `added`、`changed`、`removed`、`reappeared` 事件。项目连续两轮完整快照缺失才标记为 `removed`；`partial` 和 `failed` 不推进删除计数，也不覆盖最后一次成功数据。运行详情和变化事件查询：
+
+```bash
+curl 'http://127.0.0.1:4173/api/peer-monitor/website/runs/RUN_ID'
+curl 'http://127.0.0.1:4173/api/peer-monitor/website/events?competitor=peer-a&eventType=changed&limit=50'
+```
+
+正式导入接口默认接收最大 32 MiB JSON。快照必须包含 `schema_version`、全局唯一 `run_id`、起止时间和逐站 `collectors`；每个站点需提供固定 `peer_code`、匹配的官网域名、采集器版本、`completed/partial/failed` 状态及项目计数。项目必须带规范化官网 URL，并优先保留官网稳定 `source_project_id`。
+
+统一采集任务的安装、单家测试、九家 dry-run、退出码和宝塔命令见 `collectors/peer-web/README.md`。生产计划任务只需调用：
+
+```bash
+/bin/bash /服务器实际路径/yimin_ai_hot/scripts/run-peer-website-collect.sh write
+```
 
 ### 公众号文章列表发现接口
 
@@ -233,6 +260,11 @@ P0 只写系统日志，不发送企业微信通知，也不直接发布到公�
 - `yimin_peer_competitors`：同行私有配置和匿名代号
 - `yimin_peer_sources`：同行公众号 RSS 私有订阅配置
 - `yimin_peer_projects`：匿名化后的官网项目
+- `yimin_peer_website_sources`：同行官网来源、最后运行和最后成功基线状态
+- `yimin_peer_website_runs`：每次官网快照导入的整体状态、输入哈希和汇总结果
+- `yimin_peer_website_source_runs`：每个站点在一次官网导入中的状态、错误和差异计数
+- `yimin_peer_project_versions`：官网项目每次实质变化后的字段快照
+- `yimin_peer_project_events`：官网项目新增、变化、不再展示和恢复展示事件
 - `yimin_peer_articles`：同行公众号文章，与公共新闻文章隔离
 - `yimin_peer_refresh_runs`：公众号刷新任务和进度
 - `yimin_peer_imports`：官网项目种子文件导入记录

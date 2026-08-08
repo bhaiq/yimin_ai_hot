@@ -2771,7 +2771,10 @@ function renderPeerProjectCard(project) {
           </section>
         ` : ""}
         ${renderPeerProjectProcess(project)}
-        <p class="peer-project-footnote">数据采集时间：${escapeHtml(formatPeerDate(project.scrapedAt))} · 仅作同行公开信息观察，不代表当前政策有效性。</p>
+        <p class="peer-project-footnote">
+          数据采集时间：${escapeHtml(formatPeerDate(project.scrapedAt))} · 仅作同行公开信息观察，不代表当前政策有效性。
+          ${project.canonicalUrl ? `<a href="${escapeAttr(project.canonicalUrl)}" target="_blank" rel="noopener noreferrer">查看官网原页</a>` : ""}
+        </p>
       </div>
     </details>
   `;

@@ -11,6 +11,14 @@ import {
   normalizeDajialaResponse,
   resolveDajialaLookup,
 } from "./lib/peer-wechat-discovery.mjs";
+import {
+  PEER_WEBSITE_SCHEMA_VERSION,
+  buildPeerWebsiteDiffPlan,
+  buildWebsiteProjectSourceKey,
+  sanitizeWebsiteText,
+  sanitizeWebsiteValue,
+  validatePeerWebsiteSnapshot,
+} from "./lib/peer-website-monitor.mjs";
 
 const rootDir = resolve(".");
 await loadEnv();
@@ -288,6 +296,7 @@ let activeArticleTranslationPromise = null;
 let activeArticleRelevancePromise = null;
 let activePeerRefresh = null;
 let activePeerWechatDiscovery = null;
+const activePeerWebsiteImports = new Map();
 let peerDiscoveryNextProviderRequestAt = 0;
 const dailyReportGenerationPromises = new Map();
 const dailyLocalizationGenerationPromises = new Map();
@@ -1023,6 +1032,18 @@ async function initDb() {
           id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键',
           competitor_id BIGINT NOT NULL COMMENT '同行 ID',
           source_key CHAR(64) NOT NULL COMMENT '同行、原网址与项目名组合哈希',
+          website_source_id BIGINT NULL COMMENT '官网监控来源 ID，静态种子为空',
+          source_project_id VARCHAR(512) NULL COMMENT '采集器提供的稳定项目 ID',
+          stable_identity VARCHAR(1600) NULL COMMENT '项目稳定身份（id/url）',
+          canonical_url VARCHAR(1400) NULL COMMENT '官网证据链接，仅授权接口返回',
+          canonical_url_hash CHAR(64) NULL COMMENT '规范化官网链接哈希',
+          content_hash CHAR(64) NULL COMMENT '当前实质字段哈希',
+          current_version_id BIGINT NULL COMMENT '当前项目版本 ID',
+          lifecycle_status ENUM('active','removed') NOT NULL DEFAULT 'active' COMMENT '官网展示状态',
+          missing_success_count INT NOT NULL DEFAULT 0 COMMENT '连续成功快照缺失次数',
+          first_seen_at DATETIME NULL COMMENT '首次在成功快照中检测到',
+          last_seen_at DATETIME NULL COMMENT '最近在成功快照中检测到',
+          removed_at DATETIME NULL COMMENT '连续缺失确认时间',
           project_name VARCHAR(600) NOT NULL COMMENT '匿名化项目名称',
           category_raw VARCHAR(160) NOT NULL DEFAULT '' COMMENT '官网原分类的匿名化文本',
           country_normalized VARCHAR(120) NOT NULL DEFAULT '其他' COMMENT '统一国家筛选值',
@@ -1037,6 +1058,7 @@ async function initDb() {
           process_source_type VARCHAR(32) NOT NULL DEFAULT 'missing' COMMENT '流程来源类型',
           process_text LONGTEXT NULL COMMENT '匿名化流程正文',
           application_process_json JSON NULL COMMENT '结构化申请流程',
+          handling_process_json JSON NULL COMMENT '结构化办理流程',
           identity_type VARCHAR(160) NULL COMMENT '身份类型',
           residence_requirement TEXT NULL COMMENT '居住要求',
           website_status_note TEXT NULL COMMENT '官网状态提示',
@@ -1045,6 +1067,9 @@ async function initDb() {
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
           UNIQUE KEY uk_peer_project_source (competitor_id, source_key),
+          UNIQUE KEY uk_peer_project_website_identity (website_source_id, source_project_id),
+          INDEX idx_peer_project_website_url (website_source_id, canonical_url_hash),
+          INDEX idx_peer_project_website_state (website_source_id, lifecycle_status, last_seen_at),
           INDEX idx_peer_project_country (competitor_id, country_normalized),
           INDEX idx_peer_project_name (competitor_id, project_name(191)),
           CONSTRAINT fk_peer_project_competitor FOREIGN KEY (competitor_id) REFERENCES yimin_peer_competitors(id) ON DELETE CASCADE
@@ -1177,6 +1202,118 @@ async function initDb() {
           imported_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '导入时间',
           UNIQUE KEY uk_peer_import_source (source_name)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行官网种子导入记录';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_website_runs (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '官网快照导入主键',
+          run_id VARCHAR(160) NOT NULL COMMENT '采集端全局唯一运行 ID',
+          schema_version VARCHAR(80) NOT NULL COMMENT '官网快照契约版本',
+          payload_hash CHAR(64) NOT NULL COMMENT '规范化请求哈希，防止同 ID 异内容',
+          status ENUM('running','completed','partial','failed') NOT NULL DEFAULT 'running' COMMENT '导入状态',
+          collector_count INT NOT NULL DEFAULT 0 COMMENT '提交站点数',
+          accepted_count INT NOT NULL DEFAULT 0 COMMENT '通过校验站点数',
+          rejected_count INT NOT NULL DEFAULT 0 COMMENT '校验或导入失败站点数',
+          started_at DATETIME NOT NULL COMMENT '采集任务开始时间',
+          finished_at DATETIME NOT NULL COMMENT '采集任务结束时间',
+          result_json JSON NULL COMMENT '幂等返回结果',
+          error TEXT NULL COMMENT '运行级错误',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '导入时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_peer_website_run_id (run_id),
+          INDEX idx_peer_website_runs_started (started_at, id),
+          INDEX idx_peer_website_runs_status (status, id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行官网快照导入运行';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_website_sources (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '官网来源主键',
+          competitor_id BIGINT NOT NULL COMMENT '同行 ID',
+          source_domain VARCHAR(255) NOT NULL COMMENT '规范化官网域名',
+          source_url VARCHAR(1400) NOT NULL COMMENT '官网来源地址',
+          collector_version VARCHAR(160) NOT NULL DEFAULT '' COMMENT '最近采集器版本',
+          last_status ENUM('completed','partial','failed') NULL COMMENT '最近提交状态',
+          last_error TEXT NULL COMMENT '最近采集错误',
+          last_run_id BIGINT NULL COMMENT '最近提交运行',
+          last_success_run_id BIGINT NULL COMMENT '最近成功快照运行',
+          last_success_at DATETIME NULL COMMENT '最近成功快照检测时间',
+          baseline_completed TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否完成首轮成功基线',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_peer_website_source (competitor_id, source_domain),
+          INDEX idx_peer_website_source_status (last_status, last_success_at),
+          CONSTRAINT fk_peer_website_source_competitor FOREIGN KEY (competitor_id) REFERENCES yimin_peer_competitors(id) ON DELETE CASCADE,
+          CONSTRAINT fk_peer_website_source_last_run FOREIGN KEY (last_run_id) REFERENCES yimin_peer_website_runs(id) ON DELETE SET NULL,
+          CONSTRAINT fk_peer_website_source_success_run FOREIGN KEY (last_success_run_id) REFERENCES yimin_peer_website_runs(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行官网监控来源';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_website_source_runs (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '单站运行主键',
+          run_id BIGINT NOT NULL COMMENT '官网导入运行 ID',
+          website_source_id BIGINT NULL COMMENT '已识别官网来源 ID',
+          peer_code VARCHAR(32) NOT NULL DEFAULT '' COMMENT '提交的同行代码',
+          source_domain VARCHAR(255) NOT NULL DEFAULT '' COMMENT '提交的来源域名',
+          collector_version VARCHAR(160) NOT NULL DEFAULT '' COMMENT '采集器版本',
+          status ENUM('completed','partial','failed','rejected') NOT NULL COMMENT '单站结果',
+          error TEXT NULL COMMENT '校验或采集错误',
+          warnings_json JSON NULL COMMENT '非阻断告警',
+          discovered_count INT NOT NULL DEFAULT 0 COMMENT '发现项目数',
+          success_count INT NOT NULL DEFAULT 0 COMMENT '成功项目数',
+          failed_count INT NOT NULL DEFAULT 0 COMMENT '失败项目数',
+          baseline_count INT NOT NULL DEFAULT 0 COMMENT '首轮基线项目数',
+          added_count INT NOT NULL DEFAULT 0 COMMENT '新增项目数',
+          changed_count INT NOT NULL DEFAULT 0 COMMENT '实质变化项目数',
+          removed_count INT NOT NULL DEFAULT 0 COMMENT '连续缺失确认数',
+          reappeared_count INT NOT NULL DEFAULT 0 COMMENT '恢复展示项目数',
+          unchanged_count INT NOT NULL DEFAULT 0 COMMENT '无实质变化项目数',
+          pending_removal_count INT NOT NULL DEFAULT 0 COMMENT '首轮缺失待确认项目数',
+          result_json JSON NULL COMMENT '单站导入结果',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '记录时间',
+          UNIQUE KEY uk_peer_website_source_run (run_id, peer_code, source_domain),
+          INDEX idx_peer_website_source_runs_status (run_id, status),
+          CONSTRAINT fk_peer_website_source_run FOREIGN KEY (run_id) REFERENCES yimin_peer_website_runs(id) ON DELETE CASCADE,
+          CONSTRAINT fk_peer_website_source_run_source FOREIGN KEY (website_source_id) REFERENCES yimin_peer_website_sources(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行官网逐站运行结果';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_project_versions (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '官网项目版本主键',
+          project_id BIGINT NOT NULL COMMENT '同行官网项目 ID',
+          website_source_id BIGINT NOT NULL COMMENT '官网来源 ID',
+          run_id BIGINT NOT NULL COMMENT '产生版本的导入运行 ID',
+          content_hash CHAR(64) NOT NULL COMMENT '实质字段哈希',
+          canonical_url VARCHAR(1400) NOT NULL COMMENT '该版本证据链接',
+          snapshot_json JSON NOT NULL COMMENT '规范化原始项目快照',
+          detected_at DATETIME NOT NULL COMMENT '服务端检测时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          UNIQUE KEY uk_peer_project_version (project_id, content_hash),
+          INDEX idx_peer_project_versions_run (run_id, id),
+          CONSTRAINT fk_peer_project_version_project FOREIGN KEY (project_id) REFERENCES yimin_peer_projects(id) ON DELETE CASCADE,
+          CONSTRAINT fk_peer_project_version_source FOREIGN KEY (website_source_id) REFERENCES yimin_peer_website_sources(id) ON DELETE CASCADE,
+          CONSTRAINT fk_peer_project_version_run FOREIGN KEY (run_id) REFERENCES yimin_peer_website_runs(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行官网项目实质版本';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_project_events (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '官网项目变化事件主键',
+          event_key CHAR(64) NOT NULL COMMENT '幂等事件哈希',
+          project_id BIGINT NOT NULL COMMENT '同行官网项目 ID',
+          competitor_id BIGINT NOT NULL COMMENT '同行 ID',
+          website_source_id BIGINT NOT NULL COMMENT '官网来源 ID',
+          run_id BIGINT NOT NULL COMMENT '检测运行 ID',
+          event_type ENUM('added','changed','removed','reappeared') NOT NULL COMMENT '变化类型',
+          before_version_id BIGINT NULL COMMENT '变化前版本',
+          after_version_id BIGINT NULL COMMENT '变化后版本',
+          changed_fields_json JSON NOT NULL COMMENT '发生实质变化的字段',
+          evidence_url VARCHAR(1400) NULL COMMENT '官网证据链接',
+          detected_at DATETIME NOT NULL COMMENT '检测时间，不等于官网修改时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          UNIQUE KEY uk_peer_project_event (event_key),
+          INDEX idx_peer_project_events_detected (detected_at, id),
+          INDEX idx_peer_project_events_peer (competitor_id, detected_at, id),
+          INDEX idx_peer_project_events_run (run_id, id),
+          CONSTRAINT fk_peer_project_event_project FOREIGN KEY (project_id) REFERENCES yimin_peer_projects(id) ON DELETE CASCADE,
+          CONSTRAINT fk_peer_project_event_competitor FOREIGN KEY (competitor_id) REFERENCES yimin_peer_competitors(id) ON DELETE CASCADE,
+          CONSTRAINT fk_peer_project_event_source FOREIGN KEY (website_source_id) REFERENCES yimin_peer_website_sources(id) ON DELETE CASCADE,
+          CONSTRAINT fk_peer_project_event_run FOREIGN KEY (run_id) REFERENCES yimin_peer_website_runs(id) ON DELETE CASCADE,
+          CONSTRAINT fk_peer_project_event_before FOREIGN KEY (before_version_id) REFERENCES yimin_peer_project_versions(id) ON DELETE SET NULL,
+          CONSTRAINT fk_peer_project_event_after FOREIGN KEY (after_version_id) REFERENCES yimin_peer_project_versions(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行官网项目变化事件';
 
         CREATE TABLE IF NOT EXISTS yimin_h_topics (
           id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'H 专栏候选主键',
@@ -1735,6 +1872,7 @@ async function initDb() {
       }
 
       await ensurePeerWechatDiscoverySchema();
+      await ensurePeerWebsiteSchema();
       await ensureReportDateUniqueness();
       await seedConfiguredSources();
       await seedPeerMonitorData();
@@ -1774,6 +1912,74 @@ async function ensurePeerWechatDiscoverySchema() {
       ADD COLUMN run_mode ENUM('discover','dry_run','retry_cached') NOT NULL DEFAULT 'discover'
         COMMENT '任务运行模式'
       AFTER status;
+    `);
+  }
+}
+
+async function ensurePeerWebsiteSchema() {
+  const projectColumnRows = await mysqlJsonRows(`
+    SELECT JSON_OBJECT('name', COLUMN_NAME)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+      AND TABLE_NAME = 'yimin_peer_projects';
+  `);
+  const projectColumns = new Set(projectColumnRows.map((row) => String(row.name)));
+  const columnDefinitions = [
+    ["website_source_id", "ADD COLUMN website_source_id BIGINT NULL COMMENT '官网监控来源 ID，静态种子为空' AFTER source_key"],
+    ["source_project_id", "ADD COLUMN source_project_id VARCHAR(512) NULL COMMENT '采集器提供的稳定项目 ID' AFTER website_source_id"],
+    ["stable_identity", "ADD COLUMN stable_identity VARCHAR(1600) NULL COMMENT '项目稳定身份（id/url）' AFTER source_project_id"],
+    ["canonical_url", "ADD COLUMN canonical_url VARCHAR(1400) NULL COMMENT '官网证据链接，仅授权接口返回' AFTER stable_identity"],
+    ["canonical_url_hash", "ADD COLUMN canonical_url_hash CHAR(64) NULL COMMENT '规范化官网链接哈希' AFTER canonical_url"],
+    ["content_hash", "ADD COLUMN content_hash CHAR(64) NULL COMMENT '当前实质字段哈希' AFTER canonical_url_hash"],
+    ["current_version_id", "ADD COLUMN current_version_id BIGINT NULL COMMENT '当前项目版本 ID' AFTER content_hash"],
+    ["lifecycle_status", "ADD COLUMN lifecycle_status ENUM('active','removed') NOT NULL DEFAULT 'active' COMMENT '官网展示状态' AFTER current_version_id"],
+    ["missing_success_count", "ADD COLUMN missing_success_count INT NOT NULL DEFAULT 0 COMMENT '连续成功快照缺失次数' AFTER lifecycle_status"],
+    ["first_seen_at", "ADD COLUMN first_seen_at DATETIME NULL COMMENT '首次在成功快照中检测到' AFTER missing_success_count"],
+    ["last_seen_at", "ADD COLUMN last_seen_at DATETIME NULL COMMENT '最近在成功快照中检测到' AFTER first_seen_at"],
+    ["removed_at", "ADD COLUMN removed_at DATETIME NULL COMMENT '连续缺失确认时间' AFTER last_seen_at"],
+    ["handling_process_json", "ADD COLUMN handling_process_json JSON NULL COMMENT '结构化办理流程' AFTER application_process_json"],
+  ];
+  const missingColumnDefinitions = columnDefinitions
+    .filter(([columnName]) => !projectColumns.has(columnName))
+    .map(([, definition]) => definition);
+  if (missingColumnDefinitions.length) {
+    await mysqlExec(`
+      ALTER TABLE yimin_peer_projects
+      ${missingColumnDefinitions.join(",\n")};
+    `);
+  }
+
+  const projectIndexRows = await mysqlJsonRows(`
+    SELECT JSON_OBJECT(
+      'name', INDEX_NAME,
+      'nonUnique', MIN(NON_UNIQUE)
+    )
+    FROM INFORMATION_SCHEMA.STATISTICS
+    WHERE TABLE_SCHEMA = ${sqlString(dbConfig.database)}
+      AND TABLE_NAME = 'yimin_peer_projects'
+    GROUP BY INDEX_NAME;
+  `);
+  const projectIndexes = new Map(
+    projectIndexRows.map((row) => [String(row.name), Number(row.nonUnique)])
+  );
+  if (projectIndexes.has("uk_peer_project_website_url")) {
+    await mysqlExec(`
+      ALTER TABLE yimin_peer_projects
+      DROP INDEX uk_peer_project_website_url;
+    `);
+    projectIndexes.delete("uk_peer_project_website_url");
+  }
+  const missingIndexes = [
+    ["uk_peer_project_website_identity", "ADD UNIQUE KEY uk_peer_project_website_identity (website_source_id, source_project_id)"],
+    ["idx_peer_project_website_url", "ADD INDEX idx_peer_project_website_url (website_source_id, canonical_url_hash)"],
+    ["idx_peer_project_website_state", "ADD INDEX idx_peer_project_website_state (website_source_id, lifecycle_status, last_seen_at)"],
+  ]
+    .filter(([indexName]) => !projectIndexes.has(indexName))
+    .map(([, definition]) => definition);
+  if (missingIndexes.length) {
+    await mysqlExec(`
+      ALTER TABLE yimin_peer_projects
+      ${missingIndexes.join(",\n")};
     `);
   }
 }
@@ -2006,7 +2212,8 @@ async function seedPeerMonitorData() {
 
   await mysqlExec(`
     DELETE FROM yimin_peer_projects
-    WHERE seed_hash <> ${sqlString(contentHash)};
+    WHERE seed_hash <> ${sqlString(contentHash)}
+      AND website_source_id IS NULL;
 
     INSERT INTO yimin_peer_imports (
       source_name,
@@ -2145,7 +2352,12 @@ async function listPeerMonitorOverview() {
         c.private_name,
         c.private_domain,
         c.sort_order,
-        (SELECT COUNT(*) FROM yimin_peer_projects p WHERE p.competitor_id = c.id) AS project_count,
+        (
+          SELECT COUNT(*)
+          FROM yimin_peer_projects p
+          WHERE p.competitor_id = c.id
+            AND p.lifecycle_status = 'active'
+        ) AS project_count,
         (
           SELECT COUNT(DISTINCT ${peerArticleSqlIdentity("a")})
           FROM yimin_peer_articles a
@@ -2204,6 +2416,7 @@ async function listPeerProjects(competitorCode) {
         'identityType', identity_type,
         'residenceRequirement', residence_requirement,
         'websiteStatusNote', website_status_note,
+        'canonicalUrl', canonical_url,
         'scrapedAt', IF(scraped_at IS NULL, NULL, DATE_FORMAT(scraped_at, '%Y-%m-%dT%H:%i:%s+08:00'))
       )
     ), JSON_ARRAY())
@@ -2213,6 +2426,7 @@ async function listPeerProjects(competitorCode) {
       JOIN yimin_peer_competitors c ON c.id = p.competitor_id
       WHERE c.code = ${sqlString(competitorCode)}
         AND c.enabled = 1
+        AND p.lifecycle_status = 'active'
       ORDER BY p.country_normalized, p.project_name, p.id
     ) peer_projects;
   `)) || [];
@@ -2220,6 +2434,808 @@ async function listPeerProjects(competitorCode) {
     projects.map((project) => String(project.country || "").trim()).filter(Boolean),
   )].sort((left, right) => left.localeCompare(right, "zh-Hans-CN"));
   return { projects, countries };
+}
+
+function emptyPeerWebsiteCounts() {
+  return {
+    baseline: 0,
+    added: 0,
+    changed: 0,
+    removed: 0,
+    reappeared: 0,
+    unchanged: 0,
+    pendingRemoval: 0,
+    rejected: 0,
+  };
+}
+
+function getPeerWebsiteRunStatus(collectorResults) {
+  const accepted = collectorResults.filter((result) => result.status !== "rejected");
+  if (!accepted.length || accepted.every((result) => result.status === "failed")) {
+    return "failed";
+  }
+  if (collectorResults.some((result) => result.status !== "completed")) {
+    return "partial";
+  }
+  return "completed";
+}
+
+async function getPeerWebsiteRunRecord(runId) {
+  return mysqlJson(`
+    SELECT JSON_OBJECT(
+      'id', id,
+      'runId', run_id,
+      'schemaVersion', schema_version,
+      'payloadHash', payload_hash,
+      'status', status,
+      'collectorCount', collector_count,
+      'acceptedCount', accepted_count,
+      'rejectedCount', rejected_count,
+      'startedAt', DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'finishedAt', DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'result', result_json,
+      'error', error,
+      'createdAt', DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:%s+08:00')
+    )
+    FROM yimin_peer_website_runs
+    WHERE run_id = ${sqlString(runId)}
+    LIMIT 1;
+  `);
+}
+
+async function getPeerWebsiteRunDetail(runId) {
+  const run = await getPeerWebsiteRunRecord(runId);
+  if (!run) return null;
+  const collectors = await mysqlJsonRows(`
+    SELECT JSON_OBJECT(
+      'peerCode', peer_code,
+      'sourceDomain', source_domain,
+      'collectorVersion', collector_version,
+      'status', status,
+      'error', error,
+      'warnings', COALESCE(warnings_json, JSON_ARRAY()),
+      'discoveredCount', discovered_count,
+      'successCount', success_count,
+      'failedCount', failed_count,
+      'baseline', baseline_count,
+      'added', added_count,
+      'changed', changed_count,
+      'removed', removed_count,
+      'reappeared', reappeared_count,
+      'unchanged', unchanged_count,
+      'pendingRemoval', pending_removal_count,
+      'result', result_json,
+      'createdAt', DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:%s+08:00')
+    )
+    FROM yimin_peer_website_source_runs
+    WHERE run_id = ${sqlNumber(run.id)}
+    ORDER BY id;
+  `);
+  return { ...run, collectors };
+}
+
+async function getPeerWebsiteSourceContext(peerCode, sourceDomain) {
+  return mysqlJson(`
+    SELECT JSON_OBJECT(
+      'competitorId', c.id,
+      'competitorCode', c.code,
+      'competitorName', c.private_name,
+      'websiteSourceId', s.id,
+      'sourceDomain', COALESCE(s.source_domain, ${sqlString(sourceDomain)}),
+      'baselineCompleted', IF(COALESCE(s.baseline_completed, 0) = 1, CAST(TRUE AS JSON), CAST(FALSE AS JSON))
+    )
+    FROM yimin_peer_competitors c
+    LEFT JOIN yimin_peer_website_sources s
+      ON s.competitor_id = c.id
+     AND s.source_domain = ${sqlString(sourceDomain)}
+    WHERE c.code = ${sqlString(peerCode)}
+      AND c.enabled = 1
+    LIMIT 1;
+  `);
+}
+
+async function ensurePeerWebsiteSource(collector) {
+  await mysqlExec(`
+    INSERT INTO yimin_peer_website_sources (
+      competitor_id,
+      source_domain,
+      source_url,
+      collector_version
+    )
+    SELECT
+      c.id,
+      ${sqlString(collector.source_domain)},
+      ${sqlString(`https://${collector.source_domain}/`)},
+      ${sqlString(collector.collector_version)}
+    FROM yimin_peer_competitors c
+    WHERE c.code = ${sqlString(collector.peer_code)}
+      AND c.enabled = 1
+    ON DUPLICATE KEY UPDATE
+      source_url = VALUES(source_url),
+      collector_version = VALUES(collector_version),
+      updated_at = CURRENT_TIMESTAMP;
+  `);
+  return getPeerWebsiteSourceContext(collector.peer_code, collector.source_domain);
+}
+
+async function loadPeerWebsiteCurrentProjects(websiteSourceId) {
+  if (!websiteSourceId) return [];
+  return mysqlJsonRows(`
+    SELECT JSON_OBJECT(
+      'id', p.id,
+      'sourceKey', p.source_key,
+      'sourceProjectId', p.source_project_id,
+      'stableIdentity', p.stable_identity,
+      'canonicalUrl', p.canonical_url,
+      'canonicalUrlHash', p.canonical_url_hash,
+      'contentHash', p.content_hash,
+      'currentVersionId', p.current_version_id,
+      'lifecycleStatus', p.lifecycle_status,
+      'missingSuccessCount', p.missing_success_count,
+      'snapshot', COALESCE(v.snapshot_json, JSON_OBJECT())
+    )
+    FROM yimin_peer_projects p
+    LEFT JOIN yimin_peer_project_versions v ON v.id = p.current_version_id
+    WHERE p.website_source_id = ${sqlNumber(websiteSourceId)}
+    ORDER BY p.id;
+  `);
+}
+
+async function planPeerWebsiteCollector(collector) {
+  const source = await getPeerWebsiteSourceContext(collector.peer_code, collector.source_domain);
+  if (!source) {
+    throw new Error(`未找到启用的同行配置: ${collector.peer_code}`);
+  }
+  const currentProjects = await loadPeerWebsiteCurrentProjects(source.websiteSourceId);
+  const plan = buildPeerWebsiteDiffPlan({
+    collector,
+    currentProjects,
+    hasBaseline: Boolean(source.baselineCompleted),
+  });
+  return { source, currentProjects, plan };
+}
+
+function flattenWebsiteProcessText(value) {
+  const fragments = [];
+  const walk = (item) => {
+    if (Array.isArray(item)) {
+      item.forEach(walk);
+      return;
+    }
+    if (item && typeof item === "object") {
+      Object.values(item).forEach(walk);
+      return;
+    }
+    const text = String(item ?? "").trim();
+    if (text) fragments.push(text);
+  };
+  walk(value);
+  return [...new Set(fragments)].join(" ").slice(0, 200_000);
+}
+
+function buildPeerWebsiteDisplayProject(project, peerSeed) {
+  const brandTerms = peerSeed?.brandTerms || [];
+  const applicationProcess = sanitizeWebsiteValue(project.application_process || [], brandTerms);
+  const handlingProcess = sanitizeWebsiteValue(project.handling_process || [], brandTerms);
+  const processText = sanitizeWebsiteText(
+    flattenWebsiteProcessText([applicationProcess, handlingProcess]),
+    brandTerms,
+  );
+  return {
+    projectName: sanitizeWebsiteText(project.project_name, brandTerms),
+    category: sanitizeWebsiteText(project.category, brandTerms),
+    country: sanitizeWebsiteText(project.country_or_region, brandTerms) || "其他",
+    introduction: sanitizeWebsiteText(project.introduction, brandTerms),
+    isInvestmentProject: Boolean(
+      project.investment_amount
+      || project.investment_requirements?.length
+      || project.financial_requirements?.length
+    ),
+    investmentAmount: sanitizeWebsiteText(project.investment_amount, brandTerms),
+    investmentRequirements: sanitizeWebsiteValue(project.investment_requirements || [], brandTerms),
+    financialRequirements: sanitizeWebsiteValue(project.financial_requirements || [], brandTerms),
+    advantages: sanitizeWebsiteValue(project.advantages || [], brandTerms),
+    applicationConditions: sanitizeWebsiteValue(project.application_conditions || [], brandTerms),
+    processSummary: processText.slice(0, 2000),
+    processSourceType: sanitizeWebsiteText(project.process_source_type || "missing", brandTerms),
+    processText,
+    applicationProcess,
+    handlingProcess,
+    identityType: sanitizeWebsiteText(project.identity_type, brandTerms),
+    residenceRequirement: sanitizeWebsiteText(project.residence_requirement, brandTerms),
+    websiteStatusNote: sanitizeWebsiteText(project.website_status_note, brandTerms),
+  };
+}
+
+function buildPeerWebsiteProjectWriteSql({
+  project,
+  source,
+  runDbId,
+  detectedAt,
+  peerSeed,
+  current = null,
+}) {
+  const display = buildPeerWebsiteDisplayProject(project, peerSeed);
+  const sourceKey = buildWebsiteProjectSourceKey(project.peer_code || peerSeed?.code, project.stable_identity);
+  const scrapedAt = project.scraped_at || detectedAt;
+  if (!current) {
+    return {
+      sourceKey,
+      projectIdExpression: `(SELECT id FROM yimin_peer_projects WHERE competitor_id = ${sqlNumber(source.competitorId)} AND source_key = ${sqlString(sourceKey)} LIMIT 1)`,
+      projectWhereSql: `p.competitor_id = ${sqlNumber(source.competitorId)} AND p.source_key = ${sqlString(sourceKey)}`,
+      sql: `
+        INSERT INTO yimin_peer_projects (
+          competitor_id, source_key, website_source_id, source_project_id, stable_identity,
+          canonical_url, canonical_url_hash, content_hash, lifecycle_status,
+          missing_success_count, first_seen_at, last_seen_at, removed_at,
+          project_name, category_raw, country_normalized, introduction,
+          is_investment_project, investment_amount, investment_requirements_json,
+          financial_requirements_json, advantages_json, application_conditions_json,
+          process_summary, process_source_type, process_text, application_process_json,
+          handling_process_json, identity_type, residence_requirement, website_status_note,
+          scraped_at, seed_hash
+        ) VALUES (
+          ${sqlNumber(source.competitorId)}, ${sqlString(sourceKey)}, ${sqlNumber(source.websiteSourceId)},
+          ${sqlString(project.source_project_id || null)}, ${sqlString(project.stable_identity)},
+          ${sqlString(project.canonical_url)}, ${sqlString(project.canonical_url_hash)}, ${sqlString(project.content_hash)},
+          'active', 0, ${sqlDate(detectedAt)}, ${sqlDate(detectedAt)}, NULL,
+          ${sqlString(display.projectName)}, ${sqlString(display.category)}, ${sqlString(display.country)},
+          ${sqlString(display.introduction)}, ${display.isInvestmentProject ? 1 : 0},
+          ${sqlString(display.investmentAmount)}, ${sqlJson(display.investmentRequirements)},
+          ${sqlJson(display.financialRequirements)}, ${sqlJson(display.advantages)},
+          ${sqlJson(display.applicationConditions)}, ${sqlString(display.processSummary)},
+          ${sqlString(display.processSourceType || "missing")}, ${sqlString(display.processText)},
+          ${sqlJson(display.applicationProcess)}, ${sqlJson(display.handlingProcess)},
+          ${sqlString(display.identityType)}, ${sqlString(display.residenceRequirement)},
+          ${sqlString(display.websiteStatusNote)}, ${sqlDate(scrapedAt)}, ${sqlString(project.content_hash)}
+        )
+        ON DUPLICATE KEY UPDATE
+          website_source_id = VALUES(website_source_id),
+          source_project_id = VALUES(source_project_id),
+          stable_identity = VALUES(stable_identity),
+          canonical_url = VALUES(canonical_url),
+          canonical_url_hash = VALUES(canonical_url_hash),
+          content_hash = VALUES(content_hash),
+          lifecycle_status = 'active',
+          missing_success_count = 0,
+          last_seen_at = VALUES(last_seen_at),
+          removed_at = NULL,
+          project_name = VALUES(project_name),
+          category_raw = VALUES(category_raw),
+          country_normalized = VALUES(country_normalized),
+          introduction = VALUES(introduction),
+          is_investment_project = VALUES(is_investment_project),
+          investment_amount = VALUES(investment_amount),
+          investment_requirements_json = VALUES(investment_requirements_json),
+          financial_requirements_json = VALUES(financial_requirements_json),
+          advantages_json = VALUES(advantages_json),
+          application_conditions_json = VALUES(application_conditions_json),
+          process_summary = VALUES(process_summary),
+          process_source_type = VALUES(process_source_type),
+          process_text = VALUES(process_text),
+          application_process_json = VALUES(application_process_json),
+          handling_process_json = VALUES(handling_process_json),
+          identity_type = VALUES(identity_type),
+          residence_requirement = VALUES(residence_requirement),
+          website_status_note = VALUES(website_status_note),
+          scraped_at = VALUES(scraped_at),
+          seed_hash = VALUES(seed_hash),
+          updated_at = CURRENT_TIMESTAMP;
+      `,
+    };
+  }
+
+  return {
+    sourceKey,
+    projectIdExpression: sqlNumber(current.id),
+    projectWhereSql: `p.id = ${sqlNumber(current.id)}`,
+    sql: `
+      UPDATE yimin_peer_projects SET
+        source_key = ${sqlString(sourceKey)},
+        source_project_id = ${sqlString(project.source_project_id || null)},
+        stable_identity = ${sqlString(project.stable_identity)},
+        canonical_url = ${sqlString(project.canonical_url)},
+        canonical_url_hash = ${sqlString(project.canonical_url_hash)},
+        content_hash = ${sqlString(project.content_hash)},
+        lifecycle_status = 'active',
+        missing_success_count = 0,
+        last_seen_at = ${sqlDate(detectedAt)},
+        removed_at = NULL,
+        project_name = ${sqlString(display.projectName)},
+        category_raw = ${sqlString(display.category)},
+        country_normalized = ${sqlString(display.country)},
+        introduction = ${sqlString(display.introduction)},
+        is_investment_project = ${display.isInvestmentProject ? 1 : 0},
+        investment_amount = ${sqlString(display.investmentAmount)},
+        investment_requirements_json = ${sqlJson(display.investmentRequirements)},
+        financial_requirements_json = ${sqlJson(display.financialRequirements)},
+        advantages_json = ${sqlJson(display.advantages)},
+        application_conditions_json = ${sqlJson(display.applicationConditions)},
+        process_summary = ${sqlString(display.processSummary)},
+        process_source_type = ${sqlString(display.processSourceType || "missing")},
+        process_text = ${sqlString(display.processText)},
+        application_process_json = ${sqlJson(display.applicationProcess)},
+        handling_process_json = ${sqlJson(display.handlingProcess)},
+        identity_type = ${sqlString(display.identityType)},
+        residence_requirement = ${sqlString(display.residenceRequirement)},
+        website_status_note = ${sqlString(display.websiteStatusNote)},
+        scraped_at = ${sqlDate(scrapedAt)},
+        seed_hash = ${sqlString(project.content_hash)},
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${sqlNumber(current.id)}
+        AND website_source_id = ${sqlNumber(source.websiteSourceId)};
+    `,
+  };
+}
+
+function buildPeerWebsiteVersionSql({
+  projectIdExpression,
+  projectWhereSql,
+  project,
+  source,
+  runDbId,
+  detectedAt,
+}) {
+  return `
+    INSERT INTO yimin_peer_project_versions (
+      project_id, website_source_id, run_id, content_hash,
+      canonical_url, snapshot_json, detected_at
+    )
+    SELECT
+      ${projectIdExpression},
+      ${sqlNumber(source.websiteSourceId)},
+      ${sqlNumber(runDbId)},
+      ${sqlString(project.content_hash)},
+      ${sqlString(project.canonical_url)},
+      ${sqlJson(project)},
+      ${sqlDate(detectedAt)}
+    WHERE ${projectIdExpression} IS NOT NULL
+    ON DUPLICATE KEY UPDATE
+      canonical_url = VALUES(canonical_url),
+      snapshot_json = VALUES(snapshot_json);
+
+    UPDATE yimin_peer_projects p
+    JOIN yimin_peer_project_versions v
+      ON v.project_id = p.id
+     AND v.content_hash = ${sqlString(project.content_hash)}
+    SET p.current_version_id = v.id
+    WHERE ${projectWhereSql};
+  `;
+}
+
+function buildPeerWebsiteEventSql({
+  action,
+  projectIdExpression,
+  source,
+  runDbId,
+  runId,
+  detectedAt,
+}) {
+  if (!["added", "changed", "removed", "reappeared"].includes(action.type)) return "";
+  const beforeVersionId = action.current?.currentVersionId
+    ? sqlNumber(action.current.currentVersionId)
+    : "NULL";
+  const afterVersionId = action.project
+    ? `(
+        SELECT v.id
+        FROM yimin_peer_project_versions v
+        WHERE v.project_id = ${projectIdExpression}
+          AND v.content_hash = ${sqlString(action.project.content_hash)}
+        LIMIT 1
+      )`
+    : "NULL";
+  const evidenceUrl = action.project?.canonical_url || action.current?.canonicalUrl || "";
+  const eventKey = createHash("sha256")
+    .update([
+      runId,
+      action.type,
+      action.project?.stable_identity || action.current?.stableIdentity || "",
+      action.current?.contentHash || "",
+      action.project?.content_hash || "",
+    ].join("\n"))
+    .digest("hex");
+  return `
+    INSERT INTO yimin_peer_project_events (
+      event_key, project_id, competitor_id, website_source_id, run_id,
+      event_type, before_version_id, after_version_id, changed_fields_json,
+      evidence_url, detected_at
+    )
+    SELECT
+      ${sqlString(eventKey)},
+      ${projectIdExpression},
+      ${sqlNumber(source.competitorId)},
+      ${sqlNumber(source.websiteSourceId)},
+      ${sqlNumber(runDbId)},
+      ${sqlString(action.type)},
+      ${beforeVersionId},
+      ${afterVersionId},
+      ${sqlJson(action.changedFields || [])},
+      ${sqlString(evidenceUrl || null)},
+      ${sqlDate(detectedAt)}
+    WHERE ${projectIdExpression} IS NOT NULL
+    ON DUPLICATE KEY UPDATE event_key = VALUES(event_key);
+  `;
+}
+
+function buildPeerWebsiteCollectorResult(validationResult, plan = null, overrides = {}) {
+  const collector = validationResult.collector || {};
+  const counts = plan ? { ...emptyPeerWebsiteCounts(), ...plan } : emptyPeerWebsiteCounts();
+  delete counts.actions;
+  return {
+    peerCode: validationResult.peerCode || collector.peer_code || "",
+    sourceDomain: validationResult.sourceDomain || collector.source_domain || "",
+    collectorVersion: collector.collector_version || "",
+    status: overrides.status || (validationResult.valid ? collector.status : "rejected"),
+    error: overrides.error || collector.error || validationResult.errors?.join("；") || "",
+    warnings: (validationResult.warnings || []).slice(0, 50),
+    warningCount: (validationResult.warnings || []).length,
+    discoveredCount: collector.discovered_count || 0,
+    successCount: collector.success_count || 0,
+    failedCount: collector.failed_count || 0,
+    ...counts,
+    rejected: validationResult.valid ? 0 : Math.max(1, collector.projects?.length || 0),
+  };
+}
+
+function buildPeerWebsiteSourceRunSql(runDbId, websiteSourceId, result) {
+  return `
+    INSERT INTO yimin_peer_website_source_runs (
+      run_id, website_source_id, peer_code, source_domain, collector_version,
+      status, error, warnings_json, discovered_count, success_count, failed_count,
+      baseline_count, added_count, changed_count, removed_count, reappeared_count,
+      unchanged_count, pending_removal_count, result_json
+    ) VALUES (
+      ${sqlNumber(runDbId)}, ${websiteSourceId ? sqlNumber(websiteSourceId) : "NULL"},
+      ${sqlString(result.peerCode)}, ${sqlString(result.sourceDomain)}, ${sqlString(result.collectorVersion)},
+      ${sqlString(result.status)}, ${sqlString(result.error || null)}, ${sqlJson(result.warnings || [])},
+      ${sqlNumber(result.discoveredCount)}, ${sqlNumber(result.successCount)}, ${sqlNumber(result.failedCount)},
+      ${sqlNumber(result.baseline)}, ${sqlNumber(result.added)}, ${sqlNumber(result.changed)},
+      ${sqlNumber(result.removed)}, ${sqlNumber(result.reappeared)}, ${sqlNumber(result.unchanged)},
+      ${sqlNumber(result.pendingRemoval)}, ${sqlJson(result)}
+    )
+    ON DUPLICATE KEY UPDATE
+      website_source_id = VALUES(website_source_id),
+      collector_version = VALUES(collector_version),
+      status = VALUES(status),
+      error = VALUES(error),
+      warnings_json = VALUES(warnings_json),
+      discovered_count = VALUES(discovered_count),
+      success_count = VALUES(success_count),
+      failed_count = VALUES(failed_count),
+      baseline_count = VALUES(baseline_count),
+      added_count = VALUES(added_count),
+      changed_count = VALUES(changed_count),
+      removed_count = VALUES(removed_count),
+      reappeared_count = VALUES(reappeared_count),
+      unchanged_count = VALUES(unchanged_count),
+      pending_removal_count = VALUES(pending_removal_count),
+      result_json = VALUES(result_json);
+  `;
+}
+
+async function applyPeerWebsiteCompletedCollector({
+  validationResult,
+  source,
+  plan,
+  runDbId,
+  runId,
+  detectedAt,
+}) {
+  const collector = validationResult.collector;
+  const peerSeed = peerCompetitorSeeds.find((peer) => peer.code === collector.peer_code);
+  const statements = ["START TRANSACTION;"];
+
+  for (const action of plan.actions) {
+    if (["baseline", "added", "changed", "reappeared", "unchanged"].includes(action.type)) {
+      const write = buildPeerWebsiteProjectWriteSql({
+        project: action.project,
+        source,
+        runDbId,
+        detectedAt,
+        peerSeed,
+        current: action.current,
+      });
+      statements.push(write.sql);
+      if (["baseline", "added", "changed", "reappeared"].includes(action.type)) {
+        statements.push(buildPeerWebsiteVersionSql({
+          projectIdExpression: write.projectIdExpression,
+          projectWhereSql: write.projectWhereSql,
+          project: action.project,
+          source,
+          runDbId,
+          detectedAt,
+        }));
+      }
+      statements.push(buildPeerWebsiteEventSql({
+        action,
+        projectIdExpression: write.projectIdExpression,
+        source,
+        runDbId,
+        runId,
+        detectedAt,
+      }));
+      continue;
+    }
+
+    const nextMissingCount = Number(action.current?.missingSuccessCount || 0) + 1;
+    if (action.type === "missing_once") {
+      statements.push(`
+        UPDATE yimin_peer_projects
+        SET missing_success_count = ${sqlNumber(nextMissingCount)}, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ${sqlNumber(action.current.id)}
+          AND website_source_id = ${sqlNumber(source.websiteSourceId)}
+          AND lifecycle_status = 'active';
+      `);
+      continue;
+    }
+    if (action.type === "removed") {
+      statements.push(`
+        UPDATE yimin_peer_projects
+        SET lifecycle_status = 'removed',
+            missing_success_count = ${sqlNumber(nextMissingCount)},
+            removed_at = ${sqlDate(detectedAt)},
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ${sqlNumber(action.current.id)}
+          AND website_source_id = ${sqlNumber(source.websiteSourceId)}
+          AND lifecycle_status = 'active';
+      `);
+      statements.push(buildPeerWebsiteEventSql({
+        action,
+        projectIdExpression: sqlNumber(action.current.id),
+        source,
+        runDbId,
+        runId,
+        detectedAt,
+      }));
+    }
+  }
+
+  if (!source.baselineCompleted) {
+    statements.push(`
+      DELETE FROM yimin_peer_projects
+      WHERE competitor_id = ${sqlNumber(source.competitorId)}
+        AND website_source_id IS NULL;
+    `);
+  }
+  const result = buildPeerWebsiteCollectorResult(validationResult, plan);
+  statements.push(`
+    UPDATE yimin_peer_website_sources SET
+      collector_version = ${sqlString(collector.collector_version)},
+      last_status = 'completed',
+      last_error = NULL,
+      last_run_id = ${sqlNumber(runDbId)},
+      last_success_run_id = ${sqlNumber(runDbId)},
+      last_success_at = ${sqlDate(detectedAt)},
+      baseline_completed = 1,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ${sqlNumber(source.websiteSourceId)};
+
+    ${buildPeerWebsiteSourceRunSql(runDbId, source.websiteSourceId, result)}
+    COMMIT;
+  `);
+  await mysqlExec(statements.join("\n"));
+  return result;
+}
+
+async function recordPeerWebsiteNonCompletedCollector({ validationResult, source, runDbId }) {
+  const result = buildPeerWebsiteCollectorResult(validationResult);
+  const collector = validationResult.collector || {};
+  const statements = [];
+  if (source?.websiteSourceId) {
+    statements.push(`
+      UPDATE yimin_peer_website_sources SET
+        collector_version = ${sqlString(collector.collector_version || "")},
+        last_status = ${sqlString(result.status === "rejected" ? "failed" : result.status)},
+        last_error = ${sqlString(result.error || null)},
+        last_run_id = ${sqlNumber(runDbId)},
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${sqlNumber(source.websiteSourceId)};
+    `);
+  }
+  statements.push(buildPeerWebsiteSourceRunSql(runDbId, source?.websiteSourceId, result));
+  await mysqlExec(statements.join("\n"));
+  return result;
+}
+
+function summarizePeerWebsiteResults(results) {
+  const totals = emptyPeerWebsiteCounts();
+  results.forEach((result) => {
+    Object.keys(totals).forEach((key) => {
+      totals[key] += Number(result[key] || 0);
+    });
+  });
+  return totals;
+}
+
+async function importPeerWebsiteSnapshot(rawSnapshot, { dryRun = false } = {}) {
+  const validation = validatePeerWebsiteSnapshot(rawSnapshot, peerCompetitorSeeds);
+  if (!validation.valid) {
+    const error = new Error(validation.errors.join("；"));
+    error.code = "INVALID_WEBSITE_SNAPSHOT";
+    throw error;
+  }
+
+  if (!dryRun) {
+    const existing = await getPeerWebsiteRunRecord(validation.snapshot.run_id);
+    if (existing) {
+      if (existing.payloadHash !== validation.payloadHash) {
+        const error = new Error("相同 run_id 已提交过不同内容");
+        error.code = "WEBSITE_RUN_ID_CONFLICT";
+        throw error;
+      }
+      if (existing.result) return { ...existing.result, reused: true };
+      const active = activePeerWebsiteImports.get(validation.snapshot.run_id);
+      if (active) return active;
+      const error = new Error("该 run_id 已存在未完成记录，请更换 run_id 后重新提交");
+      error.code = "WEBSITE_RUN_INCOMPLETE";
+      throw error;
+    }
+  }
+
+  const executeImport = async () => {
+    if (dryRun) {
+      const collectorResults = [];
+      for (const validationResult of validation.collectors) {
+        if (!validationResult.valid) {
+          collectorResults.push(buildPeerWebsiteCollectorResult(validationResult));
+          continue;
+        }
+        const { plan } = await planPeerWebsiteCollector(validationResult.collector);
+        collectorResults.push(buildPeerWebsiteCollectorResult(validationResult, plan));
+      }
+      return {
+        runId: validation.snapshot.run_id,
+        schemaVersion: PEER_WEBSITE_SCHEMA_VERSION,
+        status: getPeerWebsiteRunStatus(collectorResults),
+        dryRun: true,
+        reused: false,
+        collectorCount: collectorResults.length,
+        acceptedCount: collectorResults.filter((result) => result.status !== "rejected").length,
+        rejectedCount: collectorResults.filter((result) => result.status === "rejected").length,
+        totals: summarizePeerWebsiteResults(collectorResults),
+        collectors: collectorResults,
+      };
+    }
+
+    await mysqlExec(`
+      INSERT INTO yimin_peer_website_runs (
+        run_id, schema_version, payload_hash, status, collector_count,
+        started_at, finished_at
+      ) VALUES (
+        ${sqlString(validation.snapshot.run_id)},
+        ${sqlString(PEER_WEBSITE_SCHEMA_VERSION)},
+        ${sqlString(validation.payloadHash)},
+        'running',
+        ${sqlNumber(validation.collectors.length)},
+        ${sqlDate(validation.snapshot.started_at)},
+        ${sqlDate(validation.snapshot.finished_at)}
+      );
+    `);
+    const runRecord = await getPeerWebsiteRunRecord(validation.snapshot.run_id);
+    if (!runRecord) throw new Error("官网导入运行记录创建失败");
+
+    const collectorResults = [];
+    for (const validationResult of validation.collectors) {
+      if (!validationResult.valid) {
+        collectorResults.push(await recordPeerWebsiteNonCompletedCollector({
+          validationResult,
+          source: null,
+          runDbId: runRecord.id,
+        }));
+        continue;
+      }
+
+      let source = null;
+      try {
+        source = await ensurePeerWebsiteSource(validationResult.collector);
+        if (!source?.websiteSourceId) throw new Error("官网来源初始化失败");
+        if (validationResult.collector.status !== "completed") {
+          collectorResults.push(await recordPeerWebsiteNonCompletedCollector({
+            validationResult,
+            source,
+            runDbId: runRecord.id,
+          }));
+          continue;
+        }
+        const currentProjects = await loadPeerWebsiteCurrentProjects(source.websiteSourceId);
+        const plan = buildPeerWebsiteDiffPlan({
+          collector: validationResult.collector,
+          currentProjects,
+          hasBaseline: Boolean(source.baselineCompleted),
+        });
+        collectorResults.push(await applyPeerWebsiteCompletedCollector({
+          validationResult,
+          source,
+          plan,
+          runDbId: runRecord.id,
+          runId: validation.snapshot.run_id,
+          detectedAt: validation.snapshot.finished_at,
+        }));
+      } catch (error) {
+        const failedValidation = {
+          ...validationResult,
+          collector: { ...validationResult.collector, status: "failed" },
+          errors: [error instanceof Error ? error.message : String(error)],
+        };
+        collectorResults.push(await recordPeerWebsiteNonCompletedCollector({
+          validationResult: failedValidation,
+          source,
+          runDbId: runRecord.id,
+        }));
+      }
+    }
+
+    const status = getPeerWebsiteRunStatus(collectorResults);
+    const result = {
+      runId: validation.snapshot.run_id,
+      schemaVersion: PEER_WEBSITE_SCHEMA_VERSION,
+      status,
+      dryRun: false,
+      reused: false,
+      collectorCount: collectorResults.length,
+      acceptedCount: collectorResults.filter((item) => item.status !== "rejected").length,
+      rejectedCount: collectorResults.filter((item) => item.status === "rejected").length,
+      totals: summarizePeerWebsiteResults(collectorResults),
+      collectors: collectorResults,
+    };
+    await mysqlExec(`
+      UPDATE yimin_peer_website_runs SET
+        status = ${sqlString(status)},
+        accepted_count = ${sqlNumber(result.acceptedCount)},
+        rejected_count = ${sqlNumber(result.rejectedCount)},
+        result_json = ${sqlJson(result)},
+        error = ${sqlString(status === "failed" ? "没有站点成功完成导入" : null)},
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${sqlNumber(runRecord.id)};
+    `);
+    return result;
+  };
+
+  if (dryRun) return executeImport();
+  const active = activePeerWebsiteImports.get(validation.snapshot.run_id);
+  if (active) return active;
+  const promise = executeImport().finally(() => {
+    activePeerWebsiteImports.delete(validation.snapshot.run_id);
+  });
+  activePeerWebsiteImports.set(validation.snapshot.run_id, promise);
+  return promise;
+}
+
+async function listPeerWebsiteEvents({ competitorCode = "", eventType = "", from = "", to = "", limit = 50, offset = 0 } = {}) {
+  const filters = [];
+  if (competitorCode) filters.push(`c.code = ${sqlString(competitorCode)}`);
+  if (eventType) filters.push(`e.event_type = ${sqlString(eventType)}`);
+  if (from) filters.push(`e.detected_at >= ${sqlDate(from)}`);
+  if (to) filters.push(`e.detected_at <= ${sqlDate(to)}`);
+  const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  return mysqlJsonRows(`
+    SELECT JSON_OBJECT(
+      'id', e.id,
+      'eventType', e.event_type,
+      'peerCode', c.code,
+      'competitorName', c.private_name,
+      'projectId', p.id,
+      'projectName', p.project_name,
+      'country', p.country_normalized,
+      'category', p.category_raw,
+      'changedFields', COALESCE(e.changed_fields_json, JSON_ARRAY()),
+      'evidenceUrl', e.evidence_url,
+      'beforeSnapshot', before_version.snapshot_json,
+      'afterSnapshot', after_version.snapshot_json,
+      'detectedAt', DATE_FORMAT(e.detected_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'runId', r.run_id
+    )
+    FROM yimin_peer_project_events e
+    JOIN yimin_peer_projects p ON p.id = e.project_id
+    JOIN yimin_peer_competitors c ON c.id = e.competitor_id
+    JOIN yimin_peer_website_runs r ON r.id = e.run_id
+    LEFT JOIN yimin_peer_project_versions before_version ON before_version.id = e.before_version_id
+    LEFT JOIN yimin_peer_project_versions after_version ON after_version.id = e.after_version_id
+    ${where}
+    ORDER BY e.detected_at DESC, e.id DESC
+    LIMIT ${sqlNumber(Math.min(100, Math.max(1, Number(limit) || 50)))}
+    OFFSET ${sqlNumber(Math.max(0, Number(offset) || 0))};
+  `);
 }
 
 async function listPeerArticles(competitorCode, { limit = 20, offset = 0 } = {}) {
@@ -13491,12 +14507,12 @@ function isAllDepartmentDailyGenerationRunning(date) {
   ));
 }
 
-async function readRequestBody(req) {
+async function readRequestBody(req, maxBytes = 1024 * 1024) {
   return new Promise((resolvePromise, reject) => {
     let body = "";
     req.on("data", (chunk) => {
       body += chunk;
-      if (body.length > 1024 * 1024) {
+      if (Buffer.byteLength(body, "utf8") > maxBytes) {
         req.destroy();
         reject(new Error("Request body too large"));
       }
@@ -13508,8 +14524,8 @@ async function readRequestBody(req) {
   });
 }
 
-async function readJsonBody(req) {
-  const body = await readRequestBody(req);
+async function readJsonBody(req, maxBytes) {
+  const body = await readRequestBody(req, maxBytes);
   if (!body.trim()) {
     return {};
   }
@@ -13636,6 +14652,84 @@ const server = createServer(async (req, res) => {
       }
       const payload = await listPeerProjects(competitorCode);
       sendJson(res, 200, { ok: true, ...payload });
+      return;
+    }
+
+    if (url.pathname === "/api/peer-monitor/website/import" && req.method === "POST") {
+      if (!isPeerDiscoveryAuthorized(req)) {
+        sendJson(res, 401, { ok: false, error: "请使用管理员登录、loopback 请求或有效的定时任务令牌" });
+        return;
+      }
+      await initDb();
+      const dryRun = url.searchParams.get("dryRun") === "1";
+      try {
+        const body = await readJsonBody(req, 32 * 1024 * 1024);
+        const result = await importPeerWebsiteSnapshot(body, { dryRun });
+        sendJson(res, dryRun || result.reused ? 200 : 201, { ok: true, ...result });
+      } catch (error) {
+        const code = error?.code;
+        const status = code === "INVALID_WEBSITE_SNAPSHOT"
+          ? 400
+          : ["WEBSITE_RUN_ID_CONFLICT", "WEBSITE_RUN_INCOMPLETE"].includes(code)
+            ? 409
+            : 500;
+        sendJson(res, status, {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return;
+    }
+
+    const peerWebsiteRunMatch = url.pathname.match(/^\/api\/peer-monitor\/website\/runs\/([^/]+)$/);
+    if (peerWebsiteRunMatch && req.method === "GET") {
+      await initDb();
+      const access = await getPeerMonitorAccess(req);
+      if (!access.allowed && !isPeerDiscoveryAuthorized(req)) {
+        sendJson(res, 403, { ok: false, error: "无权查看官网导入任务" });
+        return;
+      }
+      const runId = decodeURIComponent(peerWebsiteRunMatch[1]);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:+-]{7,159}$/.test(runId)) {
+        sendJson(res, 400, { ok: false, error: "runId 格式无效" });
+        return;
+      }
+      const run = await getPeerWebsiteRunDetail(runId);
+      if (!run) {
+        sendJson(res, 404, { ok: false, error: "官网导入任务不存在" });
+        return;
+      }
+      sendJson(res, 200, { ok: true, run });
+      return;
+    }
+
+    if (url.pathname === "/api/peer-monitor/website/events" && req.method === "GET") {
+      await initDb();
+      const access = await getPeerMonitorAccess(req);
+      if (!access.allowed && !isLoopbackRequest(req)) {
+        sendJson(res, 403, { ok: false, error: "无权查看官网变化事件" });
+        return;
+      }
+      const competitorCode = String(url.searchParams.get("competitor") || "");
+      const eventType = String(url.searchParams.get("eventType") || "");
+      const from = String(url.searchParams.get("from") || "");
+      const to = String(url.searchParams.get("to") || "");
+      if (competitorCode && !/^peer-[a-i]$/.test(competitorCode)) {
+        sendJson(res, 400, { ok: false, error: "competitor 参数无效" });
+        return;
+      }
+      if (eventType && !["added", "changed", "removed", "reappeared"].includes(eventType)) {
+        sendJson(res, 400, { ok: false, error: "eventType 参数无效" });
+        return;
+      }
+      if ((from && Number.isNaN(Date.parse(from))) || (to && Number.isNaN(Date.parse(to)))) {
+        sendJson(res, 400, { ok: false, error: "from/to 必须是有效时间" });
+        return;
+      }
+      const limit = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get("limit") || "50", 10) || 50));
+      const offset = Math.max(0, Number.parseInt(url.searchParams.get("offset") || "0", 10) || 0);
+      const events = await listPeerWebsiteEvents({ competitorCode, eventType, from, to, limit, offset });
+      sendJson(res, 200, { ok: true, events, limit, offset });
       return;
     }
 

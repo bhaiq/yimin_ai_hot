@@ -1,0 +1,65 @@
+{
+  "schema_version": "peer-website-snapshot/v1",
+  "run_id": "web-local-baseline-20260808",
+  "started_at": "2026-08-08T02:30:00+08:00",
+  "finished_at": "2026-08-08T03:00:00+08:00",
+  "collectors": [
+    {
+      "peer_code": "peer-a",
+      "source_domain": "aqyimin.com",
+      "collector_version": "local-fixture-v1",
+      "status": "completed",
+      "error": "",
+      "discovered_count": 2,
+      "success_count": 2,
+      "failed_count": 0,
+      "projects": [
+        {
+          "source_project_id": "fixture-project-a",
+          "canonical_url": "https://www.aqyimin.com/detail/fixture-project-a",
+          "project_name": "本地联调项目 A",
+          "country_or_region": "加拿大",
+          "category": "技术移民",
+          "website_status_note": "",
+          "introduction": "用于官网快照接口联调，不是生产官网数据。",
+          "investment_amount": "",
+          "investment_requirements": [],
+          "financial_requirements": [],
+          "application_conditions": ["满足联调条件"],
+          "advantages": ["验证首轮只建立基线"],
+          "application_process": [
+            {
+              "number": "1",
+              "stage": "提交"
+            }
+          ],
+          "handling_process": [],
+          "identity_type": "测试身份",
+          "residence_requirement": "",
+          "process_source_type": "html_text",
+          "scraped_at": "2026-08-08T02:40:00+08:00"
+        },
+        {
+          "source_project_id": "fixture-project-b",
+          "canonical_url": "https://www.aqyimin.com/detail/fixture-project-b",
+          "project_name": "本地联调项目 B",
+          "country_or_region": "美国",
+          "category": "投资移民",
+          "website_status_note": "",
+          "introduction": "用于验证连续成功快照缺失保护。",
+          "investment_amount": "100 万美元",
+          "investment_requirements": ["仅作联调"],
+          "financial_requirements": [],
+          "application_conditions": [],
+          "advantages": [],
+          "application_process": [],
+          "handling_process": [],
+          "identity_type": "测试身份",
+          "residence_requirement": "",
+          "process_source_type": "missing",
+          "scraped_at": "2026-08-08T02:41:00+08:00"
+        }
+      ]
+    }
+  ]
+}

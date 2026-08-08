@@ -6,8 +6,11 @@
   "scripts": {
     "dev": "node server.mjs",
     "start": "node server.mjs",
-    "check": "node --check app.js && node --check server.mjs && node --check lib/peer-wechat-discovery.mjs && node --check scripts/build-peer-monitor-seed.mjs",
+    "check": "node --check app.js && node --check server.mjs && node --check lib/peer-wechat-discovery.mjs && node --check lib/peer-website-monitor.mjs && node --check scripts/build-peer-monitor-seed.mjs",
     "test:peer-discovery": "node --test test/peer-wechat-discovery.test.mjs",
+    "test:peer-website": "node --test test/peer-website-monitor.test.mjs",
+    "test:peer-web-collector": "python3 -m unittest discover -s collectors/peer-web/tests -p 'test_*.py'",
+    "peer:web:collect": "bash scripts/run-peer-website-collect.sh",
     "peer:seed": "node scripts/build-peer-monitor-seed.mjs"
   },
   "engines": {
