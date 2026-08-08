@@ -222,6 +222,51 @@ def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def read_summary_failure_records(collector_directory: Path) -> list[dict[str, Any]]:
+    summary_path = collector_directory / "summary.json"
+    if not summary_path.exists():
+        return []
+    try:
+        summary = read_json(summary_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return []
+
+    failures = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            if safe_text(value.get("scrape_status"), 20).lower() == "error":
+                failures.append(value)
+                return
+            for nested in value.values():
+                visit(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                visit(nested)
+
+    visit(summary)
+    return failures
+
+
+def unique_failure_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique = []
+    seen = set()
+    for record in records:
+        identity = safe_text(
+            record.get("requested_url")
+            or record.get("source_url")
+            or record.get("canonical_url")
+            or record.get("error"),
+            1_400,
+        )
+        if identity and identity in seen:
+            continue
+        if identity:
+            seen.add(identity)
+        unique.append(record)
+    return unique
+
+
 def atomic_write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(f"{path.suffix}.tmp")
@@ -408,7 +453,10 @@ def execute_collector(
         record for record in raw_records
         if safe_text(record.get("scrape_status") or "ok", 20).lower() == "ok"
     ]
-    failed_records = [record for record in raw_records if record not in candidate_records]
+    failed_records = unique_failure_records([
+        *[record for record in raw_records if record not in candidate_records],
+        *read_summary_failure_records(collector_directory),
+    ])
     finished_at_text = iso_seconds(finished_at)
     projects = []
     invalid_success_errors = []

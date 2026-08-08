@@ -163,6 +163,46 @@ class PeerWebsiteRunnerTests(unittest.TestCase):
         self.assertEqual(payload["projects"], [])
         self.assertIn("缺少名称或官网链接", payload["error"])
 
+    def test_summary_page_errors_mark_collector_partial(self) -> None:
+        raw_records = [{
+            "scrape_status": "ok",
+            "project_slug": "valid-project",
+            "source_url": "https://www.aqyimin.com/detail/valid-project",
+            "project_name": "有效项目",
+        }]
+
+        def fake_popen(command: list[str], **_: object) -> FakeProcess:
+            output_directory = Path(command[command.index("--output-dir") + 1])
+            output_directory.mkdir(parents=True, exist_ok=True)
+            (output_directory / self.definition.output_name).write_text(
+                json.dumps(raw_records, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (output_directory / "summary.json").write_text(
+                json.dumps({
+                    "excluded_or_duplicate_records": [{
+                        "scrape_status": "error",
+                        "source_url": "https://www.aqyimin.com/detail/failed",
+                        "error": "代理瞬时超时",
+                    }],
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            return FakeProcess()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(runner.subprocess, "Popen", side_effect=fake_popen):
+                payload, _ = runner.execute_collector(
+                    self.definition,
+                    Path(temporary),
+                    "test-version",
+                    60,
+                )
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(payload["success_count"], 1)
+        self.assertEqual(payload["failed_count"], 1)
+        self.assertIn("代理瞬时超时", payload["error"])
+
     def test_safe_text_redacts_credentials(self) -> None:
         text = runner.safe_text("request failed token=very-secret-value")
         self.assertNotIn("very-secret-value", text)
