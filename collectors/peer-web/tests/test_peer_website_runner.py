@@ -167,6 +167,45 @@ class PeerWebsiteRunnerTests(unittest.TestCase):
         self.assertNotIn("very-secret-value", text)
         self.assertIn("[REDACTED]", text)
 
+    def test_peer_proxy_is_scoped_to_only_the_configured_collector(self) -> None:
+        peer_b = next(
+            item for item in runner.COLLECTORS if item.peer_code == "peer-b"
+        )
+        with patch.dict(
+            runner.os.environ,
+            {
+                "HTTP_PROXY": "http://global-proxy.example:8080",
+                "PEER_WEBSITE_PEER_B_PROXY_URL": "http://127.0.0.1:17890",
+            },
+            clear=False,
+        ):
+            peer_b_environment, peer_b_proxy = runner.build_collector_environment(
+                peer_b
+            )
+            peer_a_environment, peer_a_proxy = runner.build_collector_environment(
+                self.definition
+            )
+
+        self.assertTrue(peer_b_proxy)
+        self.assertEqual(
+            peer_b_environment["HTTPS_PROXY"], "http://127.0.0.1:17890"
+        )
+        self.assertFalse(peer_a_proxy)
+        self.assertNotIn("HTTP_PROXY", peer_a_environment)
+        self.assertNotIn("http_proxy", peer_a_environment)
+
+    def test_peer_proxy_rejects_non_loopback_address(self) -> None:
+        peer_b = next(
+            item for item in runner.COLLECTORS if item.peer_code == "peer-b"
+        )
+        with patch.dict(
+            runner.os.environ,
+            {"PEER_WEBSITE_PEER_B_PROXY_URL": "http://proxy.example:8080"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ValueError, "本机 HTTP"):
+                runner.build_collector_environment(peer_b)
+
     def test_import_rejections_are_counted_as_incomplete(self) -> None:
         result = {
             "http_status": 201,

@@ -65,8 +65,13 @@ YIMIN_BASE_URL=http://127.0.0.1:4174 \
 
 ```bash
 YIMIN_BASE_URL=http://127.0.0.1:4173 \
+  PEER_WEBSITE_PEER_B_PROXY_URL=http://127.0.0.1:17890 \
   /bin/bash /服务器实际路径/yimin_ai_hot/scripts/run-peer-website-collect.sh write
 ```
+
+`PEER_WEBSITE_PEER_B_PROXY_URL` 只注入 `peer-b`（景鸿移民）子进程；其余八家会
+显式清除代理环境并保持直连。该变量只接受带端口的 loopback HTTP(S) 地址，
+避免把服务器代理意外开放或扩散到 Node、WeRSS 及其他采集器。
 
 脚本使用 `flock` 防止上一轮未结束时重复运行，九家按顺序采集；单站失败不会
 阻塞其他站点，但最终退出码会明确表示本轮不完整：
@@ -96,6 +101,7 @@ YIMIN_BASE_URL=http://127.0.0.1:4173 \
 | `PEER_WEBSITE_OUTPUT_ROOT` | `var/peer-web` | 运行快照与日志目录 |
 | `PEER_WEBSITE_VENV_PATH` | `.venv-peer-web` | 独立 Python 环境目录 |
 | `PLAYWRIGHT_BROWSERS_PATH` | `.cache/ms-playwright` | Chromium 安装目录 |
+| `PEER_WEBSITE_PEER_B_PROXY_URL` | 空 | 仅供景鸿采集器使用的本机 HTTP(S) 代理 |
 
 `build_companies_summary.py` 仅保留给人工导出 CSV/Markdown 使用，正式定时链路
 由 `peer_website_runner.py` 直接生成 V1 快照，不依赖覆盖式总汇总文件。

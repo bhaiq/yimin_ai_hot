@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -26,6 +26,16 @@ SCHEMA_VERSION = "peer-website-snapshot/v1"
 CHINA_TIMEZONE = timezone(timedelta(hours=8))
 COLLECTOR_ROOT = Path(__file__).resolve().parent
 REPOSITORY_ROOT = COLLECTOR_ROOT.parents[1]
+PROXY_ENVIRONMENT_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+)
 
 
 @dataclass(frozen=True)
@@ -239,6 +249,38 @@ def stop_process_group(process: subprocess.Popen[Any]) -> None:
             pass
 
 
+def build_collector_environment(
+    definition: CollectorDefinition,
+) -> tuple[dict[str, str], bool]:
+    environment = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    for key in PROXY_ENVIRONMENT_KEYS:
+        environment.pop(key, None)
+
+    peer_suffix = definition.peer_code.upper().replace("-", "_")
+    variable_name = f"PEER_WEBSITE_{peer_suffix}_PROXY_URL"
+    proxy_url = str(os.environ.get(variable_name) or "").strip()
+    if not proxy_url:
+        return environment, False
+
+    parsed = urlsplit(proxy_url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.port is None
+    ):
+        raise ValueError(f"{variable_name} 必须是带端口的本机 HTTP(S) 代理地址")
+
+    environment.update({
+        "HTTP_PROXY": proxy_url,
+        "HTTPS_PROXY": proxy_url,
+        "http_proxy": proxy_url,
+        "https_proxy": proxy_url,
+        "NO_PROXY": "127.0.0.1,localhost,::1",
+        "no_proxy": "127.0.0.1,localhost,::1",
+    })
+    return environment, True
+
+
 def execute_collector(
     definition: CollectorDefinition,
     run_directory: Path,
@@ -259,28 +301,30 @@ def execute_collector(
     return_code: int | None = None
     timed_out = False
     runtime_error = ""
-    environment = {
-        **os.environ,
-        "PYTHONUNBUFFERED": "1",
-    }
+    proxy_configured = False
     try:
-        with log_path.open("w", encoding="utf-8") as log_handle:
-            process = subprocess.Popen(
-                command,
-                cwd=COLLECTOR_ROOT,
-                env=environment,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-            try:
-                return_code = process.wait(timeout=timeout_seconds)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                stop_process_group(process)
-                return_code = process.returncode
-    except OSError as error:
+        environment, proxy_configured = build_collector_environment(definition)
+    except ValueError as error:
         runtime_error = safe_text(error)
+    if not runtime_error:
+        try:
+            with log_path.open("w", encoding="utf-8") as log_handle:
+                process = subprocess.Popen(
+                    command,
+                    cwd=COLLECTOR_ROOT,
+                    env=environment,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                try:
+                    return_code = process.wait(timeout=timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    stop_process_group(process)
+                    return_code = process.returncode
+        except OSError as error:
+            runtime_error = safe_text(error)
     finished_at = now_china()
 
     raw_records: list[dict[str, Any]] = []
@@ -363,6 +407,7 @@ def execute_collector(
         "status": status,
         "return_code": return_code,
         "timed_out": timed_out,
+        "proxy_configured": proxy_configured,
         "started_at": iso_seconds(started_at),
         "finished_at": finished_at_text,
         "duration_seconds": round((finished_at - started_at).total_seconds(), 3),
