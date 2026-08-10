@@ -796,12 +796,35 @@ def resolve_chrome_path(value: str | None) -> str | None:
 
 
 def wait_for_real_page(page: Any, expected_pattern: str) -> str:
+    last_navigation_error = ""
     for _ in range(20):
-        content = page.content()
+        try:
+            content = page.content()
+        except Exception as exc:
+            message = str(exc)
+            normalized = message.casefold()
+            if not any(
+                marker in normalized
+                for marker in (
+                    "page is navigating",
+                    "execution context was destroyed",
+                )
+            ):
+                raise
+            last_navigation_error = message
+            page.wait_for_timeout(1000)
+            continue
         if re.search(expected_pattern, content):
             return content
         page.wait_for_timeout(1000)
-    raise RuntimeError("浏览器校验未通过或页面模板未加载")
+    details = []
+    current_url = str(getattr(page, "url", "") or "").strip()
+    if current_url:
+        details.append(f"当前地址：{current_url}")
+    if last_navigation_error:
+        details.append(f"最近导航错误：{last_navigation_error}")
+    suffix = f"（{'；'.join(details)}）" if details else ""
+    raise RuntimeError(f"浏览器校验未通过或页面模板未加载{suffix}")
 
 
 def live_pages(
