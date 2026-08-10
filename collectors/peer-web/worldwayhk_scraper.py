@@ -549,7 +549,10 @@ def live_pages(
     with sync_playwright() as playwright:
         launch_options: dict[str, Any] = {
             "headless": not args.headed,
-            "args": ["--disable-quic"],
+            "args": [
+                "--disable-quic",
+                "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+            ],
         }
         executable = resolve_chrome_path(args.chrome_path)
         if executable:

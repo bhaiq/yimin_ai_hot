@@ -571,6 +571,7 @@ def launch_browser(playwright: Any, chrome_path: str | None, headless: bool) -> 
             "--disable-component-update",
             "--disable-quic",
             "--disable-sync",
+            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
         ],
     }
     if chrome_path:
