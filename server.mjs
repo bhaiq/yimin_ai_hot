@@ -19,6 +19,22 @@ import {
   sanitizeWebsiteValue,
   validatePeerWebsiteSnapshot,
 } from "./lib/peer-website-monitor.mjs";
+import {
+  PEER_ACTION_CATEGORIES,
+  PEER_DAILY_PROMPT_VERSION,
+  PEER_DAILY_SYSTEM_PROMPT,
+  PEER_SOURCE_ANALYSIS_PROMPT_VERSION,
+  buildFallbackPeerDailyAggregate,
+  buildPeerDailyAggregatePrompt,
+  buildPeerDailyReportItems,
+  buildPeerSourceAnalysisPrompt,
+  createFallbackSourceAnalysis,
+  getPeerDailyWindow,
+  hashPeerDailyInput,
+  renderPeerDailyMdBrief,
+  renderPeerDailyReport,
+  validatePeerDailyAggregate,
+} from "./lib/peer-daily-report.mjs";
 
 const rootDir = resolve(".");
 await loadEnv();
@@ -241,6 +257,13 @@ const peerWechatDiscoveryConfig = {
     ? Math.max(0, Number(process.env.PEER_DISCOVERY_MAX_COST_PER_RUN || 5))
     : 5,
 };
+const peerDailyConfig = {
+  analysisBatchSize: getBoundedConfigNumber(process.env.PEER_DAILY_ANALYSIS_BATCH_SIZE, 8, 1, 20),
+  analysisConcurrency: getBoundedConfigNumber(process.env.PEER_DAILY_ANALYSIS_CONCURRENCY, 2, 1, 4),
+  analysisMaxChars: getBoundedConfigNumber(process.env.PEER_DAILY_ARTICLE_MAX_CHARS, 6_000, 2_000, 40_000),
+  mdDepartmentId: Number(process.env.PEER_DAILY_MD_DEPARTMENT_ID || 0),
+  internalBaseUrl: String(process.env.PEER_DAILY_INTERNAL_BASE_URL || process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, ""),
+};
 function getBoundedConfigNumber(value, fallback, minimum, maximum) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) {
@@ -297,6 +320,7 @@ let activeArticleRelevancePromise = null;
 let activePeerRefresh = null;
 let activePeerWechatDiscovery = null;
 const activePeerWebsiteImports = new Map();
+const activePeerDailyRuns = new Map();
 let peerDiscoveryNextProviderRequestAt = 0;
 const dailyReportGenerationPromises = new Map();
 const dailyLocalizationGenerationPromises = new Map();
@@ -509,16 +533,18 @@ function mysqlRunWithConfig(config, sql, { database = true, json = false } = {})
       stdio: ["pipe", "pipe", "pipe"],
     });
 
-    let stdout = "";
-    let stderr = "";
+    const stdoutChunks = [];
+    const stderrChunks = [];
     child.stdout.on("data", (chunk) => {
-      stdout += chunk;
+      stdoutChunks.push(Buffer.from(chunk));
     });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk;
+      stderrChunks.push(Buffer.from(chunk));
     });
     child.on("error", reject);
     child.on("close", (code) => {
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+      const stderr = Buffer.concat(stderrChunks).toString("utf8");
       if (code === 0) {
         resolvePromise(stdout);
         return;
@@ -1314,6 +1340,97 @@ async function initDb() {
           CONSTRAINT fk_peer_project_event_before FOREIGN KEY (before_version_id) REFERENCES yimin_peer_project_versions(id) ON DELETE SET NULL,
           CONSTRAINT fk_peer_project_event_after FOREIGN KEY (after_version_id) REFERENCES yimin_peer_project_versions(id) ON DELETE SET NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行官网项目变化事件';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_article_analysis (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '同行文章动作分析主键',
+          article_id BIGINT NOT NULL COMMENT '同行公众号文章 ID',
+          content_hash CHAR(64) NOT NULL COMMENT '标题、正文与发布时间哈希',
+          prompt_version VARCHAR(80) NOT NULL COMMENT '单条抽取 Prompt 版本',
+          analysis_json JSON NOT NULL COMMENT '结构化同行动作',
+          model VARCHAR(120) NOT NULL DEFAULT '' COMMENT '分析模型',
+          analyzed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '分析时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          UNIQUE KEY uk_peer_article_analysis (article_id, content_hash, prompt_version),
+          INDEX idx_peer_article_analysis_prompt (prompt_version, analyzed_at),
+          CONSTRAINT fk_peer_article_analysis_article FOREIGN KEY (article_id) REFERENCES yimin_peer_articles(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行公众号单篇动作分析缓存';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_daily_reports (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '同行日报主键',
+          report_date DATE NOT NULL COMMENT '日报日期',
+          window_start_at DATETIME NOT NULL COMMENT '观察窗口开始',
+          window_end_at DATETIME NOT NULL COMMENT '观察窗口结束（不含）',
+          status ENUM('generated','fallback','empty','failed') NOT NULL DEFAULT 'generated' COMMENT '生成状态',
+          report_json JSON NOT NULL COMMENT '校验后的结构化报告和输入状态',
+          content_markdown LONGTEXT NOT NULL COMMENT '完整日报 Markdown',
+          content_html LONGTEXT NOT NULL COMMENT '完整日报 HTML',
+          md_markdown LONGTEXT NOT NULL COMMENT 'MD 企业微信简版',
+          input_hash CHAR(64) NOT NULL COMMENT '来源材料和 Prompt 输入哈希',
+          source_article_count INT NOT NULL DEFAULT 0 COMMENT '合格公众号文章数',
+          source_website_event_count INT NOT NULL DEFAULT 0 COMMENT '官网变化事件数',
+          important_count INT NOT NULL DEFAULT 0 COMMENT '正文重要动作数',
+          no_update_count INT NOT NULL DEFAULT 0 COMMENT '无更新同行数',
+          model VARCHAR(120) NOT NULL DEFAULT '' COMMENT '汇总模型',
+          prompt_version VARCHAR(80) NOT NULL COMMENT '同行日报 Prompt 版本',
+          error TEXT NULL COMMENT '降级或失败原因',
+          generated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '生成完成时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_peer_daily_report_date (report_date),
+          INDEX idx_peer_daily_generated (generated_at, id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='每日同行情报报告';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_daily_report_items (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '同行日报来源条目主键',
+          report_id BIGINT NOT NULL COMMENT '同行日报 ID',
+          source_ref VARCHAR(100) NOT NULL COMMENT 'wechat:id 或 website:id',
+          source_type ENUM('wechat_article','website_event') NOT NULL COMMENT '来源类型',
+          peer_article_id BIGINT NULL COMMENT '公众号文章 ID',
+          website_event_id BIGINT NULL COMMENT '官网事件 ID',
+          section ENUM('shared_topic','key_action','other_important','appendix') NOT NULL COMMENT '唯一展示章节',
+          category VARCHAR(40) NOT NULL DEFAULT '其他' COMMENT '同行动作分类',
+          importance ENUM('important','normal') NOT NULL DEFAULT 'normal' COMMENT '重要程度',
+          topic_key VARCHAR(160) NOT NULL DEFAULT '' COMMENT '共同主题键',
+          sort_order INT NOT NULL DEFAULT 0 COMMENT '报告内排序',
+          item_snapshot JSON NOT NULL COMMENT '生成时来源与归纳快照',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          UNIQUE KEY uk_peer_daily_source (report_id, source_ref),
+          INDEX idx_peer_daily_items_report (report_id, section, sort_order),
+          CONSTRAINT fk_peer_daily_item_report FOREIGN KEY (report_id) REFERENCES yimin_peer_daily_reports(id) ON DELETE CASCADE,
+          CONSTRAINT fk_peer_daily_item_article FOREIGN KEY (peer_article_id) REFERENCES yimin_peer_articles(id) ON DELETE SET NULL,
+          CONSTRAINT fk_peer_daily_item_event FOREIGN KEY (website_event_id) REFERENCES yimin_peer_project_events(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行日报来源归属';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_daily_runs (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '同行日报生成任务主键',
+          run_key CHAR(32) NOT NULL COMMENT '任务查询标识',
+          report_date DATE NOT NULL COMMENT '日报日期',
+          status ENUM('running','completed','failed') NOT NULL DEFAULT 'running' COMMENT '任务状态',
+          report_id BIGINT NULL COMMENT '生成的同行日报 ID',
+          input_count INT NOT NULL DEFAULT 0 COMMENT '合格输入总数',
+          error TEXT NULL COMMENT '任务错误',
+          started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '开始时间',
+          finished_at DATETIME NULL COMMENT '结束时间',
+          UNIQUE KEY uk_peer_daily_run_key (run_key),
+          INDEX idx_peer_daily_runs_date (report_date, id),
+          CONSTRAINT fk_peer_daily_run_report FOREIGN KEY (report_id) REFERENCES yimin_peer_daily_reports(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行日报异步生成任务';
+
+        CREATE TABLE IF NOT EXISTS yimin_peer_push_tasks (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '同行日报推送任务主键',
+          report_id BIGINT NOT NULL COMMENT '同行日报 ID',
+          department_id BIGINT NOT NULL COMMENT '企业微信 MD 部门 ID',
+          status ENUM('pending','running','completed','failed') NOT NULL DEFAULT 'pending' COMMENT '推送状态',
+          retry_count INT NOT NULL DEFAULT 0 COMMENT '重试次数',
+          response_json JSON NULL COMMENT '企业微信脱敏响应',
+          error TEXT NULL COMMENT '推送错误',
+          sent_at DATETIME NULL COMMENT '发送时间',
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+          UNIQUE KEY uk_peer_push_report_department (report_id, department_id),
+          INDEX idx_peer_push_status (status, id),
+          CONSTRAINT fk_peer_push_report FOREIGN KEY (report_id) REFERENCES yimin_peer_daily_reports(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同行日报 MD 部门推送';
 
         CREATE TABLE IF NOT EXISTS yimin_h_topics (
           id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT 'H 专栏候选主键',
@@ -3321,6 +3438,658 @@ async function listPeerArticles(competitorCode, { limit = 20, offset = 0 } = {})
     hasMore,
     nextOffset: pageOffset + articles.length,
   };
+}
+
+function getPeerDailyInternalUrl(reportDate) {
+  const baseUrl = peerDailyConfig.internalBaseUrl;
+  return baseUrl ? `${baseUrl}/#peer-monitor?peerDate=${encodeURIComponent(reportDate)}` : "";
+}
+
+async function loadPeerDailyInput(reportDate) {
+  const window = getPeerDailyWindow(reportDate);
+  const competitors = await mysqlJsonRows(`
+    SELECT JSON_OBJECT(
+      'code', code,
+      'name', private_name,
+      'sortOrder', sort_order
+    )
+    FROM yimin_peer_competitors
+    WHERE enabled = 1
+    ORDER BY sort_order, id;
+  `);
+
+  const articleRows = await mysqlJsonRows(`
+    WITH ranked_window_articles AS (
+      SELECT
+        a.*,
+        c.code AS competitor_code,
+        c.private_name AS competitor_name,
+        c.sort_order AS competitor_sort_order,
+        ROW_NUMBER() OVER (
+          PARTITION BY a.source_id, ${peerArticleSqlIdentity("a")}
+          ORDER BY CHAR_LENGTH(TRIM(COALESCE(a.content_text, ''))) DESC, a.id DESC
+        ) AS identity_rank
+      FROM yimin_peer_articles a
+      JOIN yimin_peer_sources s ON s.id = a.source_id
+      JOIN yimin_peer_competitors c ON c.id = s.competitor_id
+      WHERE c.enabled = 1
+        AND s.enabled = 1
+        AND s.source_type = 'wechat_rss'
+        AND a.published_at >= ${sqlDate(window.windowStartAt)}
+        AND a.published_at < ${sqlDate(window.windowEndAt)}
+        AND CHAR_LENGTH(TRIM(COALESCE(a.content_text, ''))) > 0
+    )
+    SELECT JSON_OBJECT(
+      'id', id,
+      'sourceRef', CONCAT('wechat:', id),
+      'sourceType', 'wechat_article',
+      'peerCode', competitor_code,
+      'competitorName', competitor_name,
+      'title', title,
+      'summary', COALESCE(summary, ''),
+      'content', content_text,
+      'url', COALESCE(private_url, ''),
+      'occurredAt', DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'sortOrder', competitor_sort_order
+    )
+    FROM ranked_window_articles
+    WHERE identity_rank = 1
+    ORDER BY competitor_sort_order, published_at, id;
+  `);
+
+  const websiteRows = await mysqlJsonRows(`
+    SELECT JSON_OBJECT(
+      'id', e.id,
+      'sourceRef', CONCAT('website:', e.id),
+      'sourceType', 'website_event',
+      'peerCode', c.code,
+      'competitorName', c.private_name,
+      'projectName', p.project_name,
+      'title', CONCAT(p.project_name, '官网变化'),
+      'summary', '',
+      'content', '',
+      'country', p.country_normalized,
+      'eventType', e.event_type,
+      'changedFields', COALESCE(e.changed_fields_json, JSON_ARRAY()),
+      'beforeSnapshot', before_version.snapshot_json,
+      'afterSnapshot', after_version.snapshot_json,
+      'url', COALESCE(e.evidence_url, p.canonical_url, ''),
+      'occurredAt', DATE_FORMAT(e.detected_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'sortOrder', c.sort_order
+    )
+    FROM yimin_peer_project_events e
+    JOIN yimin_peer_projects p ON p.id = e.project_id
+    JOIN yimin_peer_competitors c ON c.id = e.competitor_id
+    LEFT JOIN yimin_peer_project_versions before_version ON before_version.id = e.before_version_id
+    LEFT JOIN yimin_peer_project_versions after_version ON after_version.id = e.after_version_id
+    WHERE c.enabled = 1
+      AND e.detected_at >= ${sqlDate(window.windowStartAt)}
+      AND e.detected_at < ${sqlDate(window.windowEndAt)}
+    ORDER BY c.sort_order, e.detected_at, e.id;
+  `);
+
+  const sourceHealth = await mysqlJsonRows(`
+    SELECT JSON_OBJECT(
+      'code', c.code,
+      'name', c.private_name,
+      'wechatError', COALESCE(MAX(CASE
+        WHEN s.source_type = 'wechat_rss' THEN NULLIF(TRIM(s.last_fetch_error), '')
+        ELSE NULL
+      END), ''),
+      'discoveryError', COALESCE(MAX(NULLIF(TRIM(a.last_discovery_error), '')), ''),
+      'websiteStatus', COALESCE(MAX(ws.last_status), ''),
+      'websiteError', COALESCE(MAX(NULLIF(TRIM(ws.last_error), '')), '')
+    )
+    FROM yimin_peer_competitors c
+    LEFT JOIN yimin_peer_sources s ON s.competitor_id = c.id AND s.enabled = 1
+    LEFT JOIN yimin_peer_wechat_accounts a ON a.source_id = s.id AND a.enabled = 1
+    LEFT JOIN yimin_peer_website_sources ws ON ws.competitor_id = c.id
+    WHERE c.enabled = 1
+    GROUP BY c.id, c.code, c.private_name, c.sort_order
+    ORDER BY c.sort_order, c.id;
+  `);
+
+  const sources = [...articleRows, ...websiteRows].map((source) => ({
+    ...source,
+    competitorName: normalizePeerText(source.competitorName),
+    title: normalizePeerText(source.title).replace(/该机构/g, normalizePeerText(source.competitorName)),
+    summary: normalizePeerText(source.summary).replace(/该机构/g, normalizePeerText(source.competitorName)),
+    content: normalizePeerText(source.content)
+      .replace(/该机构/g, normalizePeerText(source.competitorName))
+      .slice(0, peerDailyConfig.analysisMaxChars),
+    url: normalizePeerArticleUrl(source.url),
+  })).sort((left, right) => (
+    Number(left.sortOrder || 0) - Number(right.sortOrder || 0)
+    || String(left.occurredAt || "").localeCompare(String(right.occurredAt || ""))
+    || Number(left.id || 0) - Number(right.id || 0)
+  ));
+
+  const warningNames = new Set();
+  const warnings = [];
+  for (const state of sourceHealth) {
+    const reasons = [];
+    if (state.wechatError || state.discoveryError) reasons.push("公众号采集");
+    if (["failed", "partial"].includes(state.websiteStatus) || state.websiteError) reasons.push("官网采集");
+    if (!reasons.length) continue;
+    warningNames.add(state.name);
+    warnings.push(`${state.name}的${[...new Set(reasons)].join("及")}存在异常，相关更新可能不完整`);
+  }
+
+  const updatedNames = new Set(sources.map((source) => source.competitorName));
+  const noUpdateNames = competitors
+    .filter((competitor) => !updatedNames.has(competitor.name) && !warningNames.has(competitor.name))
+    .map((competitor) => competitor.name);
+
+  return {
+    reportDate,
+    window,
+    competitors,
+    sources,
+    articleCount: articleRows.length,
+    websiteEventCount: websiteRows.length,
+    noUpdateNames,
+    warnings,
+    warningNames: [...warningNames],
+  };
+}
+
+function normalizePeerSourceAnalysis(raw, source) {
+  const fallback = createFallbackSourceAnalysis(source);
+  const category = String(raw?.category || "").trim();
+  return {
+    ...fallback,
+    category: PEER_ACTION_CATEGORIES.includes(category) ? category : fallback.category,
+    importance: raw?.importance === "important" ? "important" : raw?.importance === "normal" ? "normal" : fallback.importance,
+    actionTitle: normalizePeerText(raw?.action_title || raw?.actionTitle || fallback.actionTitle).slice(0, 200),
+    actionSummary: normalizePeerText(raw?.action_summary || raw?.actionSummary || fallback.actionSummary).slice(0, 700),
+    evidencePoints: [...new Set(
+      (Array.isArray(raw?.evidence_points || raw?.evidencePoints)
+        ? (raw.evidence_points || raw.evidencePoints)
+        : fallback.evidencePoints
+      ).map((value) => normalizePeerText(value).slice(0, 400)).filter(Boolean),
+    )].slice(0, 6),
+    lightAnalysis: normalizePeerText(raw?.light_analysis || raw?.lightAnalysis || "").slice(0, 500),
+    topicKey: normalizePeerText(raw?.topic_key || raw?.topicKey || fallback.topicKey).slice(0, 100),
+    isActionablePeerMove: raw?.is_actionable_peer_move !== false,
+    sourceRef: source.sourceRef,
+    competitorName: source.competitorName,
+  };
+}
+
+async function getCachedPeerArticleAnalyses(sources) {
+  const articleSources = sources.filter((source) => source.sourceType === "wechat_article");
+  const result = new Map();
+  if (!articleSources.length) return result;
+  const hashes = new Map(articleSources.map((source) => [
+    Number(source.id),
+    hashPeerDailyInput({ title: source.title, content: source.content, occurredAt: source.occurredAt }),
+  ]));
+  const rows = await mysqlJsonRows(`
+    SELECT JSON_OBJECT(
+      'articleId', article_id,
+      'contentHash', content_hash,
+      'analysis', analysis_json
+    )
+    FROM yimin_peer_article_analysis
+    WHERE article_id IN (${articleSources.map((source) => sqlNumber(source.id)).join(",")})
+      AND prompt_version = ${sqlString(PEER_SOURCE_ANALYSIS_PROMPT_VERSION)}
+    ORDER BY analyzed_at DESC, id DESC;
+  `);
+  for (const row of rows) {
+    const articleId = Number(row.articleId);
+    if (result.has(articleId) || row.contentHash !== hashes.get(articleId)) continue;
+    const source = articleSources.find((item) => Number(item.id) === articleId);
+    if (source) result.set(articleId, normalizePeerSourceAnalysis(row.analysis, source));
+  }
+  return result;
+}
+
+async function savePeerArticleAnalyses(records) {
+  if (!records.length) return;
+  await mysqlExec(`
+    INSERT INTO yimin_peer_article_analysis (
+      article_id, content_hash, prompt_version, analysis_json, model, analyzed_at
+    )
+    VALUES ${records.map(({ source, analysis }) => `(
+      ${sqlNumber(source.id)},
+      ${sqlString(hashPeerDailyInput({ title: source.title, content: source.content, occurredAt: source.occurredAt }))},
+      ${sqlString(PEER_SOURCE_ANALYSIS_PROMPT_VERSION)},
+      ${sqlJson(analysis)},
+      ${sqlString(deepseekConfig.model)},
+      CURRENT_TIMESTAMP
+    )`).join(",")}
+    ON DUPLICATE KEY UPDATE
+      analysis_json = VALUES(analysis_json),
+      model = VALUES(model),
+      analyzed_at = CURRENT_TIMESTAMP;
+  `);
+}
+
+async function analyzePeerDailySources(sources) {
+  const cached = await getCachedPeerArticleAnalyses(sources);
+  const analyses = [];
+  const errors = [];
+  const pendingArticles = [];
+
+  for (const source of sources) {
+    if (source.sourceType === "website_event") {
+      analyses.push(createFallbackSourceAnalysis(source));
+    } else if (cached.has(Number(source.id))) {
+      analyses.push(cached.get(Number(source.id)));
+    } else {
+      pendingArticles.push(source);
+    }
+  }
+
+  const batches = chunkArray(pendingArticles, peerDailyConfig.analysisBatchSize);
+  let nextBatchIndex = 0;
+  let modelUnavailable = false;
+  const processBatch = async (batch) => {
+    if (modelUnavailable) {
+      batch.forEach((source) => analyses.push(createFallbackSourceAnalysis(source)));
+      return;
+    }
+    try {
+      const raw = parseDeepSeekJsonObject(await callDeepSeek(buildPeerSourceAnalysisPrompt(batch), {
+        systemPrompt: "你是同行公开动作抽取器。只能基于输入逐条提取，不补充事实，不做真实性核验，不提出我方建议；只输出严格 JSON。",
+        temperature: 0.1,
+      }));
+      const byRef = new Map(
+        (Array.isArray(raw.analyses) ? raw.analyses : [])
+          .map((item) => [String(item?.source_ref || item?.sourceRef || ""), item]),
+      );
+      const saved = [];
+      for (const source of batch) {
+        const item = normalizePeerSourceAnalysis(byRef.get(source.sourceRef), source);
+        analyses.push(item);
+        saved.push({ source, analysis: item });
+      }
+      await savePeerArticleAnalyses(saved);
+    } catch (error) {
+      modelUnavailable = true;
+      errors.push(`单篇动作抽取降级：${error instanceof Error ? error.message : String(error)}`);
+      batch.forEach((source) => analyses.push(createFallbackSourceAnalysis(source)));
+    }
+  };
+  const workers = Array.from(
+    { length: Math.min(peerDailyConfig.analysisConcurrency, batches.length) },
+    async () => {
+      while (nextBatchIndex < batches.length) {
+        const batch = batches[nextBatchIndex];
+        nextBatchIndex += 1;
+        await processBatch(batch);
+      }
+    },
+  );
+  await Promise.all(workers);
+
+  const order = new Map(sources.map((source, index) => [source.sourceRef, index]));
+  analyses.sort((left, right) => (order.get(left.sourceRef) || 0) - (order.get(right.sourceRef) || 0));
+  return { analyses, errors, modelAvailable: !modelUnavailable };
+}
+
+async function aggregatePeerDailyInput(input, analyses, { modelAvailable = true } = {}) {
+  if (!input.sources.length) {
+    return { aggregate: buildFallbackPeerDailyAggregate([], []), status: "empty", errors: [] };
+  }
+  if (!modelAvailable) {
+    return {
+      aggregate: buildFallbackPeerDailyAggregate(input.sources, analyses),
+      status: "fallback",
+      errors: ["模型服务不可用，已使用确定性附录版"],
+    };
+  }
+  const errors = [];
+  const prompt = buildPeerDailyAggregatePrompt({
+    reportDate: input.reportDate,
+    window: input.window,
+    analyses,
+  });
+  let previousOutput = "";
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const currentPrompt = attempt === 0
+        ? prompt
+        : `${prompt}\n\n上一次输出未通过后端校验，请严格修复。校验错误：${errors.at(-1)}\n上一次输出：${previousOutput.slice(0, 20_000)}`;
+      previousOutput = await callDeepSeek(currentPrompt, {
+        systemPrompt: PEER_DAILY_SYSTEM_PROMPT,
+        temperature: 0.15,
+      });
+      const aggregate = validatePeerDailyAggregate(
+        parseDeepSeekJsonObject(previousOutput),
+        input.sources,
+        analyses,
+      );
+      return { aggregate, status: "generated", errors };
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  return {
+    aggregate: buildFallbackPeerDailyAggregate(input.sources, analyses),
+    status: "fallback",
+    errors,
+  };
+}
+
+async function getPeerDailyReport(reportDate) {
+  return mysqlJson(`
+    SELECT JSON_OBJECT(
+      'id', id,
+      'date', DATE_FORMAT(report_date, '%Y-%m-%d'),
+      'windowStartAt', DATE_FORMAT(window_start_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'windowEndAt', DATE_FORMAT(window_end_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'status', status,
+      'report', report_json,
+      'contentMarkdown', content_markdown,
+      'html', content_html,
+      'mdMarkdown', md_markdown,
+      'inputHash', input_hash,
+      'sourceArticleCount', source_article_count,
+      'sourceWebsiteEventCount', source_website_event_count,
+      'importantCount', important_count,
+      'noUpdateCount', no_update_count,
+      'model', model,
+      'promptVersion', prompt_version,
+      'error', error,
+      'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s+08:00')
+    )
+    FROM yimin_peer_daily_reports
+    WHERE report_date = ${sqlString(reportDate)}
+    LIMIT 1;
+  `);
+}
+
+async function listPeerDailyHistory(limit = 30) {
+  return mysqlJsonRows(`
+    SELECT JSON_OBJECT(
+      'date', DATE_FORMAT(report_date, '%Y-%m-%d'),
+      'status', status,
+      'sourceArticleCount', source_article_count,
+      'sourceWebsiteEventCount', source_website_event_count,
+      'importantCount', important_count,
+      'noUpdateCount', no_update_count,
+      'generatedAt', DATE_FORMAT(generated_at, '%Y-%m-%dT%H:%i:%s+08:00')
+    )
+    FROM yimin_peer_daily_reports
+    ORDER BY report_date DESC
+    LIMIT ${sqlNumber(Math.min(90, Math.max(1, Number(limit) || 30)))};
+  `);
+}
+
+async function savePeerDailyReport({ input, analyses, aggregate, status, errors }) {
+  const combinedErrors = [...new Set(errors.filter(Boolean))];
+  const reportPayload = {
+    aggregate,
+    noUpdateNames: input.noUpdateNames,
+    warnings: input.warnings,
+    warningNames: input.warningNames,
+    sourceRefs: input.sources.map((source) => source.sourceRef),
+  };
+  const inputHash = hashPeerDailyInput({
+    reportDate: input.reportDate,
+    window: input.window,
+    sources: input.sources,
+    warnings: input.warnings,
+    analysisPromptVersion: PEER_SOURCE_ANALYSIS_PROMPT_VERSION,
+    reportPromptVersion: PEER_DAILY_PROMPT_VERSION,
+  });
+  const markdown = renderPeerDailyReport({
+    reportDate: input.reportDate,
+    window: input.window,
+    aggregate,
+    sources: input.sources,
+    noUpdateNames: input.noUpdateNames,
+    warnings: input.warnings,
+  });
+  const mdMarkdown = renderPeerDailyMdBrief({
+    reportDate: input.reportDate,
+    window: input.window,
+    aggregate,
+    noUpdateNames: input.noUpdateNames,
+    internalUrl: getPeerDailyInternalUrl(input.reportDate),
+  });
+  const importantCount = aggregate.sharedTopics.length
+    + aggregate.keyActions.length
+    + aggregate.otherImportantUpdates.length;
+
+  await mysqlExec(`
+    INSERT INTO yimin_peer_daily_reports (
+      report_date, window_start_at, window_end_at, status, report_json,
+      content_markdown, content_html, md_markdown, input_hash,
+      source_article_count, source_website_event_count, important_count,
+      no_update_count, model, prompt_version, error, generated_at
+    ) VALUES (
+      ${sqlString(input.reportDate)},
+      ${sqlDate(input.window.windowStartAt)},
+      ${sqlDate(input.window.windowEndAt)},
+      ${sqlString(status)},
+      ${sqlJson(reportPayload)},
+      ${sqlString(markdown)},
+      ${sqlString(markdownToHtml(markdown))},
+      ${sqlString(mdMarkdown)},
+      ${sqlString(inputHash)},
+      ${sqlNumber(input.articleCount)},
+      ${sqlNumber(input.websiteEventCount)},
+      ${sqlNumber(importantCount)},
+      ${sqlNumber(input.noUpdateNames.length)},
+      ${sqlString(deepseekConfig.model)},
+      ${sqlString(PEER_DAILY_PROMPT_VERSION)},
+      ${combinedErrors.length ? sqlString(combinedErrors.join("；")) : "NULL"},
+      CURRENT_TIMESTAMP
+    )
+    ON DUPLICATE KEY UPDATE
+      window_start_at = VALUES(window_start_at),
+      window_end_at = VALUES(window_end_at),
+      status = VALUES(status),
+      report_json = VALUES(report_json),
+      content_markdown = VALUES(content_markdown),
+      content_html = VALUES(content_html),
+      md_markdown = VALUES(md_markdown),
+      input_hash = VALUES(input_hash),
+      source_article_count = VALUES(source_article_count),
+      source_website_event_count = VALUES(source_website_event_count),
+      important_count = VALUES(important_count),
+      no_update_count = VALUES(no_update_count),
+      model = VALUES(model),
+      prompt_version = VALUES(prompt_version),
+      error = VALUES(error),
+      generated_at = CURRENT_TIMESTAMP;
+  `);
+
+  const report = await getPeerDailyReport(input.reportDate);
+  const items = buildPeerDailyReportItems(aggregate, input.sources);
+  await mysqlExec(`DELETE FROM yimin_peer_daily_report_items WHERE report_id = ${sqlNumber(report.id)};`);
+  for (const batch of chunkArray(items, 100)) {
+    await mysqlExec(`
+      INSERT INTO yimin_peer_daily_report_items (
+        report_id, source_ref, source_type, peer_article_id, website_event_id,
+        section, category, importance, topic_key, sort_order, item_snapshot
+      ) VALUES ${batch.map((item) => `(
+        ${sqlNumber(report.id)},
+        ${sqlString(item.sourceRef)},
+        ${sqlString(item.sourceType)},
+        ${item.peerArticleId ? sqlNumber(item.peerArticleId) : "NULL"},
+        ${item.websiteEventId ? sqlNumber(item.websiteEventId) : "NULL"},
+        ${sqlString(item.section)},
+        ${sqlString(item.category)},
+        ${sqlString(item.importance)},
+        ${sqlString(item.topicKey)},
+        ${sqlNumber(item.sortOrder)},
+        ${sqlJson(item.snapshot)}
+      )`).join(",")};
+    `);
+  }
+  return getPeerDailyReport(input.reportDate);
+}
+
+async function generatePeerDailyReport(reportDate, { runKey = "" } = {}) {
+  const input = await loadPeerDailyInput(reportDate);
+  if (runKey) {
+    await mysqlExec(`
+      UPDATE yimin_peer_daily_runs
+      SET input_count = ${sqlNumber(input.sources.length)}
+      WHERE run_key = ${sqlString(runKey)};
+    `);
+  }
+  const sourceAnalysis = await analyzePeerDailySources(input.sources);
+  const aggregation = await aggregatePeerDailyInput(input, sourceAnalysis.analyses, {
+    modelAvailable: sourceAnalysis.modelAvailable,
+  });
+  return savePeerDailyReport({
+    input,
+    analyses: sourceAnalysis.analyses,
+    aggregate: aggregation.aggregate,
+    status: aggregation.status,
+    errors: [...sourceAnalysis.errors, ...aggregation.errors],
+  });
+}
+
+async function getPeerDailyRun(runKey) {
+  return mysqlJson(`
+    SELECT JSON_OBJECT(
+      'runKey', run_key,
+      'reportDate', DATE_FORMAT(report_date, '%Y-%m-%d'),
+      'status', status,
+      'reportId', report_id,
+      'inputCount', input_count,
+      'error', error,
+      'startedAt', DATE_FORMAT(started_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'finishedAt', IF(finished_at IS NULL, NULL, DATE_FORMAT(finished_at, '%Y-%m-%dT%H:%i:%s+08:00'))
+    )
+    FROM yimin_peer_daily_runs
+    WHERE run_key = ${sqlString(runKey)}
+    LIMIT 1;
+  `);
+}
+
+async function runPeerDailyGeneration(runKey, reportDate) {
+  try {
+    const report = await generatePeerDailyReport(reportDate, { runKey });
+    await mysqlExec(`
+      UPDATE yimin_peer_daily_runs
+      SET status = 'completed',
+          report_id = ${sqlNumber(report.id)},
+          input_count = ${sqlNumber(Number(report.sourceArticleCount || 0) + Number(report.sourceWebsiteEventCount || 0))},
+          finished_at = CURRENT_TIMESTAMP
+      WHERE run_key = ${sqlString(runKey)};
+    `);
+  } catch (error) {
+    await mysqlExec(`
+      UPDATE yimin_peer_daily_runs
+      SET status = 'failed',
+          error = ${sqlString(error instanceof Error ? error.message : String(error))},
+          finished_at = CURRENT_TIMESTAMP
+      WHERE run_key = ${sqlString(runKey)};
+    `);
+  }
+}
+
+async function startPeerDailyGeneration(reportDate, { force = false } = {}) {
+  getPeerDailyWindow(reportDate);
+  if (!force) {
+    const existing = await getPeerDailyReport(reportDate);
+    if (existing) return { started: false, reused: true, run: null, report: existing };
+  }
+  const activeRunKey = activePeerDailyRuns.get(reportDate);
+  if (activeRunKey) {
+    return { started: false, reused: true, run: await getPeerDailyRun(activeRunKey), report: null };
+  }
+  const runKey = randomBytes(16).toString("hex");
+  await mysqlExec(`
+    INSERT INTO yimin_peer_daily_runs (run_key, report_date, status)
+    VALUES (${sqlString(runKey)}, ${sqlString(reportDate)}, 'running');
+  `);
+  activePeerDailyRuns.set(reportDate, runKey);
+  void runPeerDailyGeneration(runKey, reportDate)
+    .catch((error) => console.error("Peer daily generation failed:", error))
+    .finally(() => {
+      if (activePeerDailyRuns.get(reportDate) === runKey) activePeerDailyRuns.delete(reportDate);
+    });
+  return { started: true, reused: false, run: await getPeerDailyRun(runKey), report: null };
+}
+
+async function resolvePeerDailyMdDepartment() {
+  if (Number.isSafeInteger(peerDailyConfig.mdDepartmentId) && peerDailyConfig.mdDepartmentId > 0) {
+    return { id: peerDailyConfig.mdDepartmentId, name: "MD" };
+  }
+  return mysqlJson(`
+    SELECT JSON_OBJECT('id', department_id, 'name', department_name)
+    FROM yimin_wx_departments
+    WHERE LOWER(TRIM(department_name)) IN ('md', 'md部门', 'md department')
+    ORDER BY CASE WHEN LOWER(TRIM(department_name)) = 'md' THEN 0 ELSE 1 END, department_id
+    LIMIT 1;
+  `);
+}
+
+async function sendWxDepartmentMarkdown(accessToken, departmentId, content) {
+  const response = await fetch(`https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${accessToken}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      toparty: String(departmentId),
+      msgtype: "markdown",
+      agentid: wxWorkConfig.agentId,
+      markdown: { content },
+    }),
+  });
+  return response.json();
+}
+
+async function pushPeerDailyReport(reportDate, { dryRun = false, force = false } = {}) {
+  const report = await getPeerDailyReport(reportDate);
+  if (!report) throw new Error(`尚未生成 ${reportDate} 同行日报`);
+  const department = await resolvePeerDailyMdDepartment();
+  if (!department?.id) throw new Error("未配置 PEER_DAILY_MD_DEPARTMENT_ID，且部门表中未找到 MD");
+  if (dryRun) {
+    return { sent: false, dryRun: true, reportId: report.id, department, markdown: report.mdMarkdown };
+  }
+  if (!wxWorkConfig.corpId || !wxWorkConfig.secret || !wxWorkConfig.agentId) {
+    throw new Error("企业微信未完整配置（WX_WORK_CORP_ID / WX_WORK_SECRET / WX_WORK_AGENT_ID）");
+  }
+  const existing = await mysqlJson(`
+    SELECT JSON_OBJECT('id', id, 'status', status, 'sentAt', sent_at)
+    FROM yimin_peer_push_tasks
+    WHERE report_id = ${sqlNumber(report.id)}
+      AND department_id = ${sqlNumber(department.id)}
+    LIMIT 1;
+  `);
+  if (existing?.status === "completed" && !force) {
+    return { sent: false, reused: true, task: existing, department };
+  }
+  await mysqlExec(`
+    INSERT INTO yimin_peer_push_tasks (report_id, department_id, status, retry_count)
+    VALUES (${sqlNumber(report.id)}, ${sqlNumber(department.id)}, 'running', 0)
+    ON DUPLICATE KEY UPDATE
+      status = 'running',
+      retry_count = retry_count + 1,
+      error = NULL,
+      updated_at = CURRENT_TIMESTAMP;
+  `);
+  try {
+    const result = await sendWxDepartmentMarkdown(
+      await getWxAccessToken(),
+      department.id,
+      report.mdMarkdown,
+    );
+    if (Number(result.errcode || 0) !== 0) {
+      throw new Error(`${result.errcode}: ${result.errmsg || "企业微信发送失败"}`);
+    }
+    await mysqlExec(`
+      UPDATE yimin_peer_push_tasks
+      SET status = 'completed', response_json = ${sqlJson({ errcode: result.errcode, errmsg: result.errmsg })},
+          error = NULL, sent_at = CURRENT_TIMESTAMP
+      WHERE report_id = ${sqlNumber(report.id)} AND department_id = ${sqlNumber(department.id)};
+    `);
+    return { sent: true, reused: false, reportId: report.id, department, result };
+  } catch (error) {
+    await mysqlExec(`
+      UPDATE yimin_peer_push_tasks
+      SET status = 'failed', error = ${sqlString(error instanceof Error ? error.message : String(error))}
+      WHERE report_id = ${sqlNumber(report.id)} AND department_id = ${sqlNumber(department.id)};
+    `);
+    throw error;
+  }
 }
 
 async function listPeerRssSources(competitorCode = "") {
@@ -8334,6 +9103,13 @@ function markdownToHtml(markdown) {
       orderedListCounter = 0;
       const level = heading[1].length + 1;
       html.push(`<h${level}>${escapeHtml(heading[2])}</h${level}>`);
+      continue;
+    }
+
+    const quote = trimmed.match(/^>\s+(.+)$/);
+    if (quote) {
+      closeList();
+      html.push(`<blockquote><p>${formatInlineMarkdown(quote[1])}</p></blockquote>`);
       continue;
     }
 
@@ -14635,6 +15411,96 @@ const server = createServer(async (req, res) => {
         ok: true,
         competitors: await listPeerMonitorOverview(),
       });
+      return;
+    }
+
+    if (url.pathname === "/api/peer-monitor/daily/history" && req.method === "GET") {
+      await initDb();
+      const access = await getPeerMonitorAccess(req);
+      if (!access.allowed) {
+        sendJson(res, 403, { ok: false, error: "无权访问同行日报" });
+        return;
+      }
+      const limit = Math.min(90, Math.max(1, Number.parseInt(url.searchParams.get("limit") || "30", 10) || 30));
+      sendJson(res, 200, { ok: true, history: await listPeerDailyHistory(limit) });
+      return;
+    }
+
+    if (url.pathname === "/api/peer-monitor/daily" && req.method === "GET") {
+      await initDb();
+      const access = await getPeerMonitorAccess(req);
+      if (!access.allowed) {
+        sendJson(res, 403, { ok: false, error: "无权访问同行日报" });
+        return;
+      }
+      const reportDate = String(url.searchParams.get("date") || getShanghaiDate());
+      try {
+        getPeerDailyWindow(reportDate);
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+        return;
+      }
+      const report = await getPeerDailyReport(reportDate);
+      if (!report) {
+        sendJson(res, 404, { ok: false, error: `${reportDate} 同行日报尚未生成` });
+        return;
+      }
+      sendJson(res, 200, { ok: true, report });
+      return;
+    }
+
+    if (url.pathname === "/api/peer-monitor/daily/generate" && req.method === "POST") {
+      if (!isPeerDiscoveryAuthorized(req)) {
+        sendJson(res, 401, { ok: false, error: "请使用管理员登录、loopback 请求或有效的定时任务令牌" });
+        return;
+      }
+      await initDb();
+      const body = await readJsonBody(req);
+      const reportDate = String(body.date || url.searchParams.get("date") || getShanghaiDate());
+      const force = body.force === true || url.searchParams.get("force") === "1";
+      try {
+        const result = await startPeerDailyGeneration(reportDate, { force });
+        sendJson(res, result.started ? 202 : 200, { ok: true, ...result });
+      } catch (error) {
+        sendJson(res, 409, { ok: false, error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+
+    const peerDailyRunMatch = url.pathname.match(/^\/api\/peer-monitor\/daily\/runs\/([a-f0-9]{32})$/);
+    if (peerDailyRunMatch && req.method === "GET") {
+      await initDb();
+      const access = await getPeerMonitorAccess(req);
+      if (!access.allowed && !isPeerDiscoveryAuthorized(req)) {
+        sendJson(res, 403, { ok: false, error: "无权查看同行日报生成任务" });
+        return;
+      }
+      const run = await getPeerDailyRun(peerDailyRunMatch[1]);
+      if (!run) {
+        sendJson(res, 404, { ok: false, error: "同行日报生成任务不存在" });
+        return;
+      }
+      sendJson(res, 200, { ok: true, run });
+      return;
+    }
+
+    if (url.pathname === "/api/peer-monitor/daily/push" && req.method === "POST") {
+      if (!isPeerDiscoveryAuthorized(req)) {
+        sendJson(res, 401, { ok: false, error: "请使用管理员登录、loopback 请求或有效的定时任务令牌" });
+        return;
+      }
+      await initDb();
+      const body = await readJsonBody(req);
+      const reportDate = String(body.date || url.searchParams.get("date") || getShanghaiDate());
+      const dryRun = body.dryRun === true || url.searchParams.get("dryRun") === "1";
+      const force = body.force === true || url.searchParams.get("force") === "1";
+      try {
+        getPeerDailyWindow(reportDate);
+        const result = await pushPeerDailyReport(reportDate, { dryRun, force });
+        sendJson(res, 200, { ok: true, ...result });
+      } catch (error) {
+        sendJson(res, 409, { ok: false, error: error instanceof Error ? error.message : String(error) });
+      }
       return;
     }
 

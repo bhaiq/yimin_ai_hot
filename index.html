@@ -309,14 +309,14 @@
           <div class="section-heading peer-monitor-heading">
             <div>
               <p class="eyebrow">同行监控</p>
-              <h1 id="peerMonitorTitle">同行项目与公众号动态</h1>
-              <p class="peer-monitor-intro">当前临时向所有人开放。页面展示已采集的同行官网项目与公众号内容。</p>
+              <h1 id="peerMonitorTitle">每日同行动态</h1>
+              <p class="peer-monitor-intro">汇总过去一个固定观察窗口内的公众号动作与官网项目变化，并保留可追溯来源。</p>
             </div>
             <button class="primary-button" id="peerMonitorRefresh" type="button" hidden>立即刷新公众号</button>
           </div>
 
           <div class="peer-monitor-layout">
-            <aside class="peer-competitor-panel" aria-label="选择同行">
+            <aside class="peer-competitor-panel" id="peerCompetitorPanel" aria-label="选择同行">
               <div class="peer-panel-title">
                 <strong>监控对象</strong>
                 <span id="peerMonitorTotal">9 家</span>
@@ -328,11 +328,12 @@
               <div class="peer-monitor-summary" id="peerMonitorSummary"></div>
 
               <div class="peer-monitor-tabs" role="tablist" aria-label="同行监控内容">
-                <button class="active" type="button" data-peer-monitor-tab="projects" role="tab">官网项目</button>
+                <button class="active" type="button" data-peer-monitor-tab="daily" role="tab">同行日报</button>
                 <button type="button" data-peer-monitor-tab="articles" role="tab">公众号动态</button>
+                <button type="button" data-peer-monitor-tab="projects" role="tab">官网项目</button>
               </div>
 
-              <div class="peer-project-toolbar" id="peerProjectToolbar">
+              <div class="peer-project-toolbar" id="peerProjectToolbar" hidden>
                 <label class="peer-search">
                   <span aria-hidden="true">⌕</span>
                   <input id="peerProjectSearch" type="search" placeholder="搜索项目、国家或条件" autocomplete="off">

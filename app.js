@@ -687,7 +687,12 @@ const state = {
   peerMonitorAccessLoaded: false,
   peerCompetitors: [],
   peerSelectedCode: "",
-  peerActiveTab: "projects",
+  peerActiveTab: "daily",
+  peerDailyReport: null,
+  peerDailyDate: "",
+  peerDailyHistory: [],
+  peerDailyLoading: false,
+  peerDailyError: "",
   peerProjects: [],
   peerProjectCountries: [],
   peerArticles: [],
@@ -742,6 +747,8 @@ const ssoStatsReport = document.querySelector("#ssoStatsReport");
 const feedbackReviewList = document.querySelector("#feedbackReviewList");
 const feedbackReviewFilters = document.querySelector("#feedbackReviewFilters");
 const peerMonitorNav = document.querySelector("#peerMonitorNav");
+const peerMonitorLayout = document.querySelector(".peer-monitor-layout");
+const peerCompetitorPanel = document.querySelector("#peerCompetitorPanel");
 const peerCompetitorList = document.querySelector("#peerCompetitorList");
 const peerMonitorSummary = document.querySelector("#peerMonitorSummary");
 const peerMonitorContent = document.querySelector("#peerMonitorContent");
@@ -2809,13 +2816,61 @@ function syncPeerCompetitorPanelHeight() {
 window.addEventListener("resize", syncPeerCompetitorPanelHeight, { passive: true });
 window.addEventListener("scroll", syncPeerCompetitorPanelHeight, { passive: true });
 
+function renderPeerDailyContent() {
+  if (state.peerDailyLoading) {
+    return '<p class="empty">正在加载同行日报…</p>';
+  }
+  if (state.peerDailyError) {
+    return `<p class="empty">${escapeHtml(state.peerDailyError)}</p>`;
+  }
+  const report = state.peerDailyReport;
+  if (!report?.html) {
+    return '<p class="empty">该日期尚未生成同行日报。</p>';
+  }
+  const history = state.peerDailyHistory.length
+    ? `<div class="peer-daily-history" aria-label="历史同行日报">
+        ${state.peerDailyHistory.map((item) => `
+          <button
+            type="button"
+            class="${item.date === report.date ? "active" : ""}"
+            data-peer-daily-date="${escapeAttr(item.date)}"
+          >
+            <strong>${escapeHtml(item.date)}</strong>
+            <span>${escapeHtml(Number(item.sourceArticleCount || 0) + Number(item.sourceWebsiteEventCount || 0))} 条来源</span>
+          </button>
+        `).join("")}
+      </div>`
+    : "";
+  return `
+    <div class="peer-daily-shell">
+      <div class="peer-daily-meta">
+        <div>
+          <span>观察窗口</span>
+          <strong>${escapeHtml(String(report.windowStartAt || "").slice(0, 16).replace("T", " "))} — ${escapeHtml(String(report.windowEndAt || "").slice(0, 16).replace("T", " "))}</strong>
+        </div>
+        <div>
+          <span>生成时间</span>
+          <strong>${escapeHtml(formatPeerDate(report.generatedAt))}</strong>
+        </div>
+      </div>
+      <div class="peer-daily-body">${report.html}</div>
+      ${history}
+    </div>
+  `;
+}
+
 function renderPeerMonitor() {
   if (!peerMonitorContent) return;
   syncPeerCompetitorPanelHeight();
   const selected = getSelectedPeerCompetitor();
+  const isDaily = state.peerActiveTab === "daily";
   if (peerMonitorNav) {
     peerMonitorNav.hidden = !state.peerMonitorAccess;
   }
+  if (peerCompetitorPanel) peerCompetitorPanel.hidden = isDaily;
+  if (peerMonitorLayout) peerMonitorLayout.classList.toggle("daily-mode", isDaily);
+  const title = document.querySelector("#peerMonitorTitle");
+  if (title) title.textContent = isDaily ? "每日同行动态" : "同行项目与公众号动态";
 
   peerCompetitorList.innerHTML = state.peerCompetitors.length
     ? state.peerCompetitors.map((competitor) => `
@@ -2831,8 +2886,27 @@ function renderPeerMonitor() {
   const total = document.querySelector("#peerMonitorTotal");
   if (total) total.textContent = `${state.peerCompetitors.length || 0} 家`;
 
-  peerMonitorSummary.innerHTML = selected
+  peerMonitorSummary.innerHTML = isDaily && state.peerDailyReport
     ? `
+      <div>
+        <span>日报日期</span>
+        <strong>${escapeHtml(state.peerDailyReport.date || "-")}</strong>
+      </div>
+      <div>
+        <span>公众号动作</span>
+        <strong>${escapeHtml(state.peerDailyReport.sourceArticleCount || 0)}</strong>
+      </div>
+      <div>
+        <span>官网变化</span>
+        <strong>${escapeHtml(state.peerDailyReport.sourceWebsiteEventCount || 0)}</strong>
+      </div>
+      <div>
+        <span>重要动作</span>
+        <strong>${escapeHtml(state.peerDailyReport.importantCount || 0)}</strong>
+      </div>
+    `
+    : !isDaily && selected
+      ? `
       <div>
         <span>当前对象</span>
         <strong>${escapeHtml(selected.displayName)}</strong>
@@ -2850,7 +2924,7 @@ function renderPeerMonitor() {
         <strong class="peer-summary-date">${escapeHtml(selected.hasRss ? formatPeerDate(selected.lastFetchedAt) : "尚未配置")}</strong>
       </div>
     `
-    : "";
+      : "";
 
   document.querySelectorAll("[data-peer-monitor-tab]").forEach((button) => {
     const active = button.dataset.peerMonitorTab === state.peerActiveTab;
@@ -2876,7 +2950,7 @@ function renderPeerMonitor() {
   }
 
   if (peerMonitorRefresh) {
-    peerMonitorRefresh.hidden = !state.user;
+    peerMonitorRefresh.hidden = isDaily || !state.user;
     const refreshable = Boolean(selected?.hasRss);
     peerMonitorRefresh.disabled = !refreshable || isPeerRefreshRunning();
     peerMonitorRefresh.textContent = isPeerRefreshRunning()
@@ -2886,7 +2960,9 @@ function renderPeerMonitor() {
         : "尚未配置公众号";
   }
 
-  if (state.peerRefreshRun) {
+  if (isDaily) {
+    peerMonitorStatus.innerHTML = "";
+  } else if (state.peerRefreshRun) {
     const run = state.peerRefreshRun;
     if (run.status === "running") {
       peerMonitorStatus.innerHTML = `
@@ -2909,6 +2985,11 @@ function renderPeerMonitor() {
     peerMonitorStatus.innerHTML = `<div class="peer-refresh-banner error">${escapeHtml(selected.lastFetchError)}</div>`;
   } else {
     peerMonitorStatus.innerHTML = "";
+  }
+
+  if (isDaily) {
+    peerMonitorContent.innerHTML = renderPeerDailyContent();
+    return;
   }
 
   if (state.peerMonitorLoading) {
@@ -3041,6 +3122,48 @@ function dedupePeerArticles(articles) {
   });
 }
 
+async function loadPeerDaily({ date = "" } = {}) {
+  if (!state.peerMonitorAccess || window.location.protocol === "file:") return;
+  state.peerDailyLoading = true;
+  state.peerDailyError = "";
+  renderPeerMonitor();
+  try {
+    const historyResponse = await fetch("/api/peer-monitor/daily/history?limit=30", {
+      headers: { accept: "application/json" },
+    });
+    const historyData = await historyResponse.json();
+    if (!historyResponse.ok || !historyData.ok) {
+      throw new Error(historyData.error || `HTTP ${historyResponse.status}`);
+    }
+    state.peerDailyHistory = historyData.history || [];
+    const selectedDate = date
+      || state.peerDailyDate
+      || state.peerDailyHistory[0]?.date
+      || getShanghaiDateString();
+    state.peerDailyDate = selectedDate;
+    const reportResponse = await fetch(
+      `/api/peer-monitor/daily?date=${encodeURIComponent(selectedDate)}`,
+      { headers: { accept: "application/json" } },
+    );
+    const reportData = await reportResponse.json();
+    if (reportResponse.status === 404) {
+      state.peerDailyReport = null;
+      state.peerDailyError = reportData.error || `${selectedDate} 同行日报尚未生成`;
+      return;
+    }
+    if (!reportResponse.ok || !reportData.ok) {
+      throw new Error(reportData.error || `HTTP ${reportResponse.status}`);
+    }
+    state.peerDailyReport = reportData.report;
+  } catch (error) {
+    state.peerDailyReport = null;
+    state.peerDailyError = `同行日报加载失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    state.peerDailyLoading = false;
+    renderPeerMonitor();
+  }
+}
+
 async function loadPeerCompetitorData() {
   if (!state.peerMonitorAccess || window.location.protocol === "file:") return;
   const competitorCode = state.peerSelectedCode;
@@ -3162,7 +3285,9 @@ async function loadPeerMonitor() {
       state.peerSelectedCode = state.peerCompetitors[0]?.code || "";
     }
     state.peerMonitorLoading = false;
-    if (state.peerSelectedCode) {
+    if (state.peerActiveTab === "daily") {
+      await loadPeerDaily();
+    } else if (state.peerSelectedCode) {
       await loadPeerCompetitorData();
     } else {
       renderPeerMonitor();
@@ -4573,6 +4698,11 @@ function setView(routeValue) {
   const currentRoute = parseHashRoute();
   const routeQuery = route.query || currentRoute.query;
 
+  if (viewName === "peer-monitor") {
+    const peerDate = new URLSearchParams(String(routeQuery || "").replace(/^\?/, "")).get("peerDate") || "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(peerDate)) state.peerDailyDate = peerDate;
+  }
+
   if (!views.includes(viewName)) {
     viewName = "home";
   }
@@ -4631,6 +4761,14 @@ function setView(routeValue) {
     && !state.peerMonitorLoading
   ) {
     loadPeerMonitor();
+  } else if (
+    viewName === "peer-monitor"
+    && state.peerMonitorAccess
+    && state.peerActiveTab === "daily"
+    && !state.peerDailyReport
+    && !state.peerDailyLoading
+  ) {
+    loadPeerDaily();
   }
   if (viewName === "department-subscriptions" && !state.departmentSubscriptionLoading) {
     loadDepartmentSubscriptions();
@@ -5297,10 +5435,26 @@ document.addEventListener("click", async (event) => {
 
   const peerTabButton = event.target.closest("[data-peer-monitor-tab]");
   if (peerTabButton) {
-    state.peerActiveTab = peerTabButton.dataset.peerMonitorTab === "articles"
-      ? "articles"
-      : "projects";
+    const nextTab = peerTabButton.dataset.peerMonitorTab;
+    state.peerActiveTab = ["daily", "articles", "projects"].includes(nextTab)
+      ? nextTab
+      : "daily";
     renderPeerMonitor();
+    if (state.peerActiveTab === "daily") {
+      if (!state.peerDailyReport && !state.peerDailyLoading) loadPeerDaily();
+    } else if (state.peerSelectedCode && !state.peerMonitorLoading) {
+      loadPeerCompetitorData();
+    }
+    return;
+  }
+
+  const peerDailyDateButton = event.target.closest("[data-peer-daily-date]");
+  if (peerDailyDateButton) {
+    const date = peerDailyDateButton.dataset.peerDailyDate;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date || "")) {
+      state.peerDailyDate = date;
+      loadPeerDaily({ date });
+    }
     return;
   }
 

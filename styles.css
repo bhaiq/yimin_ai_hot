@@ -1935,6 +1935,14 @@ img {
   align-items: start;
 }
 
+.peer-monitor-layout.daily-mode {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.peer-competitor-panel[hidden] {
+  display: none;
+}
+
 .peer-competitor-panel,
 .peer-monitor-workspace {
   border: 1px solid var(--line);
@@ -2158,6 +2166,112 @@ img {
 
 .peer-monitor-content {
   padding: 0 16px 18px;
+}
+
+.peer-daily-shell {
+  display: grid;
+  gap: 18px;
+  padding-top: 14px;
+}
+
+.peer-daily-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 28px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.peer-daily-meta > div {
+  display: grid;
+  gap: 3px;
+}
+
+.peer-daily-meta span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.peer-daily-meta strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.peer-daily-body {
+  max-width: 940px;
+  color: var(--text);
+  line-height: 1.75;
+}
+
+.peer-daily-body h2 {
+  margin: 0 0 14px;
+  font-size: 26px;
+  line-height: 1.35;
+}
+
+.peer-daily-body h3 {
+  margin: 28px 0 12px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  font-size: 18px;
+}
+
+.peer-daily-body h4 {
+  margin: 20px 0 8px;
+  font-size: 16px;
+}
+
+.peer-daily-body p,
+.peer-daily-body ul,
+.peer-daily-body ol {
+  margin: 8px 0;
+}
+
+.peer-daily-body blockquote {
+  margin: 12px 0;
+  padding: 10px 14px;
+  border-left: 3px solid var(--amber);
+  background: var(--panel-soft);
+  color: var(--muted);
+}
+
+.peer-daily-body a {
+  color: var(--blue);
+  overflow-wrap: anywhere;
+}
+
+.peer-daily-history {
+  display: flex;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  overflow-x: auto;
+}
+
+.peer-daily-history button {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 3px;
+  min-width: 118px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.peer-daily-history button.active,
+.peer-daily-history button:hover {
+  border-color: var(--line-strong);
+  background: var(--panel-soft);
+}
+
+.peer-daily-history span {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .peer-project-list,

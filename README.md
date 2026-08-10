@@ -152,6 +152,44 @@ curl 'https://your-domain.example/api/peer-monitor/wechat/discovery-runs/RUN_KEY
 
 上线前需要在 `.env` 配置 `WERSS_DATABASE_*`、`DAJIALA_API_KEY` 和 `PEER_DISCOVERY_CRON_TOKEN`；`DAJIALA_VERIFYCODE` 为可选项，仅在大家啦提供时填写。发现任务只写文章元数据并设置 `has_content=0`，不会覆盖 WeRSS 已有正文；正文仍由单独的 WeRSS 补全任务处理。
 
+### 同行日报生成与 MD 推送
+
+同行日报使用报告日前一日 06:30（含）到报告日 06:30（不含）的固定窗口，只纳入 `content_text` 非空的公众号文章和窗口内官网变化事件。完整报告使用真实同行名称并保留来源链接；MD 简版不包含外部链接，只提供内部授权页面入口。无动作日期也会生成，采集异常同行不会被误列为“今日无更新”。
+
+接口如下：
+
+```bash
+# 异步生成；重复日期默认复用，明确重做时传 force=true
+curl -X POST 'http://127.0.0.1:4173/api/peer-monitor/daily/generate' \
+  -H 'Content-Type: application/json' \
+  -d '{"date":"2026-08-10"}'
+
+curl 'http://127.0.0.1:4173/api/peer-monitor/daily/runs/RUN_KEY'
+curl 'http://127.0.0.1:4173/api/peer-monitor/daily?date=2026-08-10'
+curl 'http://127.0.0.1:4173/api/peer-monitor/daily/history?limit=30'
+
+# 首次只预览 MD 部门、简版正文，不发送企业微信
+curl -X POST 'http://127.0.0.1:4173/api/peer-monitor/daily/push' \
+  -H 'Content-Type: application/json' \
+  -d '{"date":"2026-08-10","dryRun":true}'
+```
+
+生产 `.env` 需配置 `PUBLIC_BASE_URL`（或 `PEER_DAILY_INTERNAL_BASE_URL`）以及企业微信参数；`PEER_DAILY_MD_DEPARTMENT_ID` 建议显式填写 MD 的真实部门 ID，留空时服务端会从 `yimin_wx_departments` 按名称 `MD` 查找。生成、任务查询与推送接口允许 loopback、管理员或 `PEER_DISCOVERY_CRON_TOKEN`，报告详情与历史仍要求同行监控访问权限。
+
+仓库提供单任务编排脚本：先触发生成并轮询完成，再发送 MD 简版。首次生产联调设置 `PEER_DAILY_DRY_RUN=1`，确认预览后再取消：
+
+```bash
+cd /服务器实际路径/yimin_ai_hot
+PEER_DAILY_DRY_RUN=1 /bin/bash scripts/run-peer-daily-report.sh
+```
+
+宝塔正式任务可在每天 08:00 执行：
+
+```bash
+cd /服务器实际路径/yimin_ai_hot
+/bin/bash scripts/run-peer-daily-report.sh
+```
+
 ## 市场素材
 
 `#market` 是给市场部使用的素材工作台。它复用当前新闻数据，不影响原有日报、雷达和全部动态。
