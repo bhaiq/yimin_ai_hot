@@ -3122,16 +3122,29 @@ function dedupePeerArticles(articles) {
   });
 }
 
+async function readPeerDailyJson(response, label) {
+  const body = await response.text();
+  try {
+    return JSON.parse(body);
+  } catch {
+    const preview = body.replace(/\s+/g, " ").trim().slice(0, 80);
+    const detail = preview ? `：${preview}` : "";
+    throw new Error(`${label}返回非 JSON（HTTP ${response.status}）${detail}`);
+  }
+}
+
 async function loadPeerDaily({ date = "" } = {}) {
   if (!state.peerMonitorAccess || window.location.protocol === "file:") return;
   state.peerDailyLoading = true;
   state.peerDailyError = "";
   renderPeerMonitor();
   try {
-    const historyResponse = await fetch("/api/peer-monitor/daily/history?limit=30", {
+    const requestMarker = Date.now().toString(36);
+    const historyResponse = await fetch(`/api/peer-monitor/daily/history?limit=30&_=${requestMarker}`, {
       headers: { accept: "application/json" },
+      cache: "no-store",
     });
-    const historyData = await historyResponse.json();
+    const historyData = await readPeerDailyJson(historyResponse, "同行日报历史接口");
     if (!historyResponse.ok || !historyData.ok) {
       throw new Error(historyData.error || `HTTP ${historyResponse.status}`);
     }
@@ -3142,10 +3155,13 @@ async function loadPeerDaily({ date = "" } = {}) {
       || getShanghaiDateString();
     state.peerDailyDate = selectedDate;
     const reportResponse = await fetch(
-      `/api/peer-monitor/daily?date=${encodeURIComponent(selectedDate)}`,
-      { headers: { accept: "application/json" } },
+      `/api/peer-monitor/daily?date=${encodeURIComponent(selectedDate)}&_=${requestMarker}`,
+      {
+        headers: { accept: "application/json" },
+        cache: "no-store",
+      },
     );
-    const reportData = await reportResponse.json();
+    const reportData = await readPeerDailyJson(reportResponse, "同行日报接口");
     if (reportResponse.status === 404) {
       state.peerDailyReport = null;
       state.peerDailyError = reportData.error || `${selectedDate} 同行日报尚未生成`;
