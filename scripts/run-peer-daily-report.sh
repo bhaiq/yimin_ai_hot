@@ -18,8 +18,40 @@ json_value() {
   ' "$1" "$2"
 }
 
+curl_json() {
+  local response_file http_status curl_status response_body
+  response_file="$(mktemp "${TMPDIR:-/tmp}/peer-daily-curl.XXXXXX")"
+
+  set +e
+  http_status="$(curl --silent --show-error \
+    --output "$response_file" \
+    --write-out '%{http_code}' \
+    "$@")"
+  curl_status=$?
+  set -e
+
+  response_body="$(cat "$response_file")"
+  rm -f "$response_file"
+
+  if [ "$curl_status" -ne 0 ]; then
+    [ -z "$response_body" ] || printf '%s\n' "$response_body" >&2
+    return "$curl_status"
+  fi
+  case "$http_status" in
+    2??)
+      printf '%s' "$response_body"
+      ;;
+    *)
+      printf '同行日报接口返回 HTTP %s' "$http_status" >&2
+      [ -z "$response_body" ] || printf '：%s' "$response_body" >&2
+      printf '\n' >&2
+      return 22
+      ;;
+  esac
+}
+
 generate_body="{\"date\":\"${REPORT_DATE}\",\"force\":$([ "$FORCE_GENERATE" = "1" ] && printf true || printf false)}"
-generate_response="$(curl --fail-with-body --silent --show-error \
+generate_response="$(curl_json \
   -X POST "${BASE_URL}/api/peer-monitor/daily/generate" \
   -H 'content-type: application/json' \
   --data "$generate_body")"
@@ -28,7 +60,7 @@ run_key="$(json_value "$generate_response" 'run.runKey')"
 if [ -n "$run_key" ]; then
   poll_count=0
   while [ "$poll_count" -lt "$MAX_POLLS" ]; do
-    run_response="$(curl --fail-with-body --silent --show-error \
+    run_response="$(curl_json \
       "${BASE_URL}/api/peer-monitor/daily/runs/${run_key}")"
     run_status="$(json_value "$run_response" 'run.status')"
     if [ "$run_status" = "completed" ]; then
@@ -49,7 +81,7 @@ if [ -n "$run_key" ]; then
 fi
 
 push_body="{\"date\":\"${REPORT_DATE}\",\"dryRun\":$([ "$DRY_RUN" = "1" ] && printf true || printf false)}"
-push_response="$(curl --fail-with-body --silent --show-error \
+push_response="$(curl_json \
   -X POST "${BASE_URL}/api/peer-monitor/daily/push" \
   -H 'content-type: application/json' \
   --data "$push_body")"
