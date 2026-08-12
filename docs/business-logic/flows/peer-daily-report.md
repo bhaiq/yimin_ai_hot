@@ -63,12 +63,12 @@
 |---|---|---|
 | 生产服务器 | **[需要你操作]** SSH、宝塔、目录、Docker/Compose、网络、环境变量、脚本落盘、权限、启动/重启和日志查看 | 不直接修改生产服务器；给出接口、配置项、验收命令和错误判定标准 |
 | 定时任务 | **[需要你操作]** 创建和维护宝塔计划任务，决定实际执行时间，优先调用本机接口 | 在 `yimin_ai_hot` 提供可重复调用、可查询状态、仅允许 loopback、管理员或定时任务令牌触发的接口 |
-| WeRSS 与外部脚本 | **[需要你操作]** 配置 WeRSS 数据库最小权限账号，部署正文补全脚本及所需运行环境 | 在 `yimin_ai_hot` 调用付费列表接口、缓存响应并写入 WeRSS 元数据；不修改 `/opt/we-mp-rss` 或外部脚本目录 |
+| WeRSS | **[需要你操作]** 配置 WeRSS 数据库最小权限账号 | 在 `yimin_ai_hot` 调用付费列表与正文接口，并幂等更新 WeRSS；不再部署微信直连正文脚本 |
 | 官网采集器 | **[需要你操作]** 在服务器安装独立 Python 环境、Playwright/Chromium 与 lxml，并配置宝塔任务 | 在 `yimin_ai_hot` 维护九家采集器源码、统一运行脚本、V1 快照转换、导入校验、版本历史、差异事件和日报融合 |
 | `yimin_ai_hot` | 只处理文中明确标记的生产配置与发布动作 | 数据表、服务端 API、同步规则、Prompt、报告渲染、页面、MD 推送代码和测试 |
 | 联调验收 | **[需要你操作]** 提供一份真实但可脱敏的接口/快照样例，在服务器执行最终调用并确认部门消息 | 提供 dry-run/导入结果，定位代码侧错误，完成仓库内修复 |
 
-边界原则：公众号列表发现归入 `yimin_ai_hot`，通过独立的 WeRSS 数据库连接只写文章元数据；正文补全仍由 WeRSS 外部任务负责。官网采集器虽然与主项目同仓库，但不进入 Node 进程、不直接写 `aiwork`，只由宝塔独立运行并调用导入接口。无需再建设独立 FastAPI 中转服务。
+边界原则：公众号列表发现与正文补全都归入 `yimin_ai_hot`，通过独立的 WeRSS 数据库连接写入文章元数据和正文；正文来自大家啦 `article_html` 付费接口，不再由服务器或本地脚本直连微信。官网采集器虽然与主项目同仓库，但不进入 Node 进程、不直接写 `aiwork`，只由独立任务运行并调用导入接口。无需再建设独立 FastAPI 中转服务。
 
 ## 4. 当前系统事实
 
@@ -159,7 +159,7 @@ flowchart LR
     subgraph ops["你负责：服务器、正文脚本与调度"]
         cron["宝塔计划任务"]
         werssdb["WeRSS feeds/articles"]
-        backfill["正文补全脚本"]
+        backfill["yimin_ai_hot 正文补全接口"]
         rss["本机 WeRSS RSS"]
         webcollector["9 家官网采集器"]
         snapshot["官网运行快照 JSON"]
@@ -216,7 +216,9 @@ sequenceDiagram
         YA->>DB: 先缓存清洗后的供应商响应
         YA->>WR: 幂等写入文章元数据
     end
-    BT->>WR: 06:35 启动正文补全
+    BT->>YH: 06:35 调用正文补全接口
+    YH->>DJ: 按缺正文文章 URL 请求 article_html
+    YH->>WR: 更新 content/content_html/has_content
     WR->>WR: 领取、抓取、校验、保存正文
     BT->>YA: 07:50 POST 同行 RSS 刷新（loopback）
     YA->>WR: 读取 9 个本机 RSS
@@ -387,34 +389,41 @@ feed_id + appmsgid + position
 
 API Key 与 verifycode 不得进入此文件。
 
-## 10. 正文补全 Worker
+## 10. 大家啦正文补全接口
 
-现有 `one-click-direct-backfill.sh` 不可原样放到线上：它依赖本机 macOS Docker、个人 SSH 私钥、SCP `.env` 和线上不存在的 Firefox 镜像。可以复用的只有严格 Shell、批量上限、延迟和防并发思路。
+正文补全内置于 `yimin_ai_hot`，调用 `POST https://www.dajiala.com/fbmain/monitor/v3/article_html`。请求只提交 WeRSS 缺正文文章的微信 URL、现有 `DAJIALA_API_KEY` 和可选 `DAJIALA_VERIFYCODE`；不再由脚本、浏览器、VPN 或服务器 IP 直连微信文章页。
 
-**[需要你操作]** 正式 Worker 应改成 `/opt/we-mp-rss` 的 Compose 任务，共用现有 `.env`，不复制凭据；脚本和镜像部署由你完成：
+对外触发接口：
 
 ```text
-docker compose run --rm content-backfill
+POST /api/peer-monitor/wechat/content-backfill
+GET  /api/peer-monitor/wechat/content-runs/{runKey}
+GET  /api/peer-monitor/wechat/content-runs/latest
 ```
 
-### 10.1 领取与锁
+请求可传 `competitor`、`limit`、`dryRun` 和 `retryFailed`。默认最多处理最新 20 篇且只取 `fix_fail_count<3`；`retryFailed=true` 才会让旧脚本留下的累计失败文章重新进入付费候选。`dryRun=true` 只返回候选数，不请求供应商。
 
-- 进程先申请 MySQL advisory lock，例如 `GET_LOCK('peer_wechat_content_backfill', 0)`。
-- 候选条件：`has_content=0`、未删除、`fix_fail_count<3`、URL 为 `mp.weixin.qq.com`。
-- 每篇文章通过条件更新原子领取，避免重复处理。
-- 领取时更新可用于租约判断的时间字段；超过 30 分钟仍为 `FETCHING` 的任务可在下次运行恢复。
-- 设置最大文章数和最大运行时长，最晚 07:45 主动停止领取新文章。
+### 10.1 领取、幂等与写入
+
+- 全局运行锁写入 `yimin_peer_content_runs.active_lock_key`，单篇再以 `articles.status=6` 条件更新原子领取。
+- 候选只来自启用的 `yimin_peer_wechat_accounts.werss_feed_id`，要求 `has_content=0`、未删除且 URL 为 `mp.weixin.qq.com`。
+- 超过 30 分钟的遗留领取会在下一轮恢复为正常状态。
+- 成功响应从 `data.html` 提取 `#js_content`，补齐懒加载图片地址，再写入 `content/content_html`；同时更新标题、摘要、封面、发布时间、`has_content=1` 和 `fix_fail_count=0`。
+- 每次运行及逐篇结果分别记录在 `yimin_peer_content_runs` 和 `yimin_peer_content_run_items`，包含接口码、尝试次数、费用、余额、正文长度和错误。
+- `PEER_CONTENT_MAX_COST_PER_RUN` 提供单次费用上限，达到后停止领取剩余文章。
 
 ### 10.2 失败分类
 
-| 类型 | 示例 | 处理 |
+| 类型 | 供应商表现 | 处理 |
 |---|---|---|
-| 永久失败 | 文章已删除、URL 非微信文章、明确无效 | 标记永久失败/删除，不再抓取 |
-| 临时失败 | 超时、5xx、空响应、普通网络错误 | 单次只增加 1 次失败；当前窗口内可有限重试 |
-| 风控 | 微信风险页、访问频控 | 立即停止本轮 Worker，恢复未完成文章状态 |
-| 进程中断 | 容器退出、服务器重启 | 依靠租约恢复，不永久停留在 `FETCHING` |
+| 成功 | `code=0` 且正文非空 | 更新 WeRSS 正文并回到原状态 |
+| 永久不可用 | `code=101` | 标记 `status=1000`，不再自动请求 |
+| 解析失败 | `code=105/106` | 本轮只增加 1 次 `fix_fail_count`，继续下一篇 |
+| 建议重试 | `code=107` | 同一篇最多尝试 3 次，仍失败则只累计 1 次失败 |
+| 网络错误 | 超时、5xx、非 JSON | 最多尝试 3 次；最终失败时停止本轮，避免连续无效请求 |
+| 配置/余额等未知错误 | 其他非零码 | 记录返回信息并停止本轮，避免重复付费 |
 
-禁止一次临时错误直接把 `fix_fail_count` 设为 3。
+API Key、verifycode 和文章完整 HTML 均不写运行日志；运行明细只保留必要的状态与长度。
 
 ## 11. WeRSS → aiwork 同步
 
@@ -762,7 +771,7 @@ docker compose run --rm content-backfill
 - 使用 `flock` 防止跨进程重入。
 - 生成全链路 `run_id`。
 - 06:30 冻结窗口，不使用脚本实际结束时间作为窗口截止。
-- 顺序运行公众号发现、正文补全，并调用 `yimin_ai_hot` 的同步、生成、推送接口。
+- 顺序调用 `yimin_ai_hot` 的公众号发现、正文补全、同步、生成和推送接口。
 - 每一步写结构化日志和退出码。
 - 某一步失败时不伪造后续成功；报告可带数据完整性提示降级生成。
 - 不通过 SCP 下载 `.env`，不依赖个人 SSH 私钥。
@@ -779,7 +788,7 @@ Codex 只保证 `yimin_ai_hot` 侧提供以下稳定能力：
 | 时间 | 动作 |
 |---|---|
 | 06:30 | 付费文章列表发现与 WeRSS 元数据入库 |
-| 06:35—07:45 | 正文补全与有限重试 |
+| 06:35—07:45 | 调用正文补全接口并轮询完成 |
 | 07:50 | WeRSS RSS → `yimin_peer_articles` |
 | 07:55 | 单篇动作抽取、跨同行汇总、保存报告 |
 | 08:00 | 推送 MD 简版 |
@@ -1019,10 +1028,10 @@ Codex 的交付：
 | 阶段 | Codex：`yimin_ai_hot` | 你：服务器与外部脚本 | 依赖 | 验收门槛 |
 |---|---|---|---|---|
 | P0 安全与接口定稿 | 收紧同行日报/导入/触发接口权限，固化公众号与官网输入契约 | **[需要你操作]** 生产设置 `PEER_MONITOR_OPEN_ACCESS=0`；确认授权部门和密钥环境变量 | 无 | 未授权请求 403；loopback 可触发；真实名称不公开泄漏 |
-| P1 公众号列表发现 | 实现受保护的异步接口、供应商适配、响应缓存、账号自动识别和 WeRSS 幂等元数据写入 | **[需要你操作]** 配置双库最小权限、大家啦密钥和 Cron Token；部署正文补全脚本 | P0 | 9 家均有运行结果；失败可见；缓存重放不扣费；已有正文不被覆盖 |
+| P1 公众号列表与正文 | 实现受保护的异步接口、供应商适配、响应缓存、账号自动识别、WeRSS 元数据与正文幂等写入 | **[需要你操作]** 配置双库最小权限、大家啦密钥和 Cron Token | P0 | 9 家均有运行结果；失败可见；列表缓存重放不扣费；已有正文不被覆盖；正文费用可见 |
 | P2 公众号同步 | 修改 RSS 同步，只接收完整正文；补齐运行状态和数据完整性 | **[需要你操作]** 提供一次线上 RSS/空正文联调结果并调用本机接口 | P1 | 空正文不进入 `aiwork`；完整正文正常新增；单源失败可见 |
 | P3 完整同行日报 | 新增分析缓存、日报表、统一 Prompt、校验、渲染、API 和“同行日报”页面 | 无 | P2 | 无更新、同题差异、去重、链接、真实名称和附录全部符合规则 |
-| P4 公众号链路上线 | 保证接口幂等、状态可轮询和失败信息可读 | **[需要你操作]** 配置宝塔定时请求和正文补全任务，并执行一次 dry-run/正式联调 | P3 | 06:30—08:00 全链路按顺序完成；失败不伪装成功 |
+| P4 公众号链路上线 | 保证接口幂等、状态可轮询和失败信息可读 | **[需要你操作]** 配置宝塔正文接口定时请求，并执行一次 dry-run/正式联调 | P3 | 06:30—08:00 全链路按顺序完成；失败不伪装成功 |
 | P5 MD 推送 | 新增 MD 简版、独立推送任务和防重复发送 | **[需要你操作]** 确认 MD `department_id`、企业微信环境变量并验收实收消息 | P4 | 08:00 成功发送；无更新日也发送；不含普通附录和外链 |
 | P6 官网生产化 | 维护 9 站采集器、统一运行脚本、V1 导入、Schema 校验、幂等、项目/版本/事件表和 dry-run | **[需要你操作]** 随主仓库部署，安装独立 Python 环境、Playwright/Chromium 与 lxml，配置宝塔任务 | P0；可在 P3—P5 期间并行 | 9 家有独立状态；首轮只建基线；失败不覆盖成功快照 |
 | P7 官网融合 | 实现字段级差异、连续缺失保护、官网页面、跨渠道 Prompt 与日报融合 | **[需要你操作]** 添加官网宝塔任务并完成一次人工差异抽查 | P5、P6 | 新增/变化/不再展示/恢复展示准确进入同一日报结构 |

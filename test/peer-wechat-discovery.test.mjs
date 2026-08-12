@@ -6,8 +6,11 @@ import {
   extractWerssFeedId,
   getPeerDiscoveryWindow,
   makeWerssArticleId,
+  normalizeDajialaArticleHtmlResponse,
   normalizeDajialaResponse,
+  normalizeWechatArticleContentHtml,
   resolveDajialaLookup,
+  shouldRetryDajialaArticleHtmlResult,
 } from "../lib/peer-wechat-discovery.mjs";
 
 test("uses a fixed previous-day 06:30 to report-day 06:30 window", () => {
@@ -190,4 +193,41 @@ test("auto lookup prefers ghid, then URL, then nickname", () => {
   assert.equal(resolveDajialaLookup({ lookupMode: "auto", ghid: "account-id", articleUrl: "url", nickname: "name" }).mode, "ghid");
   assert.equal(resolveDajialaLookup({ lookupMode: "auto", articleUrl: "url", nickname: "name" }).mode, "url");
   assert.equal(resolveDajialaLookup({ lookupMode: "auto", nickname: "name" }).mode, "nickname");
+});
+
+test("normalizes the Dajiala paid article HTML response for WeRSS", () => {
+  const normalized = normalizeDajialaArticleHtmlResponse({
+    code: 0,
+    msk: "OK",
+    cost_money: 0.04,
+    remain_money: 0.02,
+    data: {
+      title: "文章标题",
+      article_url: "https://mp.weixin.qq.com/s?__biz=abc&mid=123&idx=1&sn=token&scene=1",
+      cover_url: "https://mmbiz.qpic.cn/cover",
+      nickname: "测试公众号",
+      post_time: 1786000000,
+      gh_id: "gh_example",
+      desc: "文章摘要",
+      html: `<!doctype html><html><body><div id="js_content"><section><p>第一段&nbsp;正文</p><div><img data-src="https://mmbiz.qpic.cn/image"></div></section></div><script>alert(1)</script></body></html>`,
+    },
+  });
+
+  assert.equal(normalized.code, 0);
+  assert.equal(normalized.message, "OK");
+  assert.equal(normalized.costMoney, 0.04);
+  assert.equal(normalized.articleUrl, "https://mp.weixin.qq.com/s?__biz=abc&mid=123&idx=1&sn=token");
+  assert.match(normalized.contentHtml, /^<section>/);
+  assert.match(normalized.contentHtml, /src="https:\/\/mmbiz\.qpic\.cn\/image"/);
+  assert.match(normalized.contentHtml, /referrerpolicy="no-referrer"/);
+  assert.doesNotMatch(normalized.contentHtml, /alert\(1\)/);
+  assert.equal(normalized.contentText, "第一段 正文");
+});
+
+test("falls back to body HTML and identifies retryable provider outcomes", () => {
+  const html = normalizeWechatArticleContentHtml("<html><body><main>正文</main></body></html>");
+  assert.equal(html, "<main>正文</main>");
+  assert.equal(shouldRetryDajialaArticleHtmlResult({ code: 107 }), true);
+  assert.equal(shouldRetryDajialaArticleHtmlResult({ code: 105 }), false);
+  assert.equal(shouldRetryDajialaArticleHtmlResult({ httpStatus: 503 }), true);
 });

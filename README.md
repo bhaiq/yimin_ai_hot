@@ -74,7 +74,7 @@ curl -X POST http://127.0.0.1:4173/api/peer-monitor/refresh
 curl -X POST https://your-domain.example/api/peer-monitor/refresh
 ```
 
-该定时请求同时负责公众号新文章刷新和旧文章正文补抓，建议按小时执行。
+该定时请求负责把 WeRSS 已经具备正文的文章同步到同行监控库；文章列表发现和 WeRSS 正文补全分别使用下文的受保护接口。
 
 只刷新某个同行也可以显式指定，例如：
 
@@ -150,7 +150,34 @@ curl 'https://your-domain.example/api/peer-monitor/wechat/discovery-runs/RUN_KEY
   -H 'Authorization: Bearer your-cron-token'
 ```
 
-上线前需要在 `.env` 配置 `WERSS_DATABASE_*`、`DAJIALA_API_KEY` 和 `PEER_DISCOVERY_CRON_TOKEN`；`DAJIALA_VERIFYCODE` 为可选项，仅在大家啦提供时填写。发现任务只写文章元数据并设置 `has_content=0`，不会覆盖 WeRSS 已有正文；正文仍由单独的 WeRSS 补全任务处理。
+上线前需要在 `.env` 配置 `WERSS_DATABASE_*`、`DAJIALA_API_KEY` 和 `PEER_DISCOVERY_CRON_TOKEN`；`DAJIALA_VERIFYCODE` 为可选项，仅在大家啦提供时填写。发现任务只写文章元数据并设置 `has_content=0`，不会覆盖 WeRSS 已有正文。
+
+### 公众号文章正文补全接口
+
+正文补全由 `yimin_ai_hot` 直接调用大家啦 `article_html` 接口，不再访问微信原文页，也不依赖本地电脑、浏览器、VPN 或 WeRSS 外部补抓脚本。它复用列表发现的 `DAJIALA_API_KEY`，从 9 家同行对应的 WeRSS feed 中选取 `has_content=0` 的最新文章，成功后更新 `content`、`content_html`、标题、摘要、封面、发布时间和 `has_content=1`。
+
+先用 dry-run 检查单家候选，不产生正文接口费用：
+
+```bash
+curl -X POST 'https://your-domain.example/api/peer-monitor/wechat/content-backfill' \
+  -H 'Authorization: Bearer your-cron-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"competitor":"peer-a","limit":1,"dryRun":true}'
+```
+
+确认后正式补 1 篇；返回 HTTP 202 和 `run.runKey`，任务在后台执行：
+
+```bash
+curl -X POST 'https://your-domain.example/api/peer-monitor/wechat/content-backfill' \
+  -H 'Authorization: Bearer your-cron-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"competitor":"peer-a","limit":1}'
+
+curl 'https://your-domain.example/api/peer-monitor/wechat/content-runs/RUN_KEY' \
+  -H 'Authorization: Bearer your-cron-token'
+```
+
+默认最多处理最新 20 篇，且只选 `fix_fail_count<3` 的文章，避免为旧脚本留下的历史失败记录自动付费。明确要重试历史失败文章时才传 `retryFailed=true`。同一服务进程和数据库同时只允许一个正文任务；`101` 标记文章不可用，`105/106` 单次只累计一次失败，`107`、超时、5xx 和非 JSON 网络响应最多尝试 3 次。可通过 `PEER_CONTENT_DEFAULT_LIMIT`、`PEER_CONTENT_MAX_COST_PER_RUN`、`DAJIALA_CONTENT_TIMEOUT_MS`、`DAJIALA_CONTENT_MIN_INTERVAL_MS` 和 `DAJIALA_CONTENT_MAX_ATTEMPTS` 调整边界。
 
 ### 同行日报生成与 MD 推送
 
