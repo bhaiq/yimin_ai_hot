@@ -179,6 +179,14 @@ curl 'https://your-domain.example/api/peer-monitor/wechat/content-runs/RUN_KEY' 
 
 默认最多处理最新 20 篇，且只选 `fix_fail_count<3` 的文章，避免为旧脚本留下的历史失败记录自动付费。明确要重试历史失败文章时才传 `retryFailed=true`。同一服务进程和数据库同时只允许一个正文任务；`101` 标记文章不可用，`105/106` 单次只累计一次失败，`107`、超时、5xx 和非 JSON 网络响应最多尝试 3 次。可通过 `PEER_CONTENT_DEFAULT_LIMIT`、`PEER_CONTENT_MAX_COST_PER_RUN`、`DAJIALA_CONTENT_TIMEOUT_MS`、`DAJIALA_CONTENT_MIN_INTERVAL_MS` 和 `DAJIALA_CONTENT_MAX_ATTEMPTS` 调整边界。
 
+生产计划任务使用仓库内的接口编排脚本；它只请求并轮询上述 HTTP 接口，不直接访问微信、不解析文章、不持有数据库连接：
+
+```bash
+/bin/bash /www/wwwroot/yimin_ai_hot/scripts/run-peer-content-api-backfill.sh
+```
+
+建议安排在每日文章列表发现任务之后，例如列表 20:00、正文 21:30。脚本默认最多处理 20 篇，任务为 `partial/failed` 或轮询超时时返回非零退出码，避免宝塔把供应商失败显示为成功。
+
 ### 同行日报生成与 MD 推送
 
 同行日报使用报告日前一日 06:30（含）到报告日 06:30（不含）的固定窗口，只纳入 `content_text` 非空的公众号文章和窗口内官网变化事件。完整报告使用真实同行名称并保留来源链接；MD 简版不包含外部链接，只提供内部授权页面入口。无动作日期也会生成，采集异常同行不会被误列为“今日无更新”。
