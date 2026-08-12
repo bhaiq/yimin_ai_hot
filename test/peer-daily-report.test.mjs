@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  PEER_ACTION_CATEGORIES,
+  PEER_DAILY_SYSTEM_PROMPT,
   buildFallbackPeerDailyAggregate,
+  buildPeerSourceAnalysisPrompt,
   createFallbackSourceAnalysis,
   getPeerDailyWindow,
   renderPeerDailyMdBrief,
@@ -24,13 +27,12 @@ const sources = [
   },
   {
     id: 22,
-    sourceRef: "website:22",
-    sourceType: "website_event",
+    sourceRef: "wechat:22",
+    sourceType: "wechat_article",
     competitorName: "乙移民",
-    projectName: "美国投资项目",
-    title: "美国投资项目官网变化",
-    eventType: "changed",
-    changedFields: ["investment_amount"],
+    title: "美国投资项目说明会",
+    summary: "发布美国投资项目线上说明会信息。",
+    content: "介绍说明会时间、主题和报名方式。",
     url: "https://example.com/b",
     occurredAt: "2026-08-09T10:00:00+08:00",
   },
@@ -67,7 +69,25 @@ test("校验汇总来源唯一并把模型遗漏来源放入附录", () => {
 
   assert.equal(result.keyActions.length, 1);
   assert.equal(result.appendix.length, 1);
-  assert.deepEqual(result.appendix[0].sourceRefs, ["website:22"]);
+  assert.deepEqual(result.appendix[0].sourceRefs, ["wechat:22"]);
+});
+
+test("日报 Prompt 只接收公众号文章且不包含官网口径", () => {
+  const prompt = buildPeerSourceAnalysisPrompt([
+    ...sources,
+    {
+      id: 33,
+      sourceRef: "website:33",
+      sourceType: "website_event",
+      competitorName: "丙移民",
+      title: "不应进入 Prompt",
+    },
+  ]);
+  assert.match(prompt, /同行公众号文章/);
+  assert.match(prompt, /wechat:11/);
+  assert.doesNotMatch(prompt, /website:33|不应进入 Prompt|官网/);
+  assert.doesNotMatch(PEER_DAILY_SYSTEM_PROMPT, /官网/);
+  assert.equal(PEER_ACTION_CATEGORIES.includes("官网项目变化"), false);
 });
 
 test("拒绝重复来源和只有一家同行的共同主题", () => {

@@ -2836,7 +2836,7 @@ function renderPeerDailyContent() {
             data-peer-daily-date="${escapeAttr(item.date)}"
           >
             <strong>${escapeHtml(item.date)}</strong>
-            <span>${escapeHtml(Number(item.sourceArticleCount || 0) + Number(item.sourceWebsiteEventCount || 0))} 条来源</span>
+            <span>${escapeHtml(Number(item.sourceArticleCount || 0))} 篇公众号文章</span>
           </button>
         `).join("")}
       </div>`
@@ -2897,8 +2897,8 @@ function renderPeerMonitor() {
         <strong>${escapeHtml(state.peerDailyReport.sourceArticleCount || 0)}</strong>
       </div>
       <div>
-        <span>官网变化</span>
-        <strong>${escapeHtml(state.peerDailyReport.sourceWebsiteEventCount || 0)}</strong>
+        <span>无更新同行</span>
+        <strong>${escapeHtml(state.peerDailyReport.noUpdateCount || 0)}</strong>
       </div>
       <div>
         <span>重要动作</span>

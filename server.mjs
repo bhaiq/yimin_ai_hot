@@ -3572,37 +3572,6 @@ async function loadPeerDailyInput(reportDate) {
     ORDER BY competitor_sort_order, published_at, id;
   `);
 
-  const websiteRows = await mysqlJsonRows(`
-    SELECT JSON_OBJECT(
-      'id', e.id,
-      'sourceRef', CONCAT('website:', e.id),
-      'sourceType', 'website_event',
-      'peerCode', c.code,
-      'competitorName', c.private_name,
-      'projectName', p.project_name,
-      'title', CONCAT(p.project_name, '官网变化'),
-      'summary', '',
-      'content', '',
-      'country', p.country_normalized,
-      'eventType', e.event_type,
-      'changedFields', COALESCE(e.changed_fields_json, JSON_ARRAY()),
-      'beforeSnapshot', before_version.snapshot_json,
-      'afterSnapshot', after_version.snapshot_json,
-      'url', COALESCE(e.evidence_url, p.canonical_url, ''),
-      'occurredAt', DATE_FORMAT(e.detected_at, '%Y-%m-%dT%H:%i:%s+08:00'),
-      'sortOrder', c.sort_order
-    )
-    FROM yimin_peer_project_events e
-    JOIN yimin_peer_projects p ON p.id = e.project_id
-    JOIN yimin_peer_competitors c ON c.id = e.competitor_id
-    LEFT JOIN yimin_peer_project_versions before_version ON before_version.id = e.before_version_id
-    LEFT JOIN yimin_peer_project_versions after_version ON after_version.id = e.after_version_id
-    WHERE c.enabled = 1
-      AND e.detected_at >= ${sqlDate(window.windowStartAt)}
-      AND e.detected_at < ${sqlDate(window.windowEndAt)}
-    ORDER BY c.sort_order, e.detected_at, e.id;
-  `);
-
   const sourceHealth = await mysqlJsonRows(`
     SELECT JSON_OBJECT(
       'code', c.code,
@@ -3611,20 +3580,17 @@ async function loadPeerDailyInput(reportDate) {
         WHEN s.source_type = 'wechat_rss' THEN NULLIF(TRIM(s.last_fetch_error), '')
         ELSE NULL
       END), ''),
-      'discoveryError', COALESCE(MAX(NULLIF(TRIM(a.last_discovery_error), '')), ''),
-      'websiteStatus', COALESCE(MAX(ws.last_status), ''),
-      'websiteError', COALESCE(MAX(NULLIF(TRIM(ws.last_error), '')), '')
+      'discoveryError', COALESCE(MAX(NULLIF(TRIM(a.last_discovery_error), '')), '')
     )
     FROM yimin_peer_competitors c
     LEFT JOIN yimin_peer_sources s ON s.competitor_id = c.id AND s.enabled = 1
     LEFT JOIN yimin_peer_wechat_accounts a ON a.source_id = s.id AND a.enabled = 1
-    LEFT JOIN yimin_peer_website_sources ws ON ws.competitor_id = c.id
     WHERE c.enabled = 1
     GROUP BY c.id, c.code, c.private_name, c.sort_order
     ORDER BY c.sort_order, c.id;
   `);
 
-  const sources = [...articleRows, ...websiteRows].map((source) => ({
+  const sources = articleRows.map((source) => ({
     ...source,
     competitorName: normalizePeerText(source.competitorName),
     title: normalizePeerText(source.title).replace(/该机构/g, normalizePeerText(source.competitorName)),
@@ -3644,7 +3610,6 @@ async function loadPeerDailyInput(reportDate) {
   for (const state of sourceHealth) {
     const reasons = [];
     if (state.wechatError || state.discoveryError) reasons.push("公众号采集");
-    if (["failed", "partial"].includes(state.websiteStatus) || state.websiteError) reasons.push("官网采集");
     if (!reasons.length) continue;
     warningNames.add(state.name);
     warnings.push(`${state.name}的${[...new Set(reasons)].join("及")}存在异常，相关更新可能不完整`);
@@ -3661,7 +3626,7 @@ async function loadPeerDailyInput(reportDate) {
     competitors,
     sources,
     articleCount: articleRows.length,
-    websiteEventCount: websiteRows.length,
+    websiteEventCount: 0,
     noUpdateNames,
     warnings,
     warningNames: [...warningNames],
