@@ -11179,11 +11179,13 @@ async function getDailyReport(date = getShanghaiDate(), { refresh = false, windo
       LIMIT 1;
     `);
 
-    if (existing && existing.model !== "fallback") {
-      if (existing.contentMarkdown) {
-        existing.contentMarkdown = sanitizeTextArtifacts(existing.contentMarkdown);
-        existing.html = markdownToHtml(existing.contentMarkdown);
-      }
+    // A fallback report is still a complete, usable daily report. It usually means
+    // the model timed out and the deterministic renderer took over. Treating it as
+    // a cache miss hides the report and makes every page view start another costly
+    // generation attempt.
+    if (existing?.contentMarkdown) {
+      existing.contentMarkdown = sanitizeTextArtifacts(existing.contentMarkdown);
+      existing.html = markdownToHtml(existing.contentMarkdown);
       startHTopicGenerationInBackground(date);
       return attachDailyWindowLabel({ ...existing, language: "zh" });
     }
@@ -11265,7 +11267,9 @@ async function readCachedDailyReport(date, { language = "zh" } = {}) {
 
   const normalizedLanguage = normalizeDailyLanguage(language);
   const baseRow = await loadDailyReportBaseRow(date);
-  if (!baseRow || baseRow.model === "fallback") {
+  // Fallback only describes how the report was produced; it does not mean the
+  // persisted report is missing. Serve it whenever it contains usable content.
+  if (!baseRow?.contentMarkdown) {
     return null;
   }
 
