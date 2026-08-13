@@ -61,6 +61,11 @@ const dailyAnalysisConcurrency = Math.max(1, Number(process.env.DAILY_ANALYSIS_C
 const dailyFinalPromptMaxChars = Math.max(20000, Number(process.env.DAILY_FINAL_PROMPT_MAX_CHARS || 80000));
 const deepseekTimeoutMs = Math.max(1000, Number(process.env.DEEPSEEK_TIMEOUT_MS || 120000));
 const deepseekStreamEnabled = process.env.DEEPSEEK_STREAM !== "0";
+const dailyAnalysisModel = process.env.DAILY_ANALYSIS_MODEL || process.env.DEEPSEEK_MODEL || "deepseek-chat";
+const dailyAnalysisTimeoutMs = Math.max(1000, Number(process.env.DAILY_ANALYSIS_TIMEOUT_MS || 180000));
+const dailyAnalysisMaxTokens = Math.max(500, Number(process.env.DAILY_ANALYSIS_MAX_TOKENS || 3000));
+const dailyFinalTimeoutMs = Math.max(1000, Number(process.env.DAILY_FINAL_TIMEOUT_MS || 300000));
+const dailyFinalMaxTokens = Math.max(1000, Number(process.env.DAILY_FINAL_MAX_TOKENS || 16000));
 const dailyAnalysisVersion = "daily-analysis-v4";
 const dailyLocalizationVersion = "daily-localization-v2";
 const articleTranslationVersion = "article-translation-v1";
@@ -9984,10 +9989,14 @@ function buildDailyAnalysisPrompt(items) {
 ${JSON.stringify(payload)}`;
 }
 
-async function analyzeDailyArticleBatch(items) {
+async function analyzeDailyArticleBatch(items, { splitDepth = 0 } = {}) {
   const fallbackById = new Map(items.map((item) => [item.id, buildFallbackDailyAnalysis(item)]));
   try {
-    const content = await callDeepSeek(buildDailyAnalysisPrompt(items));
+    const content = await callDeepSeek(buildDailyAnalysisPrompt(items), {
+      model: dailyAnalysisModel,
+      timeoutMs: dailyAnalysisTimeoutMs,
+      maxTokens: dailyAnalysisMaxTokens,
+    });
     const parsed = parseDeepSeekJsonArray(content);
     for (const result of parsed) {
       const fallback = fallbackById.get(String(result?.id || ""));
@@ -10001,11 +10010,11 @@ async function analyzeDailyArticleBatch(items) {
         country: truncate(result.country || fallback.country, 80),
         category: truncate(result.category || fallback.category, 120),
         impact: truncate(result.impact || fallback.impact, 80),
-        model: deepseekConfig.model,
+        model: dailyAnalysisModel,
       });
     }
   } catch (error) {
-    if (items.length > 1 && shouldSplitDailyAnalysisBatch(error)) {
+    if (items.length > 1 && splitDepth < 1 && shouldSplitDailyAnalysisBatch(error)) {
       const mid = Math.ceil(items.length / 2);
       console.warn(
         `Daily article analysis batch retrying split ${items.length} -> ${mid}+${items.length - mid}: ${formatErrorMessage(error)}`,
@@ -10013,7 +10022,7 @@ async function analyzeDailyArticleBatch(items) {
       const results = await runWithConcurrency(
         [items.slice(0, mid), items.slice(mid)],
         1,
-        (batch) => analyzeDailyArticleBatch(batch),
+        (batch) => analyzeDailyArticleBatch(batch, { splitDepth: splitDepth + 1 }),
       );
       return results.flat();
     }
@@ -10024,8 +10033,10 @@ async function analyzeDailyArticleBatch(items) {
 
 function shouldSplitDailyAnalysisBatch(error) {
   const message = formatErrorMessage(error);
-  return /DeepSeek HTTP (408|409|425|429|5\d\d)\b/i.test(message)
-    || /timeout|timed out|aborted|fetch failed|network/i.test(message)
+  // Splitting can help malformed or truncated structured output, but it cannot
+  // repair an unavailable channel or a hard timeout. Retrying those cases as
+  // smaller batches only multiplies latency and billable tokens.
+  return /DeepSeek HTTP 413\b/i.test(message)
     || /DeepSeek analysis did not return a JSON array|DeepSeek analysis JSON is not an array|Unexpected end of JSON input|DeepSeek returned empty content/i.test(message);
 }
 
@@ -10326,7 +10337,11 @@ async function reduceDailyEventChunk(events) {
 
 ${formatDailyPromptEvents(events)}`;
   try {
-    return await callDeepSeek(prompt);
+    return await callDeepSeek(prompt, {
+      model: dailyAnalysisModel,
+      timeoutMs: dailyAnalysisTimeoutMs,
+      maxTokens: dailyAnalysisMaxTokens,
+    });
   } catch (error) {
     console.error("Daily event digest fallback:", error instanceof Error ? error.message : String(error));
     return formatDailyPromptEvents(events);
@@ -10344,7 +10359,11 @@ async function reduceDailyDigestDocuments(documents) {
 
 ${documents.join("\n\n--- 批次分隔 ---\n\n")}`;
   try {
-    return await callDeepSeek(prompt);
+    return await callDeepSeek(prompt, {
+      model: dailyAnalysisModel,
+      timeoutMs: dailyAnalysisTimeoutMs,
+      maxTokens: dailyAnalysisMaxTokens,
+    });
   } catch (error) {
     console.error("Daily digest reduction fallback:", error instanceof Error ? error.message : String(error));
     return documents.join("\n\n");
@@ -10495,7 +10514,11 @@ async function buildDailyEventMaterial(events) {
 
 async function generateDailyMarkdown(date, dailyContext) {
   try {
-    const markdown = await callDeepSeek(await buildDailyPrompt(date, dailyContext));
+    const markdown = await callDeepSeek(await buildDailyPrompt(date, dailyContext), {
+      model: deepseekConfig.model,
+      timeoutMs: dailyFinalTimeoutMs,
+      maxTokens: dailyFinalMaxTokens,
+    });
     return {
       markdown,
       model: deepseekConfig.model,
@@ -10612,29 +10635,39 @@ async function callDeepSeek(prompt, options = {}) {
   const systemPrompt = options.systemPrompt
     || "你是移民政策日报编辑，只能基于用户提供的信息进行归纳，不能编造政策、日期、费用或结论。输出必须使用简体中文，遇到英文或其他语言的源材料必须翻译为中文，不要保留原文。";
   const temperature = Number.isFinite(Number(options.temperature)) ? Number(options.temperature) : 0.25;
+  const timeoutMs = Number.isFinite(Number(options.timeoutMs))
+    ? Math.max(1000, Number(options.timeoutMs))
+    : deepseekTimeoutMs;
+  const maxTokens = Number.isFinite(Number(options.maxTokens))
+    ? Math.max(1, Math.floor(Number(options.maxTokens)))
+    : null;
+  const requestBody = {
+    model: options.model || deepseekConfig.model,
+    temperature,
+    stream: deepseekStreamEnabled,
+    messages: [
+      {
+        role: "system",
+        content: systemPrompt,
+      },
+      {
+        role: "user",
+        content: prompt,
+      },
+    ],
+  };
+  if (maxTokens) {
+    requestBody.max_tokens = maxTokens;
+  }
 
   const response = await fetch(getDeepSeekChatCompletionsUrl(), {
     method: "POST",
-    signal: AbortSignal.timeout(deepseekTimeoutMs),
+    signal: AbortSignal.timeout(timeoutMs),
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${deepseekConfig.apiKey}`,
     },
-    body: JSON.stringify({
-      model: options.model || deepseekConfig.model,
-      temperature,
-      stream: deepseekStreamEnabled,
-      messages: [
-        {
-          role: "system",
-          content: systemPrompt,
-        },
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {
@@ -11292,7 +11325,10 @@ async function readCachedDailyReport(date, { language = "zh" } = {}) {
 
 function startDailyReportInBackground(date, { refresh = false, windowMode = "calendar", language = "zh" } = {}) {
   const normalizedLanguage = normalizeDailyLanguage(language);
-  const generationKey = `${date}:${normalizeDailyWindowMode(windowMode)}:${normalizedLanguage}:${refresh ? "refresh" : "cached"}`;
+  // Refresh and cache-miss requests for the same report must share one job.
+  // Otherwise a scheduled refresh and a page view can generate the same daily
+  // report concurrently and multiply model usage.
+  const generationKey = `${date}:${normalizeDailyWindowMode(windowMode)}:${normalizedLanguage}`;
   if (dailyReportGenerationPromises.has(generationKey)) {
     return dailyReportGenerationPromises.get(generationKey);
   }
@@ -11325,9 +11361,7 @@ function startDailyReportInBackground(date, { refresh = false, windowMode = "cal
 function isDailyReportGenerationRunning(date, { windowMode = "calendar", language = "zh" } = {}) {
   const normalizedLanguage = normalizeDailyLanguage(language);
   const normalizedWindowMode = normalizeDailyWindowMode(windowMode);
-  return ["refresh", "cached"].some((mode) => (
-    dailyReportGenerationPromises.has(`${date}:${normalizedWindowMode}:${normalizedLanguage}:${mode}`)
-  ));
+  return dailyReportGenerationPromises.has(`${date}:${normalizedWindowMode}:${normalizedLanguage}`);
 }
 
 let hContentProfileCache = null;
