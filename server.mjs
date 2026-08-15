@@ -285,6 +285,11 @@ const peerDailyConfig = {
   analysisBatchSize: getBoundedConfigNumber(process.env.PEER_DAILY_ANALYSIS_BATCH_SIZE, 8, 1, 20),
   analysisConcurrency: getBoundedConfigNumber(process.env.PEER_DAILY_ANALYSIS_CONCURRENCY, 2, 1, 4),
   analysisMaxChars: getBoundedConfigNumber(process.env.PEER_DAILY_ARTICLE_MAX_CHARS, 6_000, 2_000, 40_000),
+  analysisTimeoutMs: getBoundedConfigNumber(process.env.PEER_DAILY_ANALYSIS_TIMEOUT_MS, 180_000, 10_000, 300_000),
+  analysisMaxTokens: getBoundedConfigNumber(process.env.PEER_DAILY_ANALYSIS_MAX_TOKENS, 6_000, 1_000, 20_000),
+  finalTimeoutMs: getBoundedConfigNumber(process.env.PEER_DAILY_FINAL_TIMEOUT_MS, 180_000, 10_000, 300_000),
+  finalMaxTokens: getBoundedConfigNumber(process.env.PEER_DAILY_FINAL_MAX_TOKENS, 8_000, 1_000, 20_000),
+  thinkingDisabled: process.env.PEER_DAILY_DISABLE_THINKING !== "0",
   mdDepartmentId: Number(process.env.PEER_DAILY_MD_DEPARTMENT_ID || 0),
   internalBaseUrl: String(process.env.PEER_DAILY_INTERNAL_BASE_URL || process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, ""),
 };
@@ -3745,6 +3750,9 @@ async function analyzePeerDailySources(sources) {
       const raw = parseDeepSeekJsonObject(await callDeepSeek(buildPeerSourceAnalysisPrompt(batch), {
         systemPrompt: "你是同行公开动作抽取器。只能基于输入逐条提取，不补充事实，不做真实性核验，不提出我方建议；只输出严格 JSON。",
         temperature: 0.1,
+        timeoutMs: peerDailyConfig.analysisTimeoutMs,
+        maxTokens: peerDailyConfig.analysisMaxTokens,
+        disableThinking: peerDailyConfig.thinkingDisabled,
       }));
       const byRef = new Map(
         (Array.isArray(raw.analyses) ? raw.analyses : [])
@@ -3806,6 +3814,9 @@ async function aggregatePeerDailyInput(input, analyses, { modelAvailable = true 
       previousOutput = await callDeepSeek(currentPrompt, {
         systemPrompt: PEER_DAILY_SYSTEM_PROMPT,
         temperature: 0.15,
+        timeoutMs: peerDailyConfig.finalTimeoutMs,
+        maxTokens: peerDailyConfig.finalMaxTokens,
+        disableThinking: peerDailyConfig.thinkingDisabled,
       });
       const aggregate = validatePeerDailyAggregate(
         parseDeepSeekJsonObject(previousOutput),
