@@ -31,6 +31,7 @@ import {
   buildPeerDailyReportItems,
   buildPeerSourceAnalysisPrompt,
   createFallbackSourceAnalysis,
+  getPeerDailyIngestionWindow,
   getPeerDailyWindow,
   hashPeerDailyInput,
   renderPeerDailyMdBrief,
@@ -3527,7 +3528,10 @@ function getPeerDailyInternalUrl(reportDate) {
 }
 
 async function loadPeerDailyInput(reportDate) {
-  const window = getPeerDailyWindow(reportDate);
+  // The provider/content pipeline can deliver an article one or two days after
+  // publication. Assign it to the report where it first became available to
+  // this system, while retaining published_at as the article's displayed time.
+  const window = getPeerDailyIngestionWindow(reportDate);
   const competitors = await mysqlJsonRows(`
     SELECT JSON_OBJECT(
       'code', code,
@@ -3556,8 +3560,8 @@ async function loadPeerDailyInput(reportDate) {
       WHERE c.enabled = 1
         AND s.enabled = 1
         AND s.source_type = 'wechat_rss'
-        AND a.published_at >= ${sqlDate(window.windowStartAt)}
-        AND a.published_at < ${sqlDate(window.windowEndAt)}
+        AND a.first_fetched_at >= ${sqlDate(window.windowStartAt)}
+        AND a.first_fetched_at < ${sqlDate(window.windowEndAt)}
         AND CHAR_LENGTH(TRIM(COALESCE(a.content_text, ''))) > 0
     )
     SELECT JSON_OBJECT(
@@ -3570,12 +3574,13 @@ async function loadPeerDailyInput(reportDate) {
       'summary', COALESCE(summary, ''),
       'content', content_text,
       'url', COALESCE(private_url, ''),
-      'occurredAt', DATE_FORMAT(published_at, '%Y-%m-%dT%H:%i:%s+08:00'),
+      'occurredAt', DATE_FORMAT(COALESCE(published_at, first_fetched_at), '%Y-%m-%dT%H:%i:%s+08:00'),
+      'ingestedAt', DATE_FORMAT(first_fetched_at, '%Y-%m-%dT%H:%i:%s+08:00'),
       'sortOrder', competitor_sort_order
     )
     FROM ranked_window_articles
     WHERE identity_rank = 1
-    ORDER BY competitor_sort_order, published_at, id;
+    ORDER BY competitor_sort_order, first_fetched_at, COALESCE(published_at, first_fetched_at), id;
   `);
 
   const sourceHealth = await mysqlJsonRows(`
@@ -3607,6 +3612,7 @@ async function loadPeerDailyInput(reportDate) {
     url: normalizePeerArticleUrl(source.url),
   })).sort((left, right) => (
     Number(left.sortOrder || 0) - Number(right.sortOrder || 0)
+    || String(left.ingestedAt || "").localeCompare(String(right.ingestedAt || ""))
     || String(left.occurredAt || "").localeCompare(String(right.occurredAt || ""))
     || Number(left.id || 0) - Number(right.id || 0)
   ));

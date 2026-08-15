@@ -7,6 +7,7 @@ import {
   buildFallbackPeerDailyAggregate,
   buildPeerSourceAnalysisPrompt,
   createFallbackSourceAnalysis,
+  getPeerDailyIngestionWindow,
   getPeerDailyWindow,
   renderPeerDailyMdBrief,
   renderPeerDailyReport,
@@ -47,6 +48,16 @@ test("固定生成前一日 06:30 到报告日 06:30 的窗口", () => {
   });
   assert.equal(getPeerDailyWindow("2024-03-01").windowStartAt, "2024-02-29T06:30:00+08:00");
   assert.throws(() => getPeerDailyWindow("2026-02-30"), /日期无效/);
+});
+
+test("日报按首次采集入库时间归属并明确标注窗口口径", () => {
+  assert.deepEqual(getPeerDailyIngestionWindow("2026-08-10"), {
+    reportDate: "2026-08-10",
+    windowStartAt: "2026-08-09T06:30:00+08:00",
+    windowEndAt: "2026-08-10T06:30:00+08:00",
+    windowBasis: "first_fetched_at",
+    windowLabel: "采集入库窗口：2026-08-09 06:30 至 2026-08-10 06:30",
+  });
 });
 
 test("校验汇总来源唯一并把模型遗漏来源放入附录", () => {
