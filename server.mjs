@@ -290,6 +290,7 @@ const peerDailyConfig = {
   finalTimeoutMs: getBoundedConfigNumber(process.env.PEER_DAILY_FINAL_TIMEOUT_MS, 180_000, 10_000, 300_000),
   finalMaxTokens: getBoundedConfigNumber(process.env.PEER_DAILY_FINAL_MAX_TOKENS, 8_000, 1_000, 20_000),
   thinkingDisabled: process.env.PEER_DAILY_DISABLE_THINKING !== "0",
+  pushEnabled: process.env.PEER_DAILY_PUSH_ENABLED === "1",
   mdDepartmentId: Number(process.env.PEER_DAILY_MD_DEPARTMENT_ID || 0),
   internalBaseUrl: String(process.env.PEER_DAILY_INTERNAL_BASE_URL || process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, ""),
 };
@@ -4102,6 +4103,15 @@ async function sendWxDepartmentMarkdown(accessToken, departmentId, content) {
 async function pushPeerDailyReport(reportDate, { dryRun = false, force = false } = {}) {
   const report = await getPeerDailyReport(reportDate);
   if (!report) throw new Error(`尚未生成 ${reportDate} 同行日报`);
+  if (!peerDailyConfig.pushEnabled && !dryRun) {
+    return {
+      sent: false,
+      skipped: true,
+      disabled: true,
+      reportId: report.id,
+      reason: "同行日报 MD 推送当前已关闭（PEER_DAILY_PUSH_ENABLED=0）",
+    };
+  }
   const department = await resolvePeerDailyMdDepartment();
   if (!department?.id) throw new Error("未配置 PEER_DAILY_MD_DEPARTMENT_ID，且部门表中未找到 MD");
   if (dryRun) {
