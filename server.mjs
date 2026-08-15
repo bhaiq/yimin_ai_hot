@@ -66,6 +66,7 @@ const dailyAnalysisTimeoutMs = Math.max(1000, Number(process.env.DAILY_ANALYSIS_
 const dailyAnalysisMaxTokens = Math.max(500, Number(process.env.DAILY_ANALYSIS_MAX_TOKENS || 3000));
 const dailyFinalTimeoutMs = Math.max(1000, Number(process.env.DAILY_FINAL_TIMEOUT_MS || 300000));
 const dailyFinalMaxTokens = Math.max(1000, Number(process.env.DAILY_FINAL_MAX_TOKENS || 16000));
+const dailyThinkingDisabled = process.env.DAILY_DISABLE_THINKING !== "0";
 const dailyAnalysisVersion = "daily-analysis-v4";
 const dailyLocalizationVersion = "daily-localization-v2";
 const articleTranslationVersion = "article-translation-v1";
@@ -9996,6 +9997,7 @@ async function analyzeDailyArticleBatch(items, { splitDepth = 0 } = {}) {
       model: dailyAnalysisModel,
       timeoutMs: dailyAnalysisTimeoutMs,
       maxTokens: dailyAnalysisMaxTokens,
+      disableThinking: dailyThinkingDisabled,
     });
     const parsed = parseDeepSeekJsonArray(content);
     for (const result of parsed) {
@@ -10037,7 +10039,7 @@ function shouldSplitDailyAnalysisBatch(error) {
   // repair an unavailable channel or a hard timeout. Retrying those cases as
   // smaller batches only multiplies latency and billable tokens.
   return /DeepSeek HTTP 413\b/i.test(message)
-    || /DeepSeek analysis did not return a JSON array|DeepSeek analysis JSON is not an array|Unexpected end of JSON input|DeepSeek returned empty content/i.test(message);
+    || /DeepSeek analysis did not return a JSON array|DeepSeek analysis JSON is not an array|Unexpected end of JSON input/i.test(message);
 }
 
 function formatErrorMessage(error) {
@@ -10341,6 +10343,7 @@ ${formatDailyPromptEvents(events)}`;
       model: dailyAnalysisModel,
       timeoutMs: dailyAnalysisTimeoutMs,
       maxTokens: dailyAnalysisMaxTokens,
+      disableThinking: dailyThinkingDisabled,
     });
   } catch (error) {
     console.error("Daily event digest fallback:", error instanceof Error ? error.message : String(error));
@@ -10363,6 +10366,7 @@ ${documents.join("\n\n--- 批次分隔 ---\n\n")}`;
       model: dailyAnalysisModel,
       timeoutMs: dailyAnalysisTimeoutMs,
       maxTokens: dailyAnalysisMaxTokens,
+      disableThinking: dailyThinkingDisabled,
     });
   } catch (error) {
     console.error("Daily digest reduction fallback:", error instanceof Error ? error.message : String(error));
@@ -10518,6 +10522,7 @@ async function generateDailyMarkdown(date, dailyContext) {
       model: deepseekConfig.model,
       timeoutMs: dailyFinalTimeoutMs,
       maxTokens: dailyFinalMaxTokens,
+      disableThinking: dailyThinkingDisabled,
     });
     return {
       markdown,
@@ -10659,6 +10664,9 @@ async function callDeepSeek(prompt, options = {}) {
   if (maxTokens) {
     requestBody.max_tokens = maxTokens;
   }
+  if (options.disableThinking) {
+    requestBody.thinking = { type: "disabled" };
+  }
 
   const response = await fetch(getDeepSeekChatCompletionsUrl(), {
     method: "POST",
@@ -10676,12 +10684,16 @@ async function callDeepSeek(prompt, options = {}) {
   }
 
   const contentType = String(response.headers.get("content-type") || "").toLowerCase();
-  let content = deepseekStreamEnabled && !contentType.includes("application/json")
+  const completion = deepseekStreamEnabled && !contentType.includes("application/json")
     ? await readOpenAICompatibleStream(response)
     : await readOpenAICompatibleJson(response);
-  content = content.trim();
+  let content = completion.content.trim();
   if (!content) {
-    throw new Error("DeepSeek returned empty content");
+    const details = [];
+    if (completion.finishReason) details.push(`finish_reason=${completion.finishReason}`);
+    const completionTokens = Number(completion.usage?.completion_tokens);
+    if (Number.isFinite(completionTokens)) details.push(`completion_tokens=${completionTokens}`);
+    throw new Error(`DeepSeek returned empty content${details.length ? ` (${details.join(", ")})` : ""}`);
   }
 
   // Remove non-CJK garbage: Greek, control chars, isolated combining marks
@@ -10699,7 +10711,12 @@ async function callDeepSeek(prompt, options = {}) {
 
 async function readOpenAICompatibleJson(response) {
   const data = await response.json();
-  return data.choices?.[0]?.message?.content || "";
+  const choice = data.choices?.[0] || {};
+  return {
+    content: choice.message?.content || choice.text || "",
+    finishReason: choice.finish_reason || "",
+    usage: data.usage || null,
+  };
 }
 
 async function readOpenAICompatibleStream(response) {
@@ -10711,6 +10728,8 @@ async function readOpenAICompatibleStream(response) {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let buffer = "";
   let content = "";
+  let finishReason = "";
+  let usage = null;
 
   const processLine = (rawLine) => {
     const line = rawLine.trim();
@@ -10737,6 +10756,8 @@ async function readOpenAICompatibleStream(response) {
     }
 
     const choice = parsed.choices?.[0] || {};
+    if (choice.finish_reason) finishReason = choice.finish_reason;
+    if (parsed.usage) usage = parsed.usage;
     content += choice.delta?.content
       || choice.message?.content
       || choice.text
@@ -10753,7 +10774,7 @@ async function readOpenAICompatibleStream(response) {
     buffer = lines.pop() || "";
     for (const line of lines) {
       if (processLine(line)) {
-        return content;
+        return { content, finishReason, usage };
       }
     }
   }
@@ -10764,7 +10785,7 @@ async function readOpenAICompatibleStream(response) {
       break;
     }
   }
-  return content;
+  return { content, finishReason, usage };
 }
 
 function getDeepSeekChatCompletionsUrl() {
@@ -11126,12 +11147,18 @@ async function getDailyReportLocalization(baseReport, language, { refresh = fals
     try {
       markdown = await callDeepSeek(buildEnglishDailyPrompt(baseRow, events), {
         systemPrompt: "You are an immigration policy daily brief editor. Use only the user's provided material. Do not invent policies, dates, fees, eligibility rules, impacts, or conclusions. Output polished professional English Markdown only.",
+        timeoutMs: dailyFinalTimeoutMs,
+        maxTokens: dailyFinalMaxTokens,
+        disableThinking: dailyThinkingDisabled,
       });
     } catch (error) {
       const firstError = error instanceof Error ? error.message : String(error);
       try {
         markdown = await callDeepSeek(buildEnglishDailyTranslationPrompt(baseRow), {
           systemPrompt: "You are a professional English editor translating immigration industry briefings. Preserve facts and links exactly. Output English Markdown only.",
+          timeoutMs: dailyFinalTimeoutMs,
+          maxTokens: dailyFinalMaxTokens,
+          disableThinking: dailyThinkingDisabled,
         });
         model = `${deepseekConfig.model}:translation-fallback`;
       } catch (translationError) {
@@ -15419,13 +15446,20 @@ ${articleMaterial || "暂无。"}
 
 async function generateDepartmentDailyMarkdown({ date, department, input }) {
   try {
-    const markdown = await callDeepSeek(buildDepartmentDailyPrompt({
-      date,
-      department,
-      sources: input.sources,
-      items: input.items,
-      publicMarkdown: input.report.contentMarkdown,
-    }));
+    const markdown = await callDeepSeek(
+      buildDepartmentDailyPrompt({
+        date,
+        department,
+        sources: input.sources,
+        items: input.items,
+        publicMarkdown: input.report.contentMarkdown,
+      }),
+      {
+        timeoutMs: dailyFinalTimeoutMs,
+        maxTokens: dailyFinalMaxTokens,
+        disableThinking: dailyThinkingDisabled,
+      },
+    );
     return {
       markdown,
       model: deepseekConfig.model,
