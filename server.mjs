@@ -38,6 +38,11 @@ import {
   renderPeerDailyReport,
   validatePeerDailyAggregate,
 } from "./lib/peer-daily-report.mjs";
+import {
+  applyArticleContentPolicy,
+  isGreekMigrationMinistrySource,
+  normalizeSourceMetadata,
+} from "./lib/article-content-policy.mjs";
 
 const rootDir = resolve(".");
 await loadEnv();
@@ -2080,6 +2085,7 @@ async function initDb() {
       await ensurePeerWebsiteSchema();
       await ensureReportDateUniqueness();
       await seedConfiguredSources();
+      await backfillArticleContentPolicies();
       await seedPeerMonitorData();
     })();
   }
@@ -5652,15 +5658,16 @@ async function startPeerContentBackfill({ competitorCode = "", limit, dryRun = f
 }
 
 async function upsertSource(source, { enabled = true } = {}) {
+  const normalizedSource = normalizeSourceMetadata(source);
   await mysqlExec(`
     INSERT INTO yimin_sources (name, url, country, category, priority, type, enabled)
     VALUES (
-      ${sqlString(source.name)},
-      ${sqlString(source.url)},
-      ${sqlString(source.country)},
-      ${sqlString(source.category || "政策")},
-      ${sqlNumber(source.priority, 70)},
-      ${sqlString(source.type || "rss")},
+      ${sqlString(normalizedSource.name)},
+      ${sqlString(normalizedSource.url)},
+      ${sqlString(normalizedSource.country)},
+      ${sqlString(normalizedSource.category || "政策")},
+      ${sqlNumber(normalizedSource.priority, 70)},
+      ${sqlString(normalizedSource.type || "rss")},
       ${enabled ? 1 : 0}
     )
     ON DUPLICATE KEY UPDATE
@@ -5676,11 +5683,114 @@ async function upsertSource(source, { enabled = true } = {}) {
   const row = await mysqlJson(`
     SELECT JSON_OBJECT('id', id)
     FROM yimin_sources
-    WHERE url = ${sqlString(source.url)}
+    WHERE url = ${sqlString(normalizedSource.url)}
     LIMIT 1;
   `);
 
   return row?.id;
+}
+
+async function backfillArticleContentPolicies() {
+  const sources = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'id', id,
+        'name', name,
+        'url', url,
+        'country', country,
+        'category', category,
+        'priority', priority,
+        'type', type
+      )
+    ), JSON_ARRAY())
+    FROM yimin_sources;
+  `)) || [];
+  const policySources = [];
+
+  for (const source of sources) {
+    if (!isGreekMigrationMinistrySource(source)) {
+      continue;
+    }
+    const normalized = normalizeSourceMetadata(source);
+    policySources.push(normalized);
+    if (normalized.name !== source.name || normalized.country !== source.country) {
+      await mysqlExec(`
+        UPDATE yimin_sources
+        SET name = ${sqlString(normalized.name)},
+            country = ${sqlString(normalized.country)},
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ${sqlNumber(normalized.id)};
+      `);
+    }
+  }
+
+  if (!policySources.length) {
+    return;
+  }
+
+  const sourceById = new Map(policySources.map((source) => [Number(source.id), source]));
+  const sourceIds = [...sourceById.keys()];
+  await mysqlExec(`
+    UPDATE yimin_articles
+    SET country = '希腊',
+        country_en = 'Greece',
+        updated_at = CURRENT_TIMESTAMP
+    WHERE source_id IN (${sourceIds.map(sqlNumber).join(",")})
+      AND (
+        country <> '希腊'
+        OR country_en IS NULL
+        OR country_en <> 'Greece'
+      );
+  `);
+
+  const articles = (await mysqlJson(`
+    SELECT COALESCE(JSON_ARRAYAGG(
+      JSON_OBJECT(
+        'id', id,
+        'sourceId', source_id,
+        'title', title,
+        'summary', COALESCE(summary, ''),
+        'url', COALESCE(url, ''),
+        'heat', heat,
+        'impact', impact,
+        'impactEn', COALESCE(impact_en, ''),
+        'dailyExcluded', daily_excluded,
+        'dailyExcludedReason', COALESCE(daily_excluded_reason, '')
+      )
+    ), JSON_ARRAY())
+    FROM yimin_articles
+    WHERE source_id IN (${sourceIds.map(sqlNumber).join(",")});
+  `)) || [];
+
+  const updates = articles
+    .map((article) => ({
+      article,
+      policy: applyArticleContentPolicy(article, sourceById.get(Number(article.sourceId))),
+    }))
+    .filter(({ article, policy }) => (
+      policy.dailyExcluded
+      && (
+        !Boolean(Number(article.dailyExcluded))
+        || article.dailyExcludedReason !== policy.dailyExcludedReason
+        || Number(article.heat) > 55
+        || article.impact !== "低影响"
+        || article.impactEn !== "Low Impact"
+      )
+    ));
+
+  for (let offset = 0; offset < updates.length; offset += 500) {
+    const chunk = updates.slice(offset, offset + 500);
+    await mysqlExec(`
+      UPDATE yimin_articles
+      SET daily_excluded = 1,
+          daily_excluded_reason = ${sqlString(chunk[0].policy.dailyExcludedReason)},
+          heat = LEAST(heat, 55),
+          impact = '低影响',
+          impact_en = 'Low Impact',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id IN (${chunk.map(({ article }) => sqlNumber(article.id)).join(",")});
+    `);
+  }
 }
 
 async function updateSourceFetchStatus(sourceId, error = null) {
@@ -5930,11 +6040,14 @@ async function listPendingArticleTranslations(limit = articleTranslationMaxPerRu
       FROM yimin_articles a
       JOIN yimin_sources s ON s.id = a.source_id
       LEFT JOIN yimin_article_translations t ON t.article_hash = a.dedupe_hash
-      WHERE t.article_hash IS NULL
-        OR t.translation_version <> ${sqlString(articleTranslationVersion)}
-        OR t.status <> 'translated'
-        OR NOT (t.source_title <=> a.title)
-        OR NOT (t.source_summary <=> COALESCE(a.summary, ''))
+      WHERE a.daily_excluded = 0
+        AND (
+          t.article_hash IS NULL
+          OR t.translation_version <> ${sqlString(articleTranslationVersion)}
+          OR t.status <> 'translated'
+          OR NOT (t.source_title <=> a.title)
+          OR NOT (t.source_summary <=> COALESCE(a.summary, ''))
+        )
       ORDER BY
         CASE WHEN t.article_hash IS NULL THEN 0 ELSE 1 END,
         COALESCE(a.published_at, a.fetched_at) DESC,
@@ -6147,7 +6260,8 @@ async function getArticleTranslationStatus() {
       'running', ${activeArticleTranslationPromise ? "CAST(TRUE AS JSON)" : "CAST(FALSE AS JSON)"}
     )
     FROM yimin_articles a
-    LEFT JOIN yimin_article_translations t ON t.article_hash = a.dedupe_hash;
+    LEFT JOIN yimin_article_translations t ON t.article_hash = a.dedupe_hash
+    WHERE a.daily_excluded = 0;
   `);
 
   return {
@@ -6188,6 +6302,7 @@ async function listPendingArticleRelevanceAnalyses(limit = articleRelevanceMaxPe
       LEFT JOIN yimin_article_daily_analysis ad
         ON ad.article_hash = a.dedupe_hash
        AND ad.analysis_version = ${sqlString(dailyAnalysisVersion)}
+      WHERE a.daily_excluded = 0
       ORDER BY
         CASE
           WHEN ad.article_hash IS NULL THEN 0
@@ -6294,7 +6409,8 @@ async function getArticleRelevanceStatus() {
     FROM yimin_articles a
     LEFT JOIN yimin_article_daily_analysis ad
       ON ad.article_hash = a.dedupe_hash
-     AND ad.analysis_version = ${sqlString(dailyAnalysisVersion)};
+     AND ad.analysis_version = ${sqlString(dailyAnalysisVersion)}
+    WHERE a.daily_excluded = 0;
   `);
 
   return {
@@ -6351,7 +6467,8 @@ async function listArticlesFromDb(limit = maxTotalItems) {
           ON t.article_hash = a.dedupe_hash
          AND t.translation_version = ${sqlString(articleTranslationVersion)}
          AND t.status = 'translated'
-        WHERE ${articleDisplayRelevanceWhere()}
+        WHERE a.daily_excluded = 0
+          AND ${articleDisplayRelevanceWhere()}
         ORDER BY a.heat DESC, COALESCE(a.published_at, a.fetched_at) DESC, a.id DESC
         LIMIT ${sqlNumber(limit, maxTotalItems)}
       ) ranked;
@@ -6372,6 +6489,7 @@ async function getTodayArticleStats() {
       FROM yimin_articles
       WHERE fetched_at >= CONCAT(${sqlString(today)}, ' 07:00:00') - INTERVAL 24 HOUR
         AND fetched_at < CONCAT(${sqlString(today)}, ' 07:00:00')
+        AND daily_excluded = 0
     `);
     const r = row || {};
     return {
@@ -6427,6 +6545,7 @@ async function listRecentArticlesFromDb(limit = Math.max(maxTotalItems * 2, 160)
           ON t.article_hash = a.dedupe_hash
          AND t.translation_version = ${sqlString(articleTranslationVersion)}
          AND t.status = 'translated'
+        WHERE a.daily_excluded = 0
         ORDER BY COALESCE(a.published_at, a.fetched_at) DESC, a.heat DESC, a.id DESC
         LIMIT ${sqlNumber(limit, Math.max(maxTotalItems * 2, 160))}
       ) ranked;
@@ -8234,7 +8353,7 @@ async function listEnabledSourcesForFetch() {
       ) enabled_sources;
     `)) || [];
 
-  return dbSources.map((source) => ({
+  return dbSources.map((source) => normalizeSourceMetadata({
     ...(fileSourceByUrl.get(source.url) || {}),
     ...source,
     enabled: Boolean(source.enabled),
@@ -9319,6 +9438,7 @@ function parseJson(jsonText, source) {
 }
 
 async function fetchSource(source) {
+  source = normalizeSourceMetadata(source);
   const sourceType = source.type || "rss";
   const sourceId = await upsertSource(source, { enabled: source.enabled !== false });
   const dailyBaselinePending = await isSourceDailyBaselinePending(sourceId);
@@ -9417,15 +9537,17 @@ async function fetchSource(source) {
     }
 
     for (const item of items) {
-      const hasPublishedAt = hasValidPublishedAt(item);
-      const dailyExcluded = !hasPublishedAt && (dailyBaselinePending || requirePublishedAtForDaily);
-      await upsertArticle(item, sourceId, {
+      const policy = applyArticleContentPolicy(item, source);
+      const hasPublishedAt = hasValidPublishedAt(policy.item);
+      const missingDateExcluded = !hasPublishedAt && (dailyBaselinePending || requirePublishedAtForDaily);
+      const dailyExcluded = policy.dailyExcluded || missingDateExcluded;
+      await upsertArticle(policy.item, sourceId, {
         dailyExcluded,
-        dailyExcludedReason: dailyExcluded
+        dailyExcludedReason: policy.dailyExcludedReason || (missingDateExcluded
           ? requirePublishedAtForDaily
             ? "source_requires_published_at"
             : "source_first_fetch_no_published_at"
-          : null,
+          : null),
       });
     }
     await updateSourceFetchStatus(sourceId, null);
