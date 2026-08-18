@@ -4663,21 +4663,25 @@ async function recordSsoVisitFromHash() {
 
 async function loadSsoIdentity() {
   if (window.location.protocol === "file:") return;
+  // Browser storage is only a display cache. Clear it before asking the server
+  // so a failed or anonymous identity check can never reuse another user.
+  state.ssoUserName = "";
+  state.ssoUserId = "";
+  state.ssoLocalTest = false;
+  sessionStorage.removeItem("yiminSsoUserName");
+  sessionStorage.removeItem("yiminSsoUserId");
   try {
     const response = await fetch("/api/sso/me", {
       headers: { accept: "application/json" },
     });
     const data = await response.json();
     if (!response.ok || !data.ok) return;
-    if (data.userName) {
-      state.ssoUserName = data.userName;
-      sessionStorage.setItem("yiminSsoUserName", data.userName);
-    }
-    if (data.userId) {
-      state.ssoUserId = data.userId;
-      state.ssoLocalTest = Boolean(data.localTest);
-      sessionStorage.setItem("yiminSsoUserId", data.userId);
-    }
+    if (!data.identified) return;
+    state.ssoUserName = String(data.userName || "");
+    state.ssoUserId = String(data.userId || "");
+    state.ssoLocalTest = Boolean(data.localTest);
+    sessionStorage.setItem("yiminSsoUserName", state.ssoUserName);
+    sessionStorage.setItem("yiminSsoUserId", state.ssoUserId);
   } catch {
     /* Identity recovery should not block page rendering. */
   }

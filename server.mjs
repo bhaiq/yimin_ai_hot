@@ -17106,9 +17106,13 @@ const server = createServer(async (req, res) => {
         });
 
         const targetUrl = buildPublicUrl(req, "/#daily");
+        // The WeChat Work webview and the device's default browser do not share
+        // cookies. Send the default browser through this token endpoint once so
+        // it receives the identity cookies for the person whose card was opened.
+        const identityHandoffUrl = buildPublicUrl(req, `/d/${token}?identity_handoff=1`);
         const ua = (req.headers["user-agent"] || "").toLowerCase();
 
-        if (ua.includes("wxwork")) {
+        if (ua.includes("wxwork") && url.searchParams.get("identity_handoff") !== "1") {
           const currentUrl = buildPublicUrl(req, `${url.pathname}${url.search}`);
           let jsConfig = null;
           let agentConfig = null;
@@ -17139,6 +17143,7 @@ const server = createServer(async (req, res) => {
           const agentTimestamp = agentConfig ? agentConfig.timestamp : "";
           const agentSignature = agentConfig ? agentConfig.signature : "";
           const targetUrlJson = JSON.stringify(targetUrl);
+          const identityHandoffUrlJson = JSON.stringify(identityHandoffUrl);
           const tokenJson = JSON.stringify(token);
           const currentUrlJson = JSON.stringify(currentUrl);
           const corpIdJson = JSON.stringify(corpId);
@@ -17163,6 +17168,8 @@ const server = createServer(async (req, res) => {
 
           res.writeHead(200, {
             "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            Vary: "User-Agent",
             ...(identityCookies.length ? { "set-cookie": identityCookies } : {}),
           });
           res.end(`<!DOCTYPE html>
@@ -17182,6 +17189,7 @@ ${debugMarkup}
 </div>
 <script>
 var targetUrl = ${targetUrlJson};
+var identityHandoffUrl = ${identityHandoffUrlJson};
 var token = ${tokenJson};
 var currentUrl = ${currentUrlJson};
 var openDebug = ${openDebugJson};
@@ -17216,7 +17224,7 @@ function tryOpenDefaultBrowser(source) {
   if (openedExternal || typeof wx === 'undefined') return;
   log('invoke start: ' + source);
   try {
-    wx.invoke('openDefaultBrowser', { url: targetUrl }, function(res) {
+    wx.invoke('openDefaultBrowser', { url: identityHandoffUrl }, function(res) {
       var msg = res && (res.err_msg || JSON.stringify(res));
       log('invoke result: ' + source + ' ' + msg);
       if (msg === 'openDefaultBrowser:ok') {
@@ -17232,7 +17240,7 @@ function tryOpenDefaultBrowser(source) {
   }
 }
 log('1. page loaded');
-log('2. sign=${signature ? "1" : "0"} agent=${agentSignature ? "1" : "0"} serverError=' + ${signatureErrorJson} + ' current=' + currentUrl + ' target=' + targetUrl + ' ua=' + navigator.userAgent);
+log('2. sign=${signature ? "1" : "0"} agent=${agentSignature ? "1" : "0"} serverError=' + ${signatureErrorJson} + ' current=' + currentUrl + ' target=' + targetUrl + ' handoff=' + identityHandoffUrl + ' ua=' + navigator.userAgent);
 setTimeout(function(){ go('timeout'); }, 1200);
 </script>
 <script src="https://res.wx.qq.com/open/js/jweixin-1.2.0.js"
@@ -17293,6 +17301,8 @@ try {
 
         res.writeHead(302, {
           Location: targetUrl,
+          "Cache-Control": "no-store, no-cache, must-revalidate",
+          Vary: "User-Agent",
           ...(identityCookies.length ? { "set-cookie": identityCookies } : {}),
         });
         res.end();
