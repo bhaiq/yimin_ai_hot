@@ -809,6 +809,11 @@ img {
   margin-top: 0;
 }
 
+.daily-report .daily-ai-notice {
+  margin-left: 0.5em;
+  font-weight: 400;
+}
+
 .daily-report p,
 .daily-report li {
   color: var(--muted);

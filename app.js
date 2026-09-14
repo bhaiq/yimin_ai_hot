@@ -1674,6 +1674,17 @@ function renderDaily() {
         ${historyHtml}
       </div>
     `;
+    // 按标题语言补充提示，让中英文历史日报也能显示，避免依赖 AI 生成固定声明。
+    dailyReport.querySelectorAll(".daily-perspective-panel h2, .daily-perspective-panel h3, .daily-perspective-panel h4").forEach((heading) => {
+      const title = heading.textContent.trim();
+      const isChinese = /^(?:[一二三四五六七八九十\d]+[、.．]\s*)?行动建议$/.test(title);
+      const isEnglish = /^(?:(?:\d+|[IVX]+)[.)、．]\s*)?Suggested Actions$/i.test(title);
+      if (!isChinese && !isEnglish) return;
+      const notice = document.createElement("span");
+      notice.className = "daily-ai-notice";
+      notice.textContent = isChinese ? "（AI生成，仅供参考）" : "(AI-generated, for reference only)";
+      heading.append(notice);
+    });
     linkifyPlainUrls(dailyReport.querySelector(".daily-perspective-panel"));
     return;
   }
