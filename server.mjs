@@ -40,6 +40,7 @@ import {
 } from "./lib/peer-daily-report.mjs";
 import {
   applyArticleContentPolicy,
+  getBusinessArticleExclusionReason,
   isGreekMigrationMinistrySource,
   normalizeSourceMetadata,
 } from "./lib/article-content-policy.mjs";
@@ -5724,72 +5725,89 @@ async function backfillArticleContentPolicies() {
     }
   }
 
-  if (!policySources.length) {
-    return;
-  }
-
-  const sourceById = new Map(policySources.map((source) => [Number(source.id), source]));
-  const sourceIds = [...sourceById.keys()];
-  await mysqlExec(`
-    UPDATE yimin_articles
-    SET country = '希腊',
-        country_en = 'Greece',
-        updated_at = CURRENT_TIMESTAMP
-    WHERE source_id IN (${sourceIds.map(sqlNumber).join(",")})
-      AND (
-        country <> '希腊'
-        OR country_en IS NULL
-        OR country_en <> 'Greece'
-      );
-  `);
-
-  const articles = (await mysqlJson(`
-    SELECT COALESCE(JSON_ARRAYAGG(
-      JSON_OBJECT(
-        'id', id,
-        'sourceId', source_id,
-        'title', title,
-        'summary', COALESCE(summary, ''),
-        'url', COALESCE(url, ''),
-        'heat', heat,
-        'impact', impact,
-        'impactEn', COALESCE(impact_en, ''),
-        'dailyExcluded', daily_excluded,
-        'dailyExcludedReason', COALESCE(daily_excluded_reason, '')
-      )
-    ), JSON_ARRAY())
-    FROM yimin_articles
-    WHERE source_id IN (${sourceIds.map(sqlNumber).join(",")});
-  `)) || [];
-
-  const updates = articles
-    .map((article) => ({
-      article,
-      policy: applyArticleContentPolicy(article, sourceById.get(Number(article.sourceId))),
-    }))
-    .filter(({ article, policy }) => (
-      policy.dailyExcluded
-      && (
-        !Boolean(Number(article.dailyExcluded))
-        || article.dailyExcludedReason !== policy.dailyExcludedReason
-        || Number(article.heat) > 55
-        || article.impact !== "低影响"
-        || article.impactEn !== "Low Impact"
-      )
-    ));
-
-  for (let offset = 0; offset < updates.length; offset += 500) {
-    const chunk = updates.slice(offset, offset + 500);
+  const sourceById = new Map(sources.map((source) => [Number(source.id), normalizeSourceMetadata(source)]));
+  const sourceIds = policySources.map((source) => Number(source.id));
+  if (sourceIds.length) {
     await mysqlExec(`
       UPDATE yimin_articles
-      SET daily_excluded = 1,
-          daily_excluded_reason = ${sqlString(chunk[0].policy.dailyExcludedReason)},
-          heat = LEAST(heat, 55),
-          impact = '低影响',
-          impact_en = 'Low Impact',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id IN (${chunk.map(({ article }) => sqlNumber(article.id)).join(",")});
+      SET country = '希腊', country_en = 'Greece', updated_at = CURRENT_TIMESTAMP
+      WHERE source_id IN (${sourceIds.map(sqlNumber).join(",")})
+        AND (country <> '希腊' OR country_en IS NULL OR country_en <> 'Greece');
     `);
+  }
+
+  // 排除标记与受影响的日报、英文版和市场素材缓存同步更新，原始文章保留。
+  // 全信源分页回填，避免旧的相关性缓存继续放行范围外文章，也避免一次加载全部历史记录。
+  let lastId = 0;
+  while (true) {
+    const articles = (await mysqlJson(`
+      SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
+        'id', id, 'sourceId', source_id, 'title', title,
+        'summary', COALESCE(summary, ''), 'url', COALESCE(url, ''),
+        'titleZh', title_zh, 'summaryZh', summary_zh,
+        'heat', heat, 'impact', impact, 'impactEn', COALESCE(impact_en, ''),
+        'dailyExcluded', daily_excluded,
+        'dailyExcludedReason', COALESCE(daily_excluded_reason, '')
+      )), JSON_ARRAY())
+      FROM (
+        SELECT a.*, t.title_zh, t.summary_zh
+        FROM yimin_articles a
+        LEFT JOIN yimin_article_translations t ON t.article_hash = a.dedupe_hash
+          AND t.status = 'translated'
+          AND t.translation_version = ${sqlString(articleTranslationVersion)}
+        WHERE a.id > ${sqlNumber(lastId)}
+        ORDER BY a.id
+        LIMIT 500
+      ) policy_page;
+    `)) || [];
+    if (!articles.length) break;
+    lastId = Math.max(...articles.map((article) => Number(article.id)));
+
+    const updatesByReason = new Map();
+    for (const article of articles) {
+      const policy = applyArticleContentPolicy(article, sourceById.get(Number(article.sourceId)));
+      if (!policy.dailyExcluded || (
+        Boolean(Number(article.dailyExcluded))
+        && article.dailyExcludedReason === policy.dailyExcludedReason
+        && Number(article.heat) <= 55
+        && article.impact === "低影响"
+        && article.impactEn === "Low Impact"
+      )) continue;
+      const ids = updatesByReason.get(policy.dailyExcludedReason) || [];
+      ids.push(Number(article.id));
+      updatesByReason.set(policy.dailyExcludedReason, ids);
+    }
+
+    for (const [reason, ids] of updatesByReason) {
+      await mysqlExec(`
+        START TRANSACTION;
+        UPDATE yimin_articles
+        SET daily_excluded = 1, daily_excluded_reason = ${sqlString(reason)},
+            heat = LEAST(heat, 55), impact = '低影响', impact_en = 'Low Impact',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id IN (${ids.map(sqlNumber).join(",")});
+        DELETE d FROM yimin_department_daily_reports d
+        JOIN yimin_department_source_subscriptions ds ON ds.department_id = d.department_id
+        JOIN yimin_articles a ON a.source_id = ds.source_id
+        LEFT JOIN yimin_daily_reports r ON r.report_date = d.report_date
+        WHERE a.id IN (${ids.map(sqlNumber).join(",")})
+          AND COALESCE(a.published_at, a.fetched_at) >= DATE_SUB(
+            COALESCE(r.window_end_at, DATE_ADD(d.report_date, INTERVAL 1 DAY)),
+            INTERVAL ${sqlNumber(dailyRecentLookbackHours)} HOUR
+          )
+          AND COALESCE(a.published_at, a.fetched_at) <
+            COALESCE(r.window_end_at, DATE_ADD(d.report_date, INTERVAL 1 DAY));
+        DELETE r FROM yimin_market_reports r
+        JOIN yimin_market_materials m ON m.report_id = r.id
+        JOIN yimin_articles a ON a.dedupe_hash = m.article_hash
+        WHERE a.id IN (${ids.map(sqlNumber).join(",")});
+        DELETE r FROM yimin_daily_reports r
+        JOIN yimin_daily_report_items i ON i.report_id = r.id
+        JOIN yimin_articles a ON a.dedupe_hash = i.article_hash
+        WHERE a.id IN (${ids.map(sqlNumber).join(",")});
+        COMMIT;
+      `);
+    }
   }
 }
 
@@ -10072,7 +10090,7 @@ function buildFallbackDailyAnalysis(item) {
   return {
     articleHash: item.id,
     contentHash: getDailyAnalysisContentHash(item),
-    relevant: true,
+    relevant: !getBusinessArticleExclusionReason(item),
     importance: clampDailyImportance(item.dailyScore, 50),
     canonicalTopic,
     summaryZh: truncate(item.summary || item.title, 500),
@@ -10116,7 +10134,8 @@ function buildDailyAnalysisPrompt(items) {
 {"id":"原 id","relevant":true,"importance":0-100,"canonicalTopic":"用于合并同一事件的简短中文主题，不含媒体名","summaryZh":"不超过120字的中文事实摘要","country":"国家或地区","category":"政策分类","impact":"高影响/中影响/低影响"}
 
 规则：
-- 只有对移民业务、客户申请、签证/居留/永居/入籍路径、项目政策、配额排期、审理规则、申请费用、雇主担保、工签/学签、投资移民、技术移民、难民庇护政策有实际参考价值时 relevant=true。
+- 只有对移民业务、客户申请、签证/居留/永居/入籍路径、项目政策、配额排期、审理规则、申请费用、雇主担保、工签/学签、投资移民、技术移民有实际参考价值时 relevant=true。
+- 难民、庇护、人道主义保护、宗教事务及宗教工作者签证不属于业务范围，相关主题必须 relevant=false；信源名称包含“庇护部”本身不构成排除依据。
 - 即使出现 immigration/immigrant/alien/border/CBP/ICE 等词，只要主要内容是刑事执法个案、酒驾或死亡事件、海关查扣、假冒商品、普通公共活动、健康日宣传、天气安排、食品安全、农业渔业、一般劳工关系或普通社会新闻，也必须 relevant=false。
 - 官方机构发布但与签证、身份、申请资格、审理流程、项目政策无关时 relevant=false。
 - 普通旅游、房产、娱乐、体育、一般商业或科技新闻且没有明确移民申请影响时 relevant=false。
@@ -10154,7 +10173,7 @@ async function analyzeDailyArticleBatch(items, { splitDepth = 0 } = {}) {
       if (!fallback) continue;
       fallbackById.set(fallback.articleHash, {
         ...fallback,
-        relevant: normalizeDailyRelevant(result.relevant, fallback.relevant),
+        relevant: fallback.relevant && normalizeDailyRelevant(result.relevant, fallback.relevant),
         importance: clampDailyImportance(result.importance, fallback.importance),
         canonicalTopic: truncate(result.canonicalTopic || fallback.canonicalTopic, 300),
         summaryZh: truncate(result.summaryZh || fallback.summaryZh, 600),
@@ -10289,7 +10308,7 @@ async function getDailyArticleAnalyses(items) {
     if (existing?.contentHash === contentHash && existing.model !== "rules") {
       analyses.set(item.id, {
         ...existing,
-        relevant: Boolean(Number(existing.relevant)),
+        relevant: !getBusinessArticleExclusionReason(item) && Boolean(Number(existing.relevant)),
         importance: clampDailyImportance(existing.importance),
       });
     } else {
@@ -10585,7 +10604,8 @@ async function buildDailyPrompt(date, context) {
 ${eventMaterial}
 
 内容相关性过滤：
-- 只保留与移民、签证、永久居留、国籍、边境/入境、工签/雇主担保、留学签证、投资移民、难民/庇护、移民机构政策、移民相关就业或教育合规直接相关的资讯。
+- 排除以难民、庇护、人道主义保护、宗教事务或宗教工作者签证为主题的资讯，它们不属于业务范围。
+- 只保留与移民、签证、永久居留、国籍、边境/入境、工签/雇主担保、留学签证、投资移民、移民机构政策、移民相关就业或教育合规直接相关的资讯。
 - 如果某条资讯明显只是宏观政治、普通旅游、城市生活、房产、商业新闻、体育娱乐、科技产品、灾害事故等，且标题和摘要都看不出与移民客户、移民项目或签证政策有关，必须剔除，不得出现在任何章节。
 - “职业机会/就业机会/招聘/岗位列表/职位发布/Career Opportunities/Job Opportunities/Job Posting”等招聘或求职信息不得进入日报；只有当内容明确涉及工签、雇主担保、短缺职业配额、移民就业合规等政策变化时才可保留。
 - 无法确认是否相关、或可能间接影响移民客户/项目判断的资讯，可以保留。
@@ -11149,7 +11169,8 @@ Consistency rules:
 - Use grouped event material only to preserve original links, country/category context, and section labels. Do not use it to introduce a separate English editorial selection.
 
 Content relevance rules, identical to the Chinese daily:
-- Keep only updates directly relevant to immigration, visas, permanent residence, nationality, border/entry, work permits/employer sponsorship, study visas, investment immigration, asylum/refugee policy, immigration agency policy, immigration-related employment compliance, or immigration-related education compliance.
+- Exclude updates about refugees, asylum, humanitarian protection, religious affairs, or religious-worker visas as outside the business scope.
+- Keep only updates directly relevant to immigration, visas, permanent residence, nationality, border/entry, work permits/employer sponsorship, study visas, investment immigration, immigration agency policy, immigration-related employment compliance, or immigration-related education compliance.
 - Exclude general politics, ordinary tourism, city life, real estate, general business, sports/entertainment, technology products, disasters/incidents, and other non-immigration content when the title and summary do not show a clear immigration client, program, or visa-policy impact.
 - Exclude career opportunity, job opportunity, recruitment, job listing, and job posting content unless the item itself announces a work visa, employer sponsorship, shortage occupation quota, or immigration employment-compliance policy change.
 - Use only material within the reporting window represented by the Chinese public daily.
@@ -15448,6 +15469,7 @@ async function getMyDailySupplement(identity, date = getShanghaiDate()) {
       LEFT JOIN yimin_article_daily_analysis ad ON ad.article_hash = i.article_hash
       WHERE r.report_date = ${sqlString(date)}
         AND i.relevant = 1
+        AND a.daily_excluded = 0
         AND s.enabled = 1
         AND a.source_id IN (${effectiveSourceIds.map(sqlNumber).join(",")})
       ORDER BY i.importance DESC, i.article_date DESC, i.id DESC
